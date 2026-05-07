@@ -8,10 +8,34 @@
 #pragma once
 
 /* --------------------------------------------------------------------------
- * Wi-Fi credentials (WPA2/WPA3-Personal)
+ * Wi-Fi — choose ONE of the two blocks below.
  * -------------------------------------------------------------------------- */
+
+/* ── Option A: WPA2/WPA3-Personal (PSK) ─────────────────────────────────── */
 #define WIFI_SSID   "your-ssid-here"
 #define WIFI_PASS   "your-password-here"
+
+/* ── Option B: WPA2/WPA3-Enterprise (EAP-TLS) ───────────────────────────── *
+ * Uncomment WIFI_USE_ENTERPRISE and fill in the fields below.
+ * Then place your real certificates in main/certs/ (see main/certs/README.md).
+ * The password field (WIFI_PASS) is ignored when enterprise mode is active.
+ *
+ * Outer/anonymous identity sent in Phase 1 (before TLS tunnel is up).
+ * Many RADIUS servers require this to be  anonymous@<realm>  for privacy.
+ * If your server accepts the cert CN directly, use that instead.
+
+#define WIFI_USE_ENTERPRISE
+#define WIFI_SSID           "your-enterprise-ssid"
+#define WIFI_PASS           ""          // unused in enterprise mode; keep defined
+#define EAP_IDENTITY        "anonymous@example.org"
+
+ * Optional: set EAP_DISABLE_TIME_CHECK to 1 if the device has no SNTP/RTC
+ * and cert expiry validation is failing at boot.
+ * WARNING: this removes a security check; enable SNTP in production instead.
+
+#define EAP_DISABLE_TIME_CHECK  1
+
+ * ─────────────────────────────────────────────────────────────────────────── */
 
 /* --------------------------------------------------------------------------
  * SSH server

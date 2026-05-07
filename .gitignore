@@ -1,6 +1,13 @@
 # User credentials — never commit
 main/config.h
 
+# EAP-TLS certificates — real certs are gitignored; only .example files are tracked
+main/certs/*.pem
+main/certs/*.crt
+main/certs/*.key
+!main/certs/*.example
+!main/certs/README.md
+
 # PlatformIO build artifacts
 .pio/
 

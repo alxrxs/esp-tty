@@ -64,3 +64,16 @@ CONFIG_FREERTOS_HZ=1000
 # ── Networking (LwIP) ─────────────────────────────────────────────────────
 CONFIG_LWIP_SO_REUSE=y
 CONFIG_LWIP_SO_REUSE_RXTOALL=y
+
+# ── WPA2/WPA3-Enterprise (EAP-TLS) ────────────────────────────────────────
+# CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT defaults to y — no override needed.
+# Uncomment below only if you need non-default enterprise options.
+#
+# Use MbedTLS for the TLS layer inside EAP (default y; disable for EAP-FAST):
+# CONFIG_ESP_WIFI_MBEDTLS_TLS_CLIENT=y
+#
+# Enable EAP-TLS v1.3 (experimental; requires IDF_EXPERIMENTAL_FEATURES):
+# CONFIG_ESP_WIFI_EAP_TLS1_3=n
+#
+# Enable WPA3-Enterprise 192-bit Suite-B (needs SOC_WIFI_GCMP_SUPPORT):
+# CONFIG_ESP_WIFI_SUITE_B_192=n

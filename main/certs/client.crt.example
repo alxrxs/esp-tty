@@ -1,0 +1,5 @@
+-----BEGIN CERTIFICATE-----
+< Replace this block with your client certificate in PEM format. >
+< This cert is issued by the CA above and identifies this device. >
+< The CN in this cert becomes the inner identity on the RADIUS server. >
+-----END CERTIFICATE-----
