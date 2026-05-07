@@ -362,6 +362,13 @@ esp_err_t ssh_server_start(ring_t *usb_to_ssh, ring_t *ssh_to_usb)
 
     wolfSSH_SetUserAuth(s_ctx, user_auth_callback);
 
+    /* Pin cipher negotiation to AES-256-GCM only.
+     * wolfSSH's default cannedEncAlgoNames includes aes192-gcm@openssh.com
+     * alongside aes256-gcm and aes128-gcm; NO_AES_192 (in user_settings.h)
+     * prevents the 192-bit key path from being compiled, but we also
+     * advertise only what we want: one cipher, one key size. */
+    wolfSSH_CTX_SetAlgoListCipher(s_ctx, "aes256-gcm@openssh.com");
+
     esp_err_t err = host_key_load_or_generate(s_ctx);
     if (err != ESP_OK) return err;
 

@@ -49,6 +49,16 @@
 /* Disable AES-CBC — wolfSSH internal.h auto-sets WOLFSSH_NO_AES_CBC when
  * HAVE_AES_CBC is absent; we declare it explicitly for clarity. */
 #define WOLFSSH_NO_AES_CBC
+/* Disable AES-192 entirely at the wolfSSL level.
+ * Without WOLFSSL_AES_COUNTER defined (we don't need CTR mode), wolfSSH's
+ * internal.h already auto-sets WOLFSSH_NO_AES_CTR, removing aes192-ctr and
+ * aes256-ctr from cipher negotiation.  NO_AES_192 additionally prevents
+ * WOLFSSL_AES_192 from being set in settings.h, stripping any AES-192 key
+ * scheduling code from wolfSSL and making aes192-gcm@openssh.com unusable
+ * even if a client somehow selects it.  The runtime cipher list is further
+ * pinned to "aes256-gcm@openssh.com" only via wolfSSH_CTX_SetAlgoListCipher
+ * in ssh_server.c. */
+#define NO_AES_192
 
 /* ── ESP32 hardware acceleration ────────────────────────────────── */
 /*
@@ -65,10 +75,11 @@
  *   - SHA-256 / SHA-384 / SHA-512  (ESP32-S3 SHA peripheral)
  *   - AES-128-GCM / AES-256-GCM    (ESP32-S3 AES peripheral)
  *
- * AES-192 is NOT accelerated: the ESP32-S3 AES peripheral only supports
- * 128-bit and 256-bit keys (silicon limitation, wolfSSL GitHub #6375).
- * wolfSSL falls back to SW for any 192-bit AES operation.
- * This does not affect SSH (which negotiates AES-256-GCM).
+ * AES-192 is NOT compiled (NO_AES_192 above) and NOT offered in SSH cipher
+ * negotiation.  The ESP32-S3 AES peripheral only supports 128-bit and 256-bit
+ * keys anyway (silicon limitation, wolfSSL GitHub #6375).
+ * NO_WOLFSSL_ESP32_CRYPT_AES_192 below is now redundant (no AES-192 code is
+ * compiled at all) but kept to guard against any future partial re-enablement.
  *
  * OTA operations (mbedTLS) continue to use HW via CONFIG_MBEDTLS_HARDWARE_AES/SHA.
  */

@@ -37,16 +37,28 @@ CONFIG_TINYUSB_DEBUG_LEVEL=0
 CONFIG_ESP_CONSOLE_UART_DEFAULT=y
 
 # ── NVS ───────────────────────────────────────────────────────────────────
-# AES-XTS-256 NVS encryption using the flash-enc key-partition scheme.
-# The key is generated at first boot and stored in the nvs_keys partition.
-# No eFuses are burned.  A full flash dump still exposes the key because
-# download mode is enabled; flash encryption (burns eFuses) would close
-# that gap.  To upgrade later:
-#   Option A (HMAC, no flash enc, one eFuse key block):
-#     CONFIG_NVS_SEC_KEY_PROTECTION_SCHEME_HMAC_BASED=y
+# AES-XTS-256 NVS encryption is ACTIVE at runtime via nvs_flash_secure_init_
+# partition() in main.c (the v1 NVS security API).  Keys are generated at
+# first boot and stored in the nvs_keys partition.  No eFuses are burned.
+#
+# We do NOT set CONFIG_NVS_ENCRYPTION here.  That Kconfig flag depends on
+# SECURE_FLASH_ENC_ENABLED || SOC_HMAC_SUPPORTED; on ESP32-S3 HMAC is
+# supported (SOC_HMAC_SUPPORTED=y), so the option is visible, but its default
+# key-protection scheme (NVS_SEC_KEY_PROTECT_USING_HMAC) requires burning an
+# HMAC key into eFuse — which we don't do.  NVS_SEC_KEY_PROTECT_NONE would
+# be the right Kconfig choice, but the Kconfig flag only controls the
+# nvs_flash_init() code-path (the "v2 scheme provider" API).  Our runtime
+# code uses the lower-level v1 API directly and does not call nvs_flash_init(),
+# so CONFIG_NVS_ENCRYPTION does not affect us either way.
+#
+# The generated sdkconfig.{esp32s3,wokwi} correctly show
+# "# CONFIG_NVS_ENCRYPTION is not set" — that is consistent with this file.
+#
+# To upgrade later (would still require the custom runtime init):
+#   Option A (HMAC, one eFuse key block):
+#     CONFIG_NVS_SEC_KEY_PROTECT_USING_HMAC=y  (burns one eFuse block)
 #   Option B (full flash encryption, burns eFuses):
 #     enable CONFIG_FLASH_ENCRYPTION_ENABLED
-CONFIG_NVS_ENCRYPTION=y
 
 # ── C library ────────────────────────────────────────────────────────────
 # wolfSSL/wolfSSH were built against newlib. ESP-IDF 6.0 defaults to picolibc
