@@ -1,0 +1,23 @@
+# User credentials — never commit
+main/config.h
+
+# PlatformIO build artifacts
+.pio/
+
+# Generated sdkconfig (committed: sdkconfig.defaults only)
+sdkconfig
+sdkconfig.*
+!sdkconfig.defaults
+
+# ESP-IDF managed components cache
+managed_components/
+dependencies.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS
+.DS_Store

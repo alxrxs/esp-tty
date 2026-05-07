@@ -1,0 +1,66 @@
+# sdkconfig.defaults — intentional overrides for esp-tty (ESP32-S3-N16R8)
+# Committed; the generated sdkconfig.<env> is gitignored.
+
+# ── PSRAM (8 MB Octal) ────────────────────────────────────────────────────
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+# FETCH_INSTRUCTIONS and RODATA move code/data to PSRAM which breaks call8 range
+# in many ESP-IDF components. Allocate PSRAM explicitly with heap_caps_malloc instead.
+CONFIG_SPIRAM_FETCH_INSTRUCTIONS=n
+CONFIG_SPIRAM_RODATA=n
+# Do NOT set CONFIG_SPIRAM_USE_MALLOC — we allocate PSRAM explicitly via
+# xStreamBufferCreateWithCaps / heap_caps_malloc to avoid surprising spills.
+
+# ── Flash (16 MB, QIO) ────────────────────────────────────────────────────
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+
+# ── TinyUSB CDC ACM ───────────────────────────────────────────────────────
+CONFIG_TINYUSB_CDC_ENABLED=y
+CONFIG_TINYUSB_CDC_COUNT=1
+CONFIG_TINYUSB_CDC_RX_BUFSIZE=512
+CONFIG_TINYUSB_CDC_TX_BUFSIZE=512
+CONFIG_TINYUSB_CDC_EP_BUFSIZE=512
+
+# USB descriptor strings — "NanoConsole" is what Linux shows in lsusb
+CONFIG_TINYUSB_DESC_USE_ESPRESSIF_VID=y
+CONFIG_TINYUSB_DESC_USE_DEFAULT_PID=y
+CONFIG_TINYUSB_DESC_MANUFACTURER_STRING="Espressif Systems"
+CONFIG_TINYUSB_DESC_PRODUCT_STRING="NanoConsole"
+CONFIG_TINYUSB_DESC_SERIAL_STRING="NC-001"
+CONFIG_TINYUSB_DESC_CDC_STRING="NanoConsole CDC"
+CONFIG_TINYUSB_DEBUG_LEVEL=0
+
+# Console must stay on UART — incompatible with TinyUSB CDC
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+
+# ── NVS ───────────────────────────────────────────────────────────────────
+# AES-XTS-256 NVS encryption using the flash-enc key-partition scheme.
+# The key is generated at first boot and stored in the nvs_keys partition.
+# No eFuses are burned.  A full flash dump still exposes the key because
+# download mode is enabled; flash encryption (burns eFuses) would close
+# that gap.  To upgrade later:
+#   Option A (HMAC, no flash enc, one eFuse key block):
+#     CONFIG_NVS_SEC_KEY_PROTECTION_SCHEME_HMAC_BASED=y
+#   Option B (full flash encryption, burns eFuses):
+#     enable CONFIG_FLASH_ENCRYPTION_ENABLED
+CONFIG_NVS_ENCRYPTION=y
+
+# ── C library ────────────────────────────────────────────────────────────
+# wolfSSL/wolfSSH were built against newlib. ESP-IDF 6.0 defaults to picolibc
+# but its compatibility shims don't expose newlib's _mbstate_t and friends.
+# Force newlib so the toolchain stdlib.h works unmodified.
+CONFIG_LIBC_NEWLIB=y
+
+# ── Logging ───────────────────────────────────────────────────────────────
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# ── FreeRTOS ──────────────────────────────────────────────────────────────
+# Tick rate: 1000 Hz gives 1ms resolution for pdMS_TO_TICKS in pump loops.
+CONFIG_FREERTOS_HZ=1000
+
+# ── Networking (LwIP) ─────────────────────────────────────────────────────
+CONFIG_LWIP_SO_REUSE=y
+CONFIG_LWIP_SO_REUSE_RXTOALL=y

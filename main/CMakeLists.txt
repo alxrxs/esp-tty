@@ -1,0 +1,19 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "wifi.c"
+        "usb_cdc.c"
+        "${CMAKE_CURRENT_LIST_DIR}/../lib/ring/ring.c"
+        "${CMAKE_CURRENT_LIST_DIR}/../lib/bridge/bridge.c"
+        "ssh_server.c"
+        "host_key.c"
+        "${CMAKE_CURRENT_LIST_DIR}/../lib/pubkey_auth/pubkey_auth.c"
+    INCLUDE_DIRS
+        "."
+        "${CMAKE_CURRENT_LIST_DIR}/../lib/ring"
+        "${CMAKE_CURRENT_LIST_DIR}/../lib/bridge"
+        "${CMAKE_CURRENT_LIST_DIR}/../lib/pubkey_auth"
+    REQUIRES
+        wolfssl
+        wolfssl__wolfssh
+)
