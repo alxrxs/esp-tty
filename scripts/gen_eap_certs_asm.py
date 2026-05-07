@@ -23,7 +23,9 @@ import subprocess
 
 Import("env")
 
-CERT_DIR = os.path.join(env.subst("$PROJECT_DIR"), "main", "certs")
+PROJECT_DIR = env.subst("$PROJECT_DIR")
+CERT_DIR = os.path.join(PROJECT_DIR, "main", "certs")
+OTA_KEY_DIR = os.path.join(PROJECT_DIR, "ota_keys")
 BUILD_DIR = env.subst("$BUILD_DIR")
 IDF_PATH = env.PioPlatform().get_package_dir("framework-espidf")
 CMAKE_BIN = os.path.join(
@@ -34,35 +36,46 @@ EMBED_SCRIPT = os.path.join(
 )
 
 CERT_FILES = [
-    ("ca.pem",     "ca.pem.S"),
-    ("client.crt", "client.crt.S"),
-    ("client.key", "client.key.S"),
+    ("ca.pem",     "ca.pem.S",     "TEXT"),
+    ("client.crt", "client.crt.S", "TEXT"),
+    ("client.key", "client.key.S", "TEXT"),
+]
+
+# OTA signing keys embedded via EMBED_TXTFILES / EMBED_FILES.
+# sign.pub.pem → TEXT (NUL-appended); aes.key → BINARY (raw bytes).
+OTA_KEY_FILES = [
+    ("sign.pub.pem", "sign.pub.pem.S", "TEXT"),
+    ("aes.key",      "aes.key.S",      "BINARY"),
 ]
 
 
 def _all_certs_present():
     return all(
         os.path.isfile(os.path.join(CERT_DIR, name))
-        for name, _ in CERT_FILES
+        for name, _, _ in CERT_FILES
     )
 
 
-def _generate_cert_asm():
+def _ota_keys_present():
+    return all(
+        os.path.isfile(os.path.join(OTA_KEY_DIR, name))
+        for name, _, _ in OTA_KEY_FILES
+    )
+
+
+def _generate_asm_for_files(file_list, src_dir):
     """
-    Run data_file_embed_asm.cmake for each cert file that is missing its .S.
+    Run data_file_embed_asm.cmake for each file that is missing its .S.
     Called at script-eval time so the .S files exist before SCons builds the
     compilation graph.
     """
-    if not _all_certs_present():
-        return  # Not an enterprise build; nothing to do.
-
     os.makedirs(BUILD_DIR, exist_ok=True)
 
-    for cert_name, asm_name in CERT_FILES:
-        data_file = os.path.join(CERT_DIR, cert_name)
+    for data_name, asm_name, file_type in file_list:
+        data_file = os.path.join(src_dir, data_name)
         source_file = os.path.join(BUILD_DIR, asm_name)
 
-        # Regenerate if missing or stale (cert newer than .S).
+        # Regenerate if missing or stale.
         if (
             os.path.isfile(source_file)
             and os.path.getmtime(source_file) >= os.path.getmtime(data_file)
@@ -74,7 +87,7 @@ def _generate_cert_asm():
             CMAKE_BIN,
             "-DDATA_FILE=" + data_file,
             "-DSOURCE_FILE=" + source_file,
-            "-DFILE_TYPE=TEXT",
+            "-DFILE_TYPE=" + file_type,
             "-P",
             EMBED_SCRIPT,
         ]
@@ -86,6 +99,14 @@ def _generate_cert_asm():
                 % (asm_name, ret)
             )
             env.Exit(1)
+
+
+def _generate_cert_asm():
+    if _all_certs_present():
+        _generate_asm_for_files(CERT_FILES, CERT_DIR)
+
+    if _ota_keys_present():
+        _generate_asm_for_files(OTA_KEY_FILES, OTA_KEY_DIR)
 
 
 # Run immediately at script-evaluation time — before SCons reads sources.

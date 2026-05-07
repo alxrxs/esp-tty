@@ -46,3 +46,11 @@
  *   "ssh-ed25519 AAAA... user@host"
  * Only ED25519 keys are supported (wolfSSH pubkey auth). */
 #define AUTHORIZED_PUBKEY  "ssh-ed25519 AAAA..."
+
+/* OTA update authorised public key — used when the SSH username is "ota".
+ * Can be the same as AUTHORIZED_PUBKEY or a separate deployment key.
+ * Only ED25519 keys are supported.
+ *
+ * Usage: ssh -i <ota-key> -p 2222 ota@<device-ip> < firmware.bin.ota
+ */
+#define OTA_AUTHORIZED_PUBKEY  "ssh-ed25519 AAAA..."

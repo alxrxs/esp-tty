@@ -63,6 +63,11 @@ def build_firmware():
 
 def merge_flash(flash_img=FLASH_IMG):
     print(f"[test_qemu_boot] Merging flash image → {flash_img} …")
+    # Offsets must match partitions.csv:
+    #   bootloader  0x0000
+    #   partitions  0x8000
+    #   otadata     0x10000  (2 KB OTA data — marks ota_0 as active)
+    #   ota_0       0x20000  (firmware binary)
     subprocess.run(
         [
             sys.executable, ESPTOOL,
@@ -74,7 +79,8 @@ def merge_flash(flash_img=FLASH_IMG):
             "-o", flash_img,
             "0x0000",  os.path.join(PIO_BUILD, "bootloader.bin"),
             "0x8000",  os.path.join(PIO_BUILD, "partitions.bin"),
-            "0x10000", os.path.join(PIO_BUILD, "firmware.bin"),
+            "0x10000", os.path.join(PIO_BUILD, "ota_data_initial.bin"),
+            "0x20000", os.path.join(PIO_BUILD, "firmware.bin"),
         ],
         cwd=PROJECT_DIR,
         check=True,

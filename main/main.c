@@ -4,7 +4,12 @@
 
 #include "esp_log.h"
 #include "esp_partition.h"
+#include "esp_ota_ops.h"
 #include "nvs_flash.h"
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/timers.h"
 
 #include "ring.h"
 #include "wifi.h"
@@ -16,6 +21,29 @@ static const char *TAG = "main";
 /* 16 KB ring buffers allocated in PSRAM (8 MB available on N16R8).
    Both allocated here so app_main owns their lifetimes. */
 #define RING_SIZE (16 * 1024)
+
+/* ── Rollback self-test ───────────────────────────────────────────────────
+ * After CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y, newly booted firmware is
+ * in ESP_OTA_IMG_PENDING_VERIFY state.  If the app crashes or WDT fires
+ * before marking valid, the bootloader rolls back to the previous image.
+ *
+ * We mark valid after ~30 seconds of successful SSH server operation.
+ * The one-shot timer fires from a FreeRTOS timer task (not app_main).
+ */
+#define ROLLBACK_DELAY_MS 30000
+
+static void rollback_timer_cb(TimerHandle_t xTimer)
+{
+    (void)xTimer;
+    esp_ota_img_states_t state;
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    if (esp_ota_get_state_partition(running, &state) == ESP_OK &&
+        state == ESP_OTA_IMG_PENDING_VERIFY) {
+        ESP_LOGI("main", "Marking OTA image valid (rollback cancelled)");
+        esp_ota_mark_app_valid_cancel_rollback();
+    }
+    /* If not PENDING_VERIFY (factory or already valid), this is a no-op */
+}
 
 void app_main(void)
 {
@@ -93,6 +121,22 @@ void app_main(void)
        The assignment above ensures Wi-Fi start() has been called even
        if IP acquisition failed. */
     ESP_ERROR_CHECK(ssh_server_start(usb_to_ssh, ssh_to_usb));
+
+    /* ── 6. Rollback self-test timer ────────────────────────────────────── */
+    /* One-shot 30-second timer: if the SSH server is still running by then,
+       we consider the image valid and cancel pending rollback. */
+    TimerHandle_t rollback_timer = xTimerCreate(
+        "rollback", pdMS_TO_TICKS(ROLLBACK_DELAY_MS),
+        pdFALSE,    /* one-shot */
+        NULL,
+        rollback_timer_cb);
+    if (rollback_timer) {
+        xTimerStart(rollback_timer, 0);
+        ESP_LOGI(TAG, "Rollback timer started (%d ms)", ROLLBACK_DELAY_MS);
+    } else {
+        ESP_LOGW(TAG, "Failed to create rollback timer — calling mark_valid now");
+        esp_ota_mark_app_valid_cancel_rollback();
+    }
 
     ESP_LOGI(TAG, "All tasks running — device ready");
 }

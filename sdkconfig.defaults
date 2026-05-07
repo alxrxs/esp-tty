@@ -77,3 +77,20 @@ CONFIG_LWIP_SO_REUSE_RXTOALL=y
 #
 # Enable WPA3-Enterprise 192-bit Suite-B (needs SOC_WIFI_GCMP_SUPPORT):
 # CONFIG_ESP_WIFI_SUITE_B_192=n
+
+# ── mbedTLS hardware acceleration (ESP32-S3) ──────────────────────────────
+# AES: HW AES engine on S3. Used for OTA decrypt (AES-256-GCM via mbedtls_gcm_*).
+CONFIG_MBEDTLS_HARDWARE_AES=y
+# SHA: HW SHA engine on S3. Used for OTA signature hash (SHA-256).
+CONFIG_MBEDTLS_HARDWARE_SHA=y
+# MPI: HW RSA accelerator on S3 (big-number multiply). Speeds up ECDSA verify.
+CONFIG_MBEDTLS_HARDWARE_MPI=y
+# NOTE: Do NOT enable MBEDTLS_HARDWARE_GCM — S3 has no dedicated GCM engine.
+# NOTE: Do NOT enable MBEDTLS_HARDWARE_ECC — not present on S3.
+
+# ── OTA / bootloader ──────────────────────────────────────────────────────
+# Rollback enable: new OTA image boots in PENDING_VERIFY state.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+# Bootloader HW watchdog: fires if firmware never marks itself valid.
+CONFIG_BOOTLOADER_WDT_ENABLE=y
+CONFIG_BOOTLOADER_WDT_TIME_MS=9000

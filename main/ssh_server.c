@@ -13,7 +13,8 @@
 #include "host_key.h"
 #include "pubkey_auth.h"
 #include "bridge.h"
-#include "config.h"   /* SSH_PORT, AUTHORIZED_PUBKEY */
+#include "ota_session.h"
+#include "config.h"   /* SSH_PORT, AUTHORIZED_PUBKEY, OTA_AUTHORIZED_PUBKEY */
 
 #include <string.h>
 #include <sys/socket.h>
@@ -49,6 +50,11 @@ static volatile bool s_pump_stop   = false;
 static uint8_t s_authkey_hash[PUBKEY_HASH_SIZE];
 static bool    s_authkey_hash_ready = false;
 
+/* Precomputed SHA-256 of the OTA authorized public key blob.
+   Populated at startup from OTA_AUTHORIZED_PUBKEY in config.h. */
+static uint8_t s_ota_authkey_hash[PUBKEY_HASH_SIZE];
+static bool    s_ota_authkey_hash_ready = false;
+
 /* ------------------------------------------------------------------ */
 /* wolfSSH user auth callback                                          */
 /* ------------------------------------------------------------------ */
@@ -64,16 +70,32 @@ static int user_auth_callback(byte authType, WS_UserAuthData *authData,
     if (!s_authkey_hash_ready)
         return WOLFSSH_USERAUTH_FAILURE;
 
+    /* Determine which key hash to check based on the username */
+    const uint8_t *expected_hash = s_authkey_hash;
+    bool is_ota_user = false;
+
+    if (authData->username && authData->usernameSz >= 3 &&
+        strncmp((const char *)authData->username, "ota", authData->usernameSz) == 0) {
+        if (!s_ota_authkey_hash_ready) {
+            ESP_LOGW(TAG, "OTA auth attempted but OTA key not configured");
+            return WOLFSSH_USERAUTH_FAILURE;
+        }
+        expected_hash = s_ota_authkey_hash;
+        is_ota_user   = true;
+    }
+
     pubkey_auth_result_t res = pubkey_auth_check(
         authData->sf.publicKey.publicKey,
         authData->sf.publicKey.publicKeySz,
-        s_authkey_hash);
+        expected_hash);
 
     if (res != PUBKEY_AUTH_OK) {
-        ESP_LOGW(TAG, "Auth rejected: unknown public key");
+        ESP_LOGW(TAG, "Auth rejected: unknown public key (user=%.*s)",
+                 (int)authData->usernameSz, (const char *)authData->username);
         return WOLFSSH_USERAUTH_INVALID_PUBLICKEY;
     }
 
+    (void)is_ota_user;  /* used by session routing after accept */
     return WOLFSSH_USERAUTH_SUCCESS;
 }
 
@@ -251,6 +273,23 @@ static void ssh_server_task(void *arg)
         struct timeval tv_off = { 0 };
         setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv_off, sizeof(tv_off));
 
+        /* Check if this is an OTA session (username == "ota") */
+        char username_buf[16] = {0};
+        const char *uname = wolfSSH_GetUsername(ssh);
+        if (uname) strncpy(username_buf, uname, sizeof(username_buf) - 1);
+
+        if (strcmp(username_buf, "ota") == 0) {
+            ESP_LOGI(TAG, "OTA session — routing to ota_session_handler");
+            xSemaphoreGive(s_session_mutex);
+            /* ota_session_handler owns the SSH session and may reboot */
+            ota_session_handler(ssh);
+            /* If we get here, OTA failed — clean up */
+            xSemaphoreTake(s_session_mutex, portMAX_DELAY);
+            teardown_active_session();
+            xSemaphoreGive(s_session_mutex);
+            continue;
+        }
+
         /* Launch bridge pump tasks */
         pump_arg_t *a2b = malloc(sizeof(*a2b));
         pump_arg_t *b2a = malloc(sizeof(*b2a));
@@ -296,6 +335,18 @@ esp_err_t ssh_server_start(ring_t *usb_to_ssh, ring_t *ssh_to_usb)
         return ESP_ERR_INVALID_ARG;
     }
     s_authkey_hash_ready = true;
+
+    /* Precompute OTA authorized key hash (optional — OTA disabled if not configured) */
+#ifdef OTA_AUTHORIZED_PUBKEY
+    if (pubkey_compute_hash(OTA_AUTHORIZED_PUBKEY, s_ota_authkey_hash)) {
+        s_ota_authkey_hash_ready = true;
+        ESP_LOGI(TAG, "OTA pubkey auth configured");
+    } else {
+        ESP_LOGW(TAG, "OTA_AUTHORIZED_PUBKEY in config.h is invalid — OTA disabled");
+    }
+#else
+    ESP_LOGW(TAG, "OTA_AUTHORIZED_PUBKEY not defined in config.h — OTA disabled");
+#endif
 
     /* wolfSSH init */
     if (wolfSSH_Init() != WS_SUCCESS) {
