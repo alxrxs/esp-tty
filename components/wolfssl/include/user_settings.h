@@ -50,13 +50,26 @@
  * HAVE_AES_CBC is absent; we declare it explicitly for clarity. */
 #define WOLFSSH_NO_AES_CBC
 
-/* ── ESP32 hardware acceleration ───────────────────────────────── */
-/* Disable ESP32 HW crypto — esp32_aes.c / esp32_sha.c use classic ESP32 HAL
- * headers (hal/clk_gate_ll.h, PERIPH_AES_MODULE) absent on ESP32-S3.
- * NO_WOLFSSL_ESP32_CRYPT_HASH disables all SHA HW paths in sha*.c. */
-#define NO_WOLFSSL_ESP32_CRYPT_HASH
-#define NO_WOLFSSL_ESP32_CRYPT_HASH_SHA224
-#define NO_WOLFSSL_ESP32_CRYPT_HASH_SHA256
-#define NO_WOLFSSL_ESP32_CRYPT_HASH_SHA384
-#define NO_WOLFSSL_ESP32_CRYPT_HASH_SHA512
-#define NO_WOLFSSL_ESP32_CRYPT_AES
+/* ── ESP32 hardware acceleration ────────────────────────────────── */
+/*
+ * wolfSSL HW crypto is ENABLED for wolfSSL/wolfSSH operations on ESP32-S3.
+ *
+ * Platform: PlatformIO espressif32@6.11.0 → ESP-IDF 5.4.1 LTS.
+ *
+ * esp32_sha.c and esp32_aes.c use the periph_ctrl API which is present in
+ * IDF 5.4 LTS.  The components/wolfssl bridge CMakeLists.txt includes both
+ * files in the GLOB and adds PRIV_REQUIRES esp_hw_support so the clock-
+ * gating symbols resolve at link time.
+ *
+ * HW-accelerated:
+ *   - SHA-256 / SHA-384 / SHA-512  (ESP32-S3 SHA peripheral)
+ *   - AES-128-GCM / AES-256-GCM    (ESP32-S3 AES peripheral)
+ *
+ * AES-192 is NOT accelerated: the ESP32-S3 AES peripheral only supports
+ * 128-bit and 256-bit keys (silicon limitation, wolfSSL GitHub #6375).
+ * wolfSSL falls back to SW for any 192-bit AES operation.
+ * This does not affect SSH (which negotiates AES-256-GCM).
+ *
+ * OTA operations (mbedTLS) continue to use HW via CONFIG_MBEDTLS_HARDWARE_AES/SHA.
+ */
+#define NO_WOLFSSL_ESP32_CRYPT_AES_192

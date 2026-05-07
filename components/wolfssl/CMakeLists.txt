@@ -35,17 +35,19 @@ list(REMOVE_ITEM WOLFSSL_SRCS
     "${WOLFSSL_MC}/wolfcrypt/src/sp_sm2_c64.c"
     "${WOLFSSL_MC}/wolfcrypt/src/sp_sm2_cortexm.c"
     "${WOLFSSL_MC}/wolfcrypt/src/sp_sm2_x86_64.c"
-    # Diagnostic utility — uses linker section symbols as C variables (C11 thread_local conflict).
+    # Diagnostic utility — uses linker section symbols as C variables; also uses
+    # `thread_local` as an enum value name which conflicts with the C11 keyword.
     "${WOLFSSL_MC}/wolfcrypt/src/port/Espressif/esp_sdk_mem_lib.c"
-    # ESP32-classic hardware crypto shims — use ESP32 HAL headers absent on S3.
-    # Software AES/SHA (from aes.c / sha*.c) is used instead.
-    "${WOLFSSL_MC}/wolfcrypt/src/port/Espressif/esp32_aes.c"
-    "${WOLFSSL_MC}/wolfcrypt/src/port/Espressif/esp32_sha.c"
+    # esp32_aes.c and esp32_sha.c ARE included (not excluded here).
+    # They use the periph_ctrl API which is present in ESP-IDF 5.4 LTS.
+    # PRIV_REQUIRES esp_hw_support below gives them the clock-gating symbols.
 )
 
 # Remove Xtensa assembly files — not valid for this toolchain invocation
 file(GLOB WOLFSSL_ASM "${WOLFSSL_MC}/wolfcrypt/src/*.S")
-list(REMOVE_ITEM WOLFSSL_SRCS ${WOLFSSL_ASM})
+if(WOLFSSL_ASM)
+    list(REMOVE_ITEM WOLFSSL_SRCS ${WOLFSSL_ASM})
+endif()
 
 idf_component_register(
     SRCS ${WOLFSSL_SRCS}
@@ -55,4 +57,5 @@ idf_component_register(
         "${WOLFSSL_MC}/wolfssl"
         "${WOLFSSL_MC}/wolfssl/wolfcrypt"
         "${WOLFSSL_MC}/wolfssl/wolfcrypt/port/Espressif"
+    PRIV_REQUIRES esp_hw_support
 )
