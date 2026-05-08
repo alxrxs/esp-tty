@@ -8,16 +8,20 @@ All native tests run on the host — no ESP32 hardware, no emulator, no network.
 pio test -e native
 ```
 
-Expected output: **26 test cases: 26 succeeded**
+Expected output: **73 test cases: 73 succeeded**
 
 Tests are in `test/native/` and cover:
 
 | Suite | Cases | What it tests |
 |---|---|---|
-| `test_ring` | 4 | Ring buffer FIFO, wrap-around, close-unblocks-recv, backpressure |
+| `test_ring` | 10 | Ring buffer FIFO, wrap-around, close-unblocks-recv, backpressure, drain-then-EOF, send-on-closed, `ring_try_send` (4 cases) |
 | `test_bridge` | 3 | Full-duplex bridge ordering, stop-flag termination, no-drop guarantee |
-| `test_pubkey_auth` | 10 | OpenSSH pubkey line parsing, base64 decode, SHA-256 hash computation |
+| `test_pubkey_auth` | 11 | OpenSSH pubkey line parsing, base64 decode, SHA-256 hash framing, 513-byte overflow guard |
 | `test_host_key` | 9 | `format_fingerprint()` — colon-separated hex formatting, boundary/null cases |
+| `test_auth_check` | 5 | `pubkey_auth_check()` accept + four reject paths |
+| `test_user_class` | 9 | `pubkey_classify_user()` username routing for default/OTA |
+| `test_ota_verify` | 20 | OTA image format, ECDSA verify, AES-GCM decrypt, edge cases (empty image, wrong version, length mismatch, abort paths, malformed PEM) |
+| `test_rollback_decision` | 6 | `rollback_decide()` for each `esp_ota_img_states_t` value |
 
 The crypto tests use OpenSSL 3 EVP stubs (in `test/stubs/wolfssl/`) instead of
 wolfCrypt, so the native environment never links wolfSSH or ESP-IDF.
