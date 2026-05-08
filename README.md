@@ -397,4 +397,16 @@ Before submitting changes:
 
 ---
 
-License: TBD — add a LICENSE file before publishing.
+## License
+
+[GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0).
+
+If you run a modified version of this firmware on a device that interacts with
+users over a network (e.g. an SSH server reachable beyond your own machines),
+the AGPL requires you to make the corresponding source available to those
+users. The full license text is in [LICENSE](LICENSE).
+
+This project bundles managed components under their own licenses:
+wolfSSL/wolfSSH (GPL-2.0-or-later or commercial), mbedtls (Apache-2.0),
+TinyUSB (MIT), ESP-IDF (Apache-2.0). See each component's own COPYING /
+LICENSE file under `managed_components/` after a build.
