@@ -199,15 +199,35 @@ static int pem_extract_ec_point(const uint8_t *pem, size_t pem_len,
     if (b64_decode(b64_start, (size_t)(b64_end - b64_start),
                    der, sizeof(der), &der_len) != 0) return -1;
 
-    /* Scan for uncompressed point marker (0x04) preceded by bit-string header */
-    /* The 04 byte appears at offset 27 for standard P-256 SPKI */
-    for (size_t i = 0; i + 65 <= der_len; i++) {
-        if (der[i] == 0x04) {
-            memcpy(point_out, &der[i], 65);
-            return 0;
-        }
-    }
-    return -1;
+    /*
+     * Parse the fixed-layout SubjectPublicKeyInfo DER for P-256 (91 bytes total):
+     *
+     *   30 59 -- SEQUENCE (89 bytes body)
+     *     30 13 -- SEQUENCE (AlgorithmIdentifier, 19 bytes)
+     *       06 07 2a 86 48 ce 3d 02 01  -- OID id-ecPublicKey
+     *       06 08 2a 86 48 ce 3d 03 01 07  -- OID secp256r1
+     *     03 42 -- BIT STRING (66 bytes)
+     *       00  -- no unused bits
+     *       04 xx...  -- uncompressed EC point (65 bytes)
+     *
+     * Rather than scanning for the first 0x04 byte (which could hit an 0x04 in
+     * the OID region), we anchor on the known fixed DER structure:
+     *   - Total DER length must be exactly 91 bytes.
+     *   - Byte 0..1: 30 59 (outer SEQUENCE)
+     *   - Byte 22: 03 (BIT STRING tag)
+     *   - Byte 23: 42 (BIT STRING length = 66)
+     *   - Byte 24: 00 (no unused bits)
+     *   - Byte 25: 04 (uncompressed point marker)
+     *   - Bytes 25..89: the 65-byte EC point
+     */
+    if (der_len != 91) return -1;
+    if (der[0] != 0x30 || der[1] != 0x59) return -1;  /* outer SEQUENCE */
+    if (der[22] != 0x03 || der[23] != 0x42) return -1; /* BIT STRING tag+len */
+    if (der[24] != 0x00) return -1;                     /* no unused bits */
+    if (der[25] != 0x04) return -1;                     /* uncompressed point marker */
+
+    memcpy(point_out, &der[25], 65);
+    return 0;
 }
 
 #endif /* OTA_USE_PSA */
@@ -375,7 +395,11 @@ ota_verify_err_t ota_verify_feed(ota_verify_ctx_t *ctx,
 
     /* Record total length on first call */
     if (ctx->total_len == 0) {
-        if (total_image_len < OTA_HEADER_SIZE + OTA_SIG_LEN + 1)
+        /* Allow total == OTA_HEADER_SIZE + OTA_SIG_LEN (ct_len=0, pt_len=0):
+         * the EMPTY_IMAGE check in the header parser will catch this and
+         * return OTA_VERIFY_ERR_EMPTY_IMAGE rather than the generic TRUNCATED.
+         * Anything shorter still fails as TRUNCATED (e.g. missing the sig). */
+        if (total_image_len < OTA_HEADER_SIZE + OTA_SIG_LEN)
             return OTA_VERIFY_ERR_TRUNCATED;
         ctx->total_len = total_image_len;
         ctx->ct_len    = total_image_len - OTA_HEADER_SIZE - OTA_SIG_LEN;
@@ -404,6 +428,12 @@ ota_verify_err_t ota_verify_feed(ota_verify_ctx_t *ctx,
             return OTA_VERIFY_ERR_VERSION;
         memcpy(ctx->iv,  ctx->hdr + HDR_IV_OFF,  OTA_IV_LEN);
         memcpy(ctx->tag, ctx->hdr + HDR_TAG_OFF, OTA_TAG_LEN);
+
+        /* Reject empty image: flashing zero bytes would brick the device */
+        if (ctx->plaintext_len == 0) {
+            OTA_LOGE(TAG, "OTA image rejected: plaintext_len == 0 (empty firmware)");
+            return OTA_VERIFY_ERR_EMPTY_IMAGE;
+        }
 
         OTA_LOGI(TAG, "OTA header ok: v%"PRIu32" pt=%"PRIu32"B ct=%zuB",
                  ctx->version, ctx->plaintext_len, ctx->ct_len);
@@ -512,6 +542,20 @@ ota_verify_err_t ota_verify_end(ota_verify_ctx_t *ctx)
         goto fail;
     }
     memcpy(ctx->sig, ctx->tail, OTA_SIG_LEN);
+
+    /* Validate that the number of ciphertext bytes actually received matches
+     * the plaintext_len declared in the header.  For AES-GCM the ciphertext
+     * is the same length as the plaintext, so they must agree exactly.
+     * A crafted image with a wrong plaintext_len field would otherwise be
+     * silently accepted. */
+    if (ctx->ct_bytes_fed != (size_t)ctx->plaintext_len) {
+        OTA_LOGE(TAG,
+                 "Length mismatch: header says plaintext_len=%"PRIu32
+                 " but received %zu ciphertext bytes",
+                 ctx->plaintext_len, ctx->ct_bytes_fed);
+        result = OTA_VERIFY_ERR_LENGTH_MISMATCH;
+        goto fail;
+    }
 
 #ifdef OTA_USE_PSA
 
@@ -662,7 +706,9 @@ const char *ota_verify_strerror(ota_verify_err_t err)
     case OTA_VERIFY_ERR_FLASH:     return "flash write error";
     case OTA_VERIFY_ERR_OOM:       return "out of memory";
     case OTA_VERIFY_ERR_CRYPTO:    return "crypto internal error";
-    case OTA_VERIFY_ERR_PARAM:     return "bad parameter";
-    default:                       return "unknown error";
+    case OTA_VERIFY_ERR_PARAM:           return "bad parameter";
+    case OTA_VERIFY_ERR_LENGTH_MISMATCH: return "plaintext length mismatch";
+    case OTA_VERIFY_ERR_EMPTY_IMAGE:     return "empty image rejected";
+    default:                             return "unknown error";
     }
 }

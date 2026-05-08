@@ -50,7 +50,9 @@ typedef enum {
     OTA_VERIFY_ERR_FLASH     = -6,  /* flash write error        */
     OTA_VERIFY_ERR_OOM       = -7,  /* memory allocation error  */
     OTA_VERIFY_ERR_CRYPTO    = -8,  /* mbedtls internal error   */
-    OTA_VERIFY_ERR_PARAM     = -9,  /* bad parameter            */
+    OTA_VERIFY_ERR_PARAM          = -9,  /* bad parameter            */
+    OTA_VERIFY_ERR_LENGTH_MISMATCH = -10, /* plaintext_len ≠ actual ciphertext received */
+    OTA_VERIFY_ERR_EMPTY_IMAGE    = -11, /* plaintext_len == 0 — refusing empty firmware */
 } ota_verify_err_t;
 
 /* ── Header constants ────────────────────────────────────────────────────── */

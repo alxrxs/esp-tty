@@ -212,6 +212,91 @@ void test_ring_recv_drains_buffered_then_returns_eof(void)
     ring_free(r);
 }
 
+/* ── ring_try_send tests ─────────────────────────────────────────────────── */
+
+/* try_send into an empty ring writes all bytes */
+void test_ring_try_send_when_empty(void)
+{
+    ring_t *r = ring_create(64);
+    TEST_ASSERT_NOT_NULL(r);
+
+    uint8_t tx[] = {0xAA, 0xBB, 0xCC, 0xDD};
+    int written = ring_try_send(r, tx, sizeof(tx));
+    TEST_ASSERT_EQUAL_INT((int)sizeof(tx), written);
+
+    /* Read back and verify */
+    uint8_t rx[sizeof(tx)] = {0};
+    int got = 0;
+    while ((size_t)got < sizeof(rx)) {
+        int n = ring_recv(r, rx + got, sizeof(rx) - (size_t)got);
+        TEST_ASSERT_GREATER_THAN_INT(0, n);
+        got += n;
+    }
+    TEST_ASSERT_EQUAL_MEMORY(tx, rx, sizeof(tx));
+
+    ring_free(r);
+}
+
+/* try_send into a full ring returns 0 — does not block */
+void test_ring_try_send_when_full(void)
+{
+    const size_t CAP = 8;
+    ring_t *r = ring_create(CAP);
+    TEST_ASSERT_NOT_NULL(r);
+
+    /* Fill the ring completely via blocking send */
+    uint8_t fill[8];
+    memset(fill, 0x55, sizeof(fill));
+    TEST_ASSERT_EQUAL_INT(8, ring_send(r, fill, 8));
+
+    /* Now try_send must return 0 immediately (ring is full) */
+    uint8_t extra[] = {0xFF};
+    int written = ring_try_send(r, extra, sizeof(extra));
+    TEST_ASSERT_EQUAL_INT(0, written);
+
+    ring_free(r);
+}
+
+/* try_send writes what fits when ring is almost full */
+void test_ring_try_send_partial_when_almost_full(void)
+{
+    const size_t CAP = 8;
+    ring_t *r = ring_create(CAP);
+    TEST_ASSERT_NOT_NULL(r);
+
+    /* Fill 6 of 8 bytes */
+    uint8_t fill[6];
+    memset(fill, 0x11, sizeof(fill));
+    TEST_ASSERT_EQUAL_INT(6, ring_send(r, fill, 6));
+
+    /* try_send 4 bytes; only 2 slots remain → should write exactly 2 */
+    uint8_t data[4] = {0x22, 0x22, 0x22, 0x22};
+    int written = ring_try_send(r, data, sizeof(data));
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, written);
+    TEST_ASSERT_LESS_OR_EQUAL_INT(2, written);  /* at most 2 fit */
+    /* The ring must be full or near-full — reading must return something */
+    uint8_t out[8];
+    int got = ring_recv(r, out, sizeof(out));
+    TEST_ASSERT_GREATER_THAN_INT(0, got);
+
+    ring_free(r);
+}
+
+/* try_send on a closed ring returns -1 */
+void test_ring_try_send_on_closed_ring(void)
+{
+    ring_t *r = ring_create(64);
+    TEST_ASSERT_NOT_NULL(r);
+
+    ring_close(r);
+
+    uint8_t buf[] = {0xDE, 0xAD};
+    int result = ring_try_send(r, buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_INT(-1, result);
+
+    ring_free(r);
+}
+
 /* ------------------------------------------------------------------ */
 int main(void)
 {
@@ -222,5 +307,10 @@ int main(void)
     RUN_TEST(test_ring_backpressure_lossless);
     RUN_TEST(test_ring_send_on_closed_ring_returns_error);
     RUN_TEST(test_ring_recv_drains_buffered_then_returns_eof);
+    /* ring_try_send tests */
+    RUN_TEST(test_ring_try_send_when_empty);
+    RUN_TEST(test_ring_try_send_when_full);
+    RUN_TEST(test_ring_try_send_partial_when_almost_full);
+    RUN_TEST(test_ring_try_send_on_closed_ring);
     return UNITY_END();
 }

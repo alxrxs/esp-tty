@@ -145,10 +145,10 @@ esp_err_t ota_session_handler(WOLFSSH *ssh)
                 new_cap = image_len + (size_t)n;
             uint8_t *new_buf = heap_caps_realloc(image_buf, new_cap, MALLOC_CAP_SPIRAM);
             if (!new_buf) {
-                /* Try regular RAM if PSRAM exhausted */
-                new_buf = realloc(image_buf, new_cap);
-            }
-            if (!new_buf) {
+                /* PSRAM exhausted — this is a hard OOM (8 MB PSRAM, 4 MB max image).
+                 * Do NOT fall back to realloc(): image_buf was allocated from PSRAM
+                 * and realloc() does not know that, which causes undefined behavior
+                 * (heap corruption) on ESP-IDF. Treat as a real, unrecoverable OOM. */
                 ESP_LOGE(TAG, "OOM reading OTA image (have %zu bytes so far)", image_len);
                 read_error = true;
                 break;

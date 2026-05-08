@@ -15,6 +15,7 @@
 #include "wifi.h"
 #include "usb_cdc.h"
 #include "ssh_server.h"
+#include "rollback_decision.h"
 
 static const char *TAG = "main";
 
@@ -37,8 +38,9 @@ static void rollback_timer_cb(TimerHandle_t xTimer)
     (void)xTimer;
     esp_ota_img_states_t state;
     const esp_partition_t *running = esp_ota_get_running_partition();
-    if (esp_ota_get_state_partition(running, &state) == ESP_OK &&
-        state == ESP_OTA_IMG_PENDING_VERIFY) {
+    if (esp_ota_get_state_partition(running, &state) != ESP_OK)
+        return;
+    if (rollback_decide(state) == ROLLBACK_DECISION_MARK_VALID) {
         ESP_LOGI("main", "Marking OTA image valid (rollback cancelled)");
         esp_ota_mark_app_valid_cancel_rollback();
     }

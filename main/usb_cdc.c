@@ -11,6 +11,8 @@
 #include "usb_cdc.h"
 #include "esp_log.h"
 
+#include <inttypes.h>
+
 #ifndef BRIDGE_LOOPBACK
 
 #include "freertos/FreeRTOS.h"
@@ -35,7 +37,20 @@ static void cdc_rx_callback(int itf, cdcacm_event_t *event)
     esp_err_t err = tinyusb_cdcacm_read(itf, buf, sizeof(buf), &rxd);
     if (err != ESP_OK || rxd == 0) return;
 
-    ring_send(s_usb_to_ssh, buf, rxd);
+    /* Use the non-blocking variant — ring_send() can block up to 50 ms per
+     * chunk, which risks stalling USB enumeration when called from a TinyUSB
+     * callback (interrupt-adjacent context).  ring_try_send() returns
+     * immediately; on overflow we drop the data and log a warning once per
+     * N dropped bursts (rate-limited to avoid flooding). */
+    int written = ring_try_send(s_usb_to_ssh, buf, rxd);
+    if (written >= 0 && (size_t)written < rxd) {
+        static uint32_t s_drop_count = 0;
+        s_drop_count++;
+        if ((s_drop_count & 0xFF) == 1) {   /* log every 256 drops */
+            ESP_LOGW(TAG, "CDC RX overflow: dropped %zu bytes (total drops: %" PRIu32 ")",
+                     rxd - (size_t)written, s_drop_count);
+        }
+    }
 }
 
 static void cdc_line_state_callback(int itf, cdcacm_event_t *event)

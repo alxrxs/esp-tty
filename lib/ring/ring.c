@@ -94,6 +94,17 @@ void ring_close(ring_t *r)
     if (r) r->closed = true;
 }
 
+int ring_try_send(ring_t *r, const uint8_t *buf, size_t len)
+{
+    if (!r || !buf) return -1;
+    if (r->closed) return -1;
+    if (len == 0) return 0;
+
+    /* xStreamBufferSend with timeout=0: writes what fits, returns immediately */
+    size_t sent = xStreamBufferSend(r->sb, buf, len, 0);
+    return (int)sent;
+}
+
 /* ============================================================
  * Native (host) implementation — pthread mutex + condvar
  * ============================================================ */
@@ -220,6 +231,41 @@ void ring_close(ring_t *r)
     pthread_cond_broadcast(&r->not_full);
     pthread_cond_broadcast(&r->not_empty);
     pthread_mutex_unlock(&r->mu);
+}
+
+int ring_try_send(ring_t *r, const uint8_t *buf, size_t len)
+{
+    if (!r || !buf) return -1;
+    if (len == 0) return 0;
+
+    /* trylock: if the mutex is contended, return 0 (don't block) */
+    if (pthread_mutex_trylock(&r->mu) != 0) return 0;
+
+    if (r->closed) {
+        pthread_mutex_unlock(&r->mu);
+        return -1;
+    }
+
+    size_t space = r->capacity - r->used;
+    size_t chunk = (len < space) ? len : space;
+
+    if (chunk > 0) {
+        /* Write chunk bytes into the ring, handling wrap-around */
+        size_t first = r->capacity - r->head;
+        if (chunk <= first) {
+            memcpy(r->buf + r->head, buf, chunk);
+            r->head = (r->head + chunk) % r->capacity;
+        } else {
+            memcpy(r->buf + r->head, buf, first);
+            memcpy(r->buf, buf + first, chunk - first);
+            r->head = chunk - first;
+        }
+        r->used += chunk;
+        pthread_cond_signal(&r->not_empty);
+    }
+
+    pthread_mutex_unlock(&r->mu);
+    return (int)chunk;
 }
 
 #endif /* RING_NATIVE */

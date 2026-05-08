@@ -44,6 +44,18 @@ static SemaphoreHandle_t s_session_mutex;
 static WOLFSSH      *s_active_ssh  = NULL;
 static int           s_active_fd   = -1;
 static volatile bool s_pump_stop   = false;
+static bool          s_pumps_running = false;  /* true only while both pump tasks are live */
+
+/*
+ * Counting semaphore for pump task completion synchronisation.
+ * Initial count = 0; each pump task gives once just before vTaskDelete.
+ * teardown_active_session() takes twice (once per pump direction) to confirm
+ * both tasks have exited before wolfSSH_free() is called.
+ * Without this, an old pump task could continue calling wolfSSH_stream_read
+ * on a freed pointer (use-after-free) if it did not see s_pump_stop=true
+ * within the old 100 ms heuristic delay.
+ */
+static SemaphoreHandle_t s_pump_done_sem = NULL;
 
 /* Precomputed SHA-256 of the authorized public key blob.
    Populated at startup from AUTHORIZED_PUBKEY in config.h. */
@@ -71,17 +83,18 @@ static int user_auth_callback(byte authType, WS_UserAuthData *authData,
         return WOLFSSH_USERAUTH_FAILURE;
 
     /* Determine which key hash to check based on the username */
-    const uint8_t *expected_hash = s_authkey_hash;
-    bool is_ota_user = false;
+    pubkey_user_class_t uclass = pubkey_classify_user(
+        (const char *)authData->username, authData->usernameSz);
 
-    if (authData->username && authData->usernameSz >= 3 &&
-        strncmp((const char *)authData->username, "ota", authData->usernameSz) == 0) {
+    const uint8_t *expected_hash;
+    if (uclass == PUBKEY_USER_OTA) {
         if (!s_ota_authkey_hash_ready) {
             ESP_LOGW(TAG, "OTA auth attempted but OTA key not configured");
             return WOLFSSH_USERAUTH_FAILURE;
         }
         expected_hash = s_ota_authkey_hash;
-        is_ota_user   = true;
+    } else {
+        expected_hash = s_authkey_hash;
     }
 
     pubkey_auth_result_t res = pubkey_auth_check(
@@ -95,7 +108,6 @@ static int user_auth_callback(byte authType, WS_UserAuthData *authData,
         return WOLFSSH_USERAUTH_INVALID_PUBLICKEY;
     }
 
-    (void)is_ota_user;  /* used by session routing after accept */
     return WOLFSSH_USERAUTH_SUCCESS;
 }
 
@@ -147,6 +159,10 @@ static void pump_ssh_to_usb(void *arg)
     s_pump_stop = true;
     ring_close(a->ring);
     free(a);
+    /* Signal teardown that this pump direction has exited.
+     * teardown_active_session() waits on s_pump_done_sem twice before
+     * calling wolfSSH_free(), preventing use-after-free. */
+    if (s_pump_done_sem) xSemaphoreGive(s_pump_done_sem);
     vTaskDelete(NULL);
 }
 
@@ -158,6 +174,8 @@ static void pump_usb_to_ssh(void *arg)
                 &s_pump_stop);
     s_pump_stop = true;
     free(a);
+    /* Signal teardown that this pump direction has exited. */
+    if (s_pump_done_sem) xSemaphoreGive(s_pump_done_sem);
     vTaskDelete(NULL);
 }
 
@@ -177,11 +195,25 @@ static void teardown_active_session(void)
         close(s_active_fd);
         s_active_fd = -1;
     }
+
+    /* Wait for both pump tasks to signal completion before freeing
+     * the wolfSSH context. Without this, an old pump task could continue
+     * calling wolfSSH_stream_read on a freed pointer (use-after-free).
+     * Each pump task gives s_pump_done_sem once just before vTaskDelete;
+     * we take twice (one per direction). Timeout of 5 s is a safety net.
+     * Only wait when pump tasks were actually launched (not for OTA sessions
+     * or failed handshakes where pump tasks were never started). */
+    if (s_pumps_running && s_pump_done_sem) {
+        TickType_t timeout = pdMS_TO_TICKS(5000);
+        if (xSemaphoreTake(s_pump_done_sem, timeout) != pdTRUE)
+            ESP_LOGW(TAG, "teardown: pump_ssh_to_usb did not exit within 5 s");
+        if (xSemaphoreTake(s_pump_done_sem, timeout) != pdTRUE)
+            ESP_LOGW(TAG, "teardown: pump_usb_to_ssh did not exit within 5 s");
+        s_pumps_running = false;
+    }
+
     wolfSSH_free(s_active_ssh);
     s_active_ssh = NULL;
-
-    /* Give pump tasks a moment to see the stop flag and exit */
-    vTaskDelay(pdMS_TO_TICKS(100));
 }
 
 /* ------------------------------------------------------------------ */
@@ -274,11 +306,8 @@ static void ssh_server_task(void *arg)
         setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv_off, sizeof(tv_off));
 
         /* Check if this is an OTA session (username == "ota") */
-        char username_buf[16] = {0};
         const char *uname = wolfSSH_GetUsername(ssh);
-        if (uname) strncpy(username_buf, uname, sizeof(username_buf) - 1);
-
-        if (strcmp(username_buf, "ota") == 0) {
+        if (pubkey_classify_user(uname, uname ? strlen(uname) : 0) == PUBKEY_USER_OTA) {
             ESP_LOGI(TAG, "OTA session — routing to ota_session_handler");
             xSemaphoreGive(s_session_mutex);
             /* ota_session_handler owns the SSH session and may reboot */
@@ -305,6 +334,7 @@ static void ssh_server_task(void *arg)
         a2b->ssh  = ssh; a2b->ring = s_ssh_to_usb;
         b2a->ring = s_usb_to_ssh; b2a->ssh = ssh;
 
+        s_pumps_running = true;
         xTaskCreate(pump_ssh_to_usb, "pump_a2b", 8192, a2b, 6, NULL);
         xTaskCreate(pump_usb_to_ssh, "pump_b2a", 8192, b2a, 6, NULL);
 
@@ -373,6 +403,14 @@ esp_err_t ssh_server_start(ring_t *usb_to_ssh, ring_t *ssh_to_usb)
     if (err != ESP_OK) return err;
 
     s_session_mutex = xSemaphoreCreateMutex();
+
+    /* Counting semaphore for pump-task exit synchronisation.
+     * Max count = 2 (one per pump direction); initial count = 0. */
+    s_pump_done_sem = xSemaphoreCreateCounting(2, 0);
+    if (!s_pump_done_sem) {
+        ESP_LOGE(TAG, "Failed to create s_pump_done_sem");
+        return ESP_ERR_NO_MEM;
+    }
 
     /* 16 KB stack — wolfSSH + wolfCrypt need at least 8–12 KB */
     BaseType_t rc = xTaskCreate(ssh_server_task, "ssh_server",

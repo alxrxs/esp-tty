@@ -49,6 +49,16 @@ int ring_recv(ring_t *r, uint8_t *buf, size_t cap);
  */
 void ring_close(ring_t *r);
 
+/*
+ * Non-blocking variant of ring_send.
+ * Writes as many bytes as currently fit without blocking.
+ * Returns the number of bytes successfully written (0 .. len).
+ * Returns -1 if the ring is closed.
+ * Never blocks — safe to call from interrupt-adjacent contexts (e.g. TinyUSB
+ * CDC RX callback).
+ */
+int ring_try_send(ring_t *r, const uint8_t *buf, size_t len);
+
 #ifdef __cplusplus
 }
 #endif
