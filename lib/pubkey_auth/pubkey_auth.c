@@ -106,6 +106,19 @@ pubkey_auth_result_t pubkey_auth_check(
     return (diff == 0) ? PUBKEY_AUTH_OK : PUBKEY_AUTH_REJECTED;
 }
 
+pubkey_user_class_t pubkey_classify_user(const char *username, size_t username_sz)
+{
+    if (!username || username_sz == 0)
+        return PUBKEY_USER_DEFAULT;
+
+    /* Exact match: length must be 3 and bytes must be 'o','t','a' */
+    if (username_sz == 3 &&
+        username[0] == 'o' && username[1] == 't' && username[2] == 'a')
+        return PUBKEY_USER_OTA;
+
+    return PUBKEY_USER_DEFAULT;
+}
+
 char *format_fingerprint(const uint8_t digest[PUBKEY_HASH_SIZE],
                          char *out, size_t out_sz)
 {

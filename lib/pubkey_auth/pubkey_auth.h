@@ -59,6 +59,31 @@ pubkey_auth_result_t pubkey_auth_check(
     const uint8_t  expected_hash[PUBKEY_HASH_SIZE]);
 
 /* ------------------------------------------------------------------ */
+/* Username classification — routes auth to the correct key hash     */
+/* ------------------------------------------------------------------ */
+
+/*
+ * pubkey_user_class_t — result of classifying an SSH username.
+ */
+typedef enum {
+    PUBKEY_USER_DEFAULT,  /* normal session: use the default authkey hash */
+    PUBKEY_USER_OTA,      /* OTA session: use the OTA authkey hash        */
+    PUBKEY_USER_REJECTED, /* reserved for future use (e.g. anonymous)     */
+} pubkey_user_class_t;
+
+/*
+ * pubkey_classify_user — classify an SSH username string.
+ *
+ * username     : pointer to the username bytes (may be NULL)
+ * username_sz  : byte length of the username (NOT including NUL)
+ *
+ * Returns PUBKEY_USER_OTA if the username is exactly "ota" (length 3,
+ * case-sensitive).  Returns PUBKEY_USER_DEFAULT in all other cases.
+ * NULL-safe (returns PUBKEY_USER_DEFAULT for NULL username).
+ */
+pubkey_user_class_t pubkey_classify_user(const char *username, size_t username_sz);
+
+/* ------------------------------------------------------------------ */
 /*
  * Format a 32-byte SHA-256 digest as colon-separated lowercase hex,
  * e.g. "8b:2e:eb:84:...".  out must be at least PUBKEY_HASH_SIZE*3 bytes

@@ -12,7 +12,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-KEY_DIR="$(dirname "$SCRIPT_DIR")/ota_keys"
+# OTA_KEYS_DIR env var overrides the default (project_root/ota_keys/).
+# Allows test scripts to generate keys in an isolated temp directory.
+KEY_DIR="${OTA_KEYS_DIR:-$(dirname "$SCRIPT_DIR")/ota_keys}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'

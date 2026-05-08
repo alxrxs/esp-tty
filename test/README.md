@@ -45,6 +45,15 @@ or timeout.
 The QEMU binary is expected at:
 `~/.espressif/tools/qemu-xtensa/esp_develop_9.2.2_20250817/qemu/bin/qemu-system-xtensa`
 
+## Script inventory
+
+| Script | What it does |
+|---|---|
+| `test/scripts/test_qemu_boot.py` | Builds wokwi firmware, merges flash image, boots in QEMU, asserts SSH listen + NVS keygen + fingerprint regex + ELF symbol checks |
+| `test/scripts/test_qemu_nvs_persistence.py` | Boots QEMU twice; asserts the host-key fingerprint is identical across reboots (NVS persistence) |
+| `test/scripts/test_clean_build.sh` | Wipes build cache, creates a minimal `config.h` from the example, runs `pio run -e wokwi` and `pio test -e native`, restores original `config.h` |
+| `test/scripts/test_ota_signer_roundtrip.sh` | Generates fresh OTA keys in a temp dir, signs a dummy firmware, compiles a standalone C program that calls `ota_verify_begin/feed/end` and asserts success; re-runs with one tampered byte and asserts failure |
+
 ## What is NOT tested (known gaps)
 
 The following components are not covered by any automated test. They require

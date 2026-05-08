@@ -21,8 +21,11 @@ import time
 import re
 import shutil
 
-PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-PIO_BUILD   = os.path.join(PROJECT_DIR, ".pio", "build", "wokwi")
+PROJECT_DIR  = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+PIO_BUILD    = os.path.join(PROJECT_DIR, ".pio", "build", "wokwi")
+TOOLCHAIN_BIN = os.path.join(os.path.expanduser("~"),
+                              ".platformio", "packages",
+                              "toolchain-xtensa-esp-elf", "bin")
 
 ESPTOOL     = os.path.join(os.path.expanduser("~"),
                            ".platformio", "packages",
@@ -204,6 +207,84 @@ def run_qemu(timeout_secs, flash_img=FLASH_IMG, label="test_qemu_boot"):
     }
 
 
+def check_elf_symbols(elf_path):
+    """
+    Post-build ELF symbol regression checks.
+
+    1. AES-192 ABSENCE check: if any symbol matching aes.*192 or 192.*aes appears,
+       it means wolfSSL AES-192 was compiled in despite NO_AES_192 being set.
+
+    2. HW crypto PRESENCE check: esp_sha_try_hw_lock and wc_esp32AesEncrypt must
+       both be present, proving wolfSSL is using hardware-accelerated crypto.
+
+    Returns True on success, False (with print) on any failure.
+    """
+    nm_bin = os.path.join(TOOLCHAIN_BIN, "xtensa-esp32s3-elf-nm")
+    if not os.path.isfile(nm_bin):
+        # Fallback: search for any xtensa nm
+        for name in ["xtensa-esp-elf-nm", "xtensa-esp32s3-elf-nm"]:
+            candidate = os.path.join(TOOLCHAIN_BIN, name)
+            if os.path.isfile(candidate):
+                nm_bin = candidate
+                break
+        else:
+            print(f"[check_elf_symbols] FAIL — nm binary not found in {TOOLCHAIN_BIN}")
+            return False
+
+    print(f"[check_elf_symbols] Using nm: {nm_bin}")
+    print(f"[check_elf_symbols] ELF: {elf_path}")
+
+    try:
+        nm_result = subprocess.run(
+            [nm_bin, elf_path],
+            capture_output=True, text=True, check=True,
+        )
+    except subprocess.CalledProcessError as e:
+        print(f"[check_elf_symbols] FAIL — nm failed: {e}")
+        return False
+
+    nm_output = nm_result.stdout
+
+    # ── Check 1: AES-192 must be ABSENT ──────────────────────────────────────
+    # nm output format: "<addr> <type> <name>"
+    # We check only the symbol NAME (third field), not the full line,
+    # to avoid false positives from addresses that happen to contain "192".
+    # Data symbols ('d'/'D') from mbedTLS cipher info tables are expected and
+    # harmless — they're static descriptors, not callable AES-192 code.
+    # We flag only TEXT symbols ('t'/'T') named with aes*192 or 192*aes to
+    # detect if wolfSSL has compiled in an AES-192 encryption function.
+    aes192_matches = []
+    for line in nm_output.splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        # nm output: addr type name  OR  type name (for undefined symbols)
+        sym_name = parts[-1]   # symbol name is always last
+        sym_type = parts[-2] if len(parts) >= 2 else ""
+        # Flag AES-192 TEXT (code) symbols — these indicate compiled-in AES-192 routines
+        if re.search(r'(?i)(aes.*192|192.*aes)', sym_name) and sym_type.lower() in ('t',):
+            aes192_matches.append(line)
+    if aes192_matches:
+        print("[check_elf_symbols] FAIL — AES-192 code symbols found in ELF (NO_AES_192 regression):")
+        for line in aes192_matches:
+            print(f"  {line}")
+        return False
+    print("[check_elf_symbols] OK — no AES-192 code symbols (NO_AES_192 is effective)")
+
+    # ── Check 2: HW crypto symbols must be PRESENT ───────────────────────────
+    required_hw_symbols = ["esp_sha_try_hw_lock", "wc_esp32AesEncrypt"]
+    ok = True
+    for sym in required_hw_symbols:
+        if sym not in nm_output:
+            print(f"[check_elf_symbols] FAIL — HW crypto symbol missing: {sym!r}")
+            print("  wolfSSL HW acceleration may have silently regressed to SW-only")
+            ok = False
+    if ok:
+        print("[check_elf_symbols] OK — HW crypto symbols present:", ", ".join(required_hw_symbols))
+
+    return ok
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--no-build", action="store_true",
@@ -217,7 +298,18 @@ def main():
 
     merge_flash()
     result = run_qemu(args.timeout)
-    sys.exit(0 if result["success"] else 1)
+
+    if not result["success"]:
+        sys.exit(1)
+
+    # Post-boot ELF symbol checks
+    elf_path = os.path.join(PIO_BUILD, "firmware.elf")
+    if not check_elf_symbols(elf_path):
+        print("[test_qemu_boot] FAIL — ELF symbol regression check failed")
+        sys.exit(1)
+
+    print("[test_qemu_boot] All checks passed")
+    sys.exit(0)
 
 
 if __name__ == "__main__":
