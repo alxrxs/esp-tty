@@ -8,8 +8,9 @@ ESP32-S3 DevKit. SSH into the ESP32-S3 over WiFi. You are at the target's
 serial console. No UART cable to your workstation, no terminal-emulator
 window per target, no swapping which device is plugged into your laptop.
 
-```
-[ target ] ──USB-C──> [ ESP32-S3 ] ──WiFi──> [ ssh client ]
+```mermaid
+flowchart LR
+    target["Target board"] -- "USB-C" --> esp["ESP32-S3"] -- "WiFi" --> ssh["SSH client"]
 ```
 
 A single SSH session is active at a time; opening a second one
