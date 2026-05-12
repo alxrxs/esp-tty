@@ -9,6 +9,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "unity.h"
@@ -297,6 +298,179 @@ void test_ring_try_send_on_closed_ring(void)
     ring_free(r);
 }
 
+/* ── ring_reopen tests ───────────────────────────────────────────────────── */
+
+/* reopen clears the closed flag so send/recv work again */
+void test_ring_reopen_clears_closed_flag(void)
+{
+    ring_t *r = ring_create(64);
+    TEST_ASSERT_NOT_NULL(r);
+
+    ring_close(r);
+
+    uint8_t hello[] = {'h', 'e', 'l', 'l', 'o'};
+    TEST_ASSERT_EQUAL_INT(-1, ring_send(r, hello, sizeof(hello)));
+
+    ring_reopen(r);
+
+    TEST_ASSERT_EQUAL_INT(5, ring_send(r, hello, sizeof(hello)));
+
+    ring_free(r);
+}
+
+/* reopen drains any stale data from the previous session */
+void test_ring_reopen_drains_stale_data(void)
+{
+    ring_t *r = ring_create(32);
+    TEST_ASSERT_NOT_NULL(r);
+
+    uint8_t aaaa[8];
+    memset(aaaa, 'A', sizeof(aaaa));
+    TEST_ASSERT_EQUAL_INT(8, ring_send(r, aaaa, sizeof(aaaa)));
+
+    ring_close(r);
+    ring_reopen(r);
+
+    uint8_t bbbb[4];
+    memset(bbbb, 'B', sizeof(bbbb));
+    TEST_ASSERT_EQUAL_INT(4, ring_send(r, bbbb, sizeof(bbbb)));
+
+    uint8_t rx[16] = {0};
+    int got = ring_recv(r, rx, sizeof(rx));
+    TEST_ASSERT_EQUAL_INT(4, got);
+    TEST_ASSERT_EACH_EQUAL_UINT8('B', rx, 4);
+
+    ring_free(r);
+}
+
+/* reopen on a NULL ring must not crash */
+void test_ring_reopen_on_null_is_noop(void)
+{
+    ring_reopen(NULL);
+    TEST_PASS();
+}
+
+/* reopen on an already-open ring is a safe idempotent operation */
+void test_ring_reopen_on_open_ring_is_idempotent(void)
+{
+    ring_t *r = ring_create(64);
+    TEST_ASSERT_NOT_NULL(r);
+
+    ring_reopen(r);
+
+    uint8_t tx[] = {0x10, 0x20, 0x30, 0x40};
+    TEST_ASSERT_EQUAL_INT(4, ring_send(r, tx, sizeof(tx)));
+
+    uint8_t rx[sizeof(tx)] = {0};
+    int got = 0;
+    while ((size_t)got < sizeof(rx)) {
+        int n = ring_recv(r, rx + got, sizeof(rx) - (size_t)got);
+        TEST_ASSERT_GREATER_THAN_INT(0, n);
+        got += n;
+    }
+    TEST_ASSERT_EQUAL_MEMORY(tx, rx, sizeof(tx));
+
+    ring_free(r);
+}
+
+/* After close + reopen, a fresh recv must block for new data (no stale -1) */
+void test_ring_reopen_then_recv_blocks_for_new_data(void)
+{
+    ring_t *r = ring_create(64);
+    TEST_ASSERT_NOT_NULL(r);
+
+    ring_close(r);
+    ring_reopen(r);
+
+    recv_arg_t arg = {.r = r, .result = 0};
+    pthread_t thr;
+    pthread_create(&thr, NULL, blocked_recv_thread, &arg);
+
+    usleep(20000); /* let the recv thread block on an empty (open) ring */
+
+    uint8_t tx[] = {'x', 'y', 'z'};
+    TEST_ASSERT_EQUAL_INT(3, ring_send(r, tx, sizeof(tx)));
+
+    pthread_join(thr, NULL);
+    TEST_ASSERT_EQUAL_INT(3, arg.result);
+
+    ring_free(r);
+}
+
+/* ── extra ring_try_send tests ───────────────────────────────────────────── */
+
+/* try_send returns EXACTLY the remaining space when partial-filled */
+void test_ring_try_send_partial_writes_exactly_remaining_space(void)
+{
+    const size_t CAP = 8;
+    ring_t *r = ring_create(CAP);
+    TEST_ASSERT_NOT_NULL(r);
+
+    /* Fill 6 of 8 bytes */
+    uint8_t fill[6];
+    memset(fill, 0x11, sizeof(fill));
+    TEST_ASSERT_EQUAL_INT(6, ring_send(r, fill, 6));
+
+    /* try_send 4 bytes; only 2 slots remain → must return exactly 2 */
+    uint8_t data[4] = {0x22, 0x22, 0x22, 0x22};
+    int written = ring_try_send(r, data, sizeof(data));
+    TEST_ASSERT_EQUAL_INT(2, written);
+
+    ring_free(r);
+}
+
+/* Producer thread used by the contention test: spam ring_send for ~50 ms */
+typedef struct {
+    ring_t           *r;
+    volatile int      stop;
+} spam_arg_t;
+
+static void *spam_producer_thread(void *arg)
+{
+    spam_arg_t *a = arg;
+    uint8_t burst[4] = {0xC0, 0xC1, 0xC2, 0xC3};
+    while (!a->stop) {
+        if (ring_send(a->r, burst, sizeof(burst)) < 0) return NULL;
+    }
+    return NULL;
+}
+
+/* try_send must not deadlock when the ring is heavily contended */
+void test_ring_try_send_returns_quickly_under_contention(void)
+{
+    ring_t *r = ring_create(16);
+    TEST_ASSERT_NOT_NULL(r);
+
+    spam_arg_t sa = {.r = r, .stop = 0};
+    pthread_t thr;
+    pthread_create(&thr, NULL, spam_producer_thread, &sa);
+
+    /* Drain in a loop so the producer can keep making progress */
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+
+    uint8_t payload[2] = {0xEE, 0xEF};
+    int call_result = ring_try_send(r, payload, sizeof(payload));
+
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+
+    /* try_send returns 0..len, or -1 on closed (must not be closed here) */
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, call_result);
+    TEST_ASSERT_LESS_OR_EQUAL_INT((int)sizeof(payload), call_result);
+
+    long elapsed_ms = (t1.tv_sec - t0.tv_sec) * 1000L
+                    + (t1.tv_nsec - t0.tv_nsec) / 1000000L;
+    TEST_ASSERT_LESS_THAN_INT(100, (int)elapsed_ms);
+
+    /* Stop the producer and close the ring so it can exit cleanly.
+     * ring_close wakes any producer blocked in ring_send (returns -1). */
+    sa.stop = 1;
+    ring_close(r);
+    pthread_join(thr, NULL);
+
+    ring_free(r);
+}
+
 /* ------------------------------------------------------------------ */
 int main(void)
 {
@@ -312,5 +486,14 @@ int main(void)
     RUN_TEST(test_ring_try_send_when_full);
     RUN_TEST(test_ring_try_send_partial_when_almost_full);
     RUN_TEST(test_ring_try_send_on_closed_ring);
+    /* ring_reopen tests */
+    RUN_TEST(test_ring_reopen_clears_closed_flag);
+    RUN_TEST(test_ring_reopen_drains_stale_data);
+    RUN_TEST(test_ring_reopen_on_null_is_noop);
+    RUN_TEST(test_ring_reopen_on_open_ring_is_idempotent);
+    RUN_TEST(test_ring_reopen_then_recv_blocks_for_new_data);
+    /* extra ring_try_send tests */
+    RUN_TEST(test_ring_try_send_partial_writes_exactly_remaining_space);
+    RUN_TEST(test_ring_try_send_returns_quickly_under_contention);
     return UNITY_END();
 }

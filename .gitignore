@@ -35,3 +35,7 @@ dependencies.lock
 
 # macOS
 .DS_Store
+
+# Python bytecode (test scripts)
+__pycache__/
+*.pyc

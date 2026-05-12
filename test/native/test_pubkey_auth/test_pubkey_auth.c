@@ -197,6 +197,47 @@ void test_compute_hash_rejects_over_512_byte_blob(void)
     TEST_ASSERT_FALSE(pubkey_compute_hash(OVER_512_PUBKEY, hash));
 }
 
+/* --- Boundary: exactly 512-byte decoded blob (inclusive upper bound) -- */
+
+/*
+ * 512 raw bytes of 0x42, base64-encoded without line breaks (684 chars).
+ * Segments are 76 characters each (9 × 76 = 684).
+ * Generated with:
+ *   python3 -c "import base64; print(base64.b64encode(b'\\x42'*512).decode())"
+ *
+ * This sits exactly at the inclusive upper bound of pubkey_compute_hash()'s
+ * internal blob[512] buffer. Base64_Decode() must succeed and the function
+ * must return true, producing SHA-256( uint32be(512) || 0x42*512 ).
+ */
+static const char *EXACT_512_PUBKEY =
+    "ssh-ed25519 "
+    "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC"
+    "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC"
+    "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC"
+    "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC"
+    "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC"
+    "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC"
+    "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC"
+    "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC"
+    "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI="
+    " boundary@test";
+
+/* SHA-256( uint32be(512) || 0x42*512 ) — computed offline with Python */
+static const uint8_t EXPECTED_HASH_512[32] = {
+    0x54, 0x40, 0xab, 0x07, 0x15, 0x00, 0x29, 0xdb,
+    0x87, 0x55, 0x1f, 0x6d, 0x43, 0x1a, 0x82, 0x21,
+    0x4b, 0x34, 0xd6, 0xf6, 0x51, 0xff, 0xa4, 0x40,
+    0x88, 0x93, 0x10, 0x9e, 0x5f, 0x3e, 0x59, 0xda,
+};
+
+void test_compute_hash_accepts_exactly_512_byte_blob(void)
+{
+    uint8_t hash[32];
+    /* Must succeed: decoded blob fits exactly in the internal 512-byte buffer */
+    TEST_ASSERT_TRUE(pubkey_compute_hash(EXACT_512_PUBKEY, hash));
+    TEST_ASSERT_EQUAL_MEMORY(EXPECTED_HASH_512, hash, 32);
+}
+
 /* ------------------------------------------------------------------ */
 
 int main(void)
@@ -213,5 +254,6 @@ int main(void)
     RUN_TEST(test_compute_hash_rejects_malformed);
     RUN_TEST(test_compute_hash_comment_ignored);
     RUN_TEST(test_compute_hash_rejects_over_512_byte_blob);
+    RUN_TEST(test_compute_hash_accepts_exactly_512_byte_blob);
     return UNITY_END();
 }

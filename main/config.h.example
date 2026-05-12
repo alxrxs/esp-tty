@@ -42,13 +42,23 @@
  * -------------------------------------------------------------------------- */
 #define SSH_PORT    2222
 
-/* Single authorised public key in OpenSSH format, e.g.:
- *   "ssh-ed25519 AAAA... user@host"
- * Only ED25519 keys are supported (wolfSSH pubkey auth). */
-#define AUTHORIZED_PUBKEY  "ssh-ed25519 AAAA..."
+/* One OR MORE authorised public keys in OpenSSH format, comma-separated.
+ * This macro is consumed verbatim as the initializer for a C array of strings:
+ *
+ *     static const char *const keys[] = { AUTHORIZED_PUBKEYS };
+ *
+ * so each entry must be a quoted string literal, separated by commas, with no
+ * surrounding braces. Use a line-continuation backslash on each line except
+ * the last. Only ED25519 keys are supported (wolfSSH pubkey auth).
+ *
+ * Example with two keys (add or remove entries as needed): */
+#define AUTHORIZED_PUBKEYS \
+    "ssh-ed25519 AAAA...key1 user@host1", \
+    "ssh-ed25519 AAAA...key2 user@host2"
 
 /* OTA update authorised public key — used when the SSH username is "ota".
- * Can be the same as AUTHORIZED_PUBKEY or a separate deployment key.
+ * Can be the same as one of the AUTHORIZED_PUBKEYS or a separate deployment key.
+ * This one is still a single string (not a list).
  * Only ED25519 keys are supported.
  *
  * Usage: ssh -i <ota-key> -p 2222 ota@<device-ip> < firmware.bin.ota

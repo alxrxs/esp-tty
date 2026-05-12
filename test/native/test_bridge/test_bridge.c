@@ -206,11 +206,116 @@ void test_bridge_full_duplex_no_drops(void)
 }
 
 /* ------------------------------------------------------------------ */
+/*
+ * Synchronous callback-driven tests (no threads).
+ *
+ * These verify bridge_pump's termination conditions directly by using
+ * stub callbacks that count calls and return controlled values.
+ */
+
+/* Hard cap on read calls to prevent any accidental infinite loop. */
+#define MAX_READ_CALLS 20
+
+typedef struct {
+    int  call_count;
+    int  bytes_per_call;
+} counted_read_ctx_t;
+
+static int counted_read_cb(void *ctx, uint8_t *buf, size_t cap)
+{
+    counted_read_ctx_t *c = (counted_read_ctx_t *)ctx;
+    c->call_count++;
+    if (c->call_count > MAX_READ_CALLS) {
+        TEST_FAIL_MESSAGE("read_fn called too many times — bridge_pump likely looping");
+    }
+    int n = c->bytes_per_call;
+    if ((size_t)n > cap) n = (int)cap;
+    memset(buf, 0xAB, (size_t)n);
+    return n;
+}
+
+typedef struct {
+    int  call_count;
+    int  fail_on_call;   /* return -1 when call_count == fail_on_call */
+} fail_write_ctx_t;
+
+static int fail_write_cb(void *ctx, const uint8_t *buf, size_t len)
+{
+    (void)buf;
+    fail_write_ctx_t *c = (fail_write_ctx_t *)ctx;
+    c->call_count++;
+    if (c->call_count == c->fail_on_call) return -1;
+    return (int)len;
+}
+
+void test_bridge_terminates_on_write_error(void)
+{
+    counted_read_ctx_t rctx = {.call_count = 0, .bytes_per_call = 4};
+    fail_write_ctx_t   wctx = {.call_count = 0, .fail_on_call = 3};
+    volatile bool stop = false;
+
+    bridge_pump(counted_read_cb, &rctx,
+                fail_write_cb,   &wctx,
+                &stop);
+
+    /* Iteration 1: read (1), write (1, ok)
+     * Iteration 2: read (2), write (2, ok)
+     * Iteration 3: read (3), write (3, -1) -> break
+     */
+    TEST_ASSERT_EQUAL_INT(3, rctx.call_count);
+    TEST_ASSERT_EQUAL_INT(3, wctx.call_count);
+}
+
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    int             call_count;
+    int             set_stop_on_call;
+    volatile bool  *stop_flag;
+} stop_setting_write_ctx_t;
+
+static int stop_setting_write_cb(void *ctx, const uint8_t *buf, size_t len)
+{
+    (void)buf;
+    stop_setting_write_ctx_t *c = (stop_setting_write_ctx_t *)ctx;
+    c->call_count++;
+    if (c->call_count == c->set_stop_on_call) {
+        *(c->stop_flag) = true;
+    }
+    return (int)len;
+}
+
+void test_bridge_stop_observed_before_next_read(void)
+{
+    counted_read_ctx_t rctx = {.call_count = 0, .bytes_per_call = 4};
+    volatile bool stop = false;
+    stop_setting_write_ctx_t wctx = {.call_count = 0,
+                                     .set_stop_on_call = 2,
+                                     .stop_flag = &stop};
+
+    bridge_pump(counted_read_cb,        &rctx,
+                stop_setting_write_cb,  &wctx,
+                &stop);
+
+    /* The loop checks *stop at the top (bridge.c:15 `while (!*stop)`).
+     * Iteration 1: read (1), write (1) — stop still false
+     * Iteration 2: read (2), write (2) — write sets stop=true, returns ok
+     * Top of loop: *stop is true, loop exits before a 3rd read.
+     * Tight bound: exactly 2 reads, exactly 2 writes.
+     */
+    TEST_ASSERT_EQUAL_INT(2, wctx.call_count);
+    TEST_ASSERT_EQUAL_INT(2, rctx.call_count);
+    TEST_ASSERT_TRUE(stop);
+}
+
+/* ------------------------------------------------------------------ */
 int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_bridge_lossless_ordering);
     RUN_TEST(test_bridge_stop_flag_terminates);
     RUN_TEST(test_bridge_full_duplex_no_drops);
+    RUN_TEST(test_bridge_terminates_on_write_error);
+    RUN_TEST(test_bridge_stop_observed_before_next_read);
     return UNITY_END();
 }

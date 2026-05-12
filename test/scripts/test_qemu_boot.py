@@ -49,6 +49,8 @@ FAILURE_PATTERNS = [
 # Note: NVS_KEYGEN uses an em-dash (U+2014) as in main.c
 NVS_KEYGEN_PATTERN      = re.compile(r"NVS keys not found — generating new AES-XTS-256 key")
 FINGERPRINT_PATTERN     = re.compile(r"Host key SHA-256 fingerprint: ([0-9a-f]{2}(?::[0-9a-f]{2}){31})")
+TTY_KEYS_LOADED_PATTERN = re.compile(r"(\d+) TTY key\(s\) loaded")
+PUMP_TEARDOWN_TIMEOUT_PATTERN = re.compile(r"did not exit within 5 s")
 
 
 def build_firmware():
@@ -128,6 +130,7 @@ def run_qemu(timeout_secs, flash_img=FLASH_IMG, label="test_qemu_boot"):
 
     nvs_keygen_seen = False
     fingerprint     = None
+    boot_log        = ""
 
     try:
         while time.time() < deadline:
@@ -136,6 +139,7 @@ def run_qemu(timeout_secs, flash_img=FLASH_IMG, label="test_qemu_boot"):
                 break
             line = line.rstrip()
             print(f"  QEMU | {line}")
+            boot_log += line + "\n"
 
             # Track required patterns as we go
             if NVS_KEYGEN_PATTERN.search(line):
@@ -155,6 +159,31 @@ def run_qemu(timeout_secs, flash_img=FLASH_IMG, label="test_qemu_boot"):
                     missing.append("NVS keys not found — generating new AES-XTS-256 key")
                 if fingerprint is None:
                     missing.append("Host key SHA-256 fingerprint: <32 hex pairs>")
+
+                # TTY key load assertion: boot log must show at least one TTY
+                # key loaded from AUTHORIZED_PUBKEYS (ssh_server.c logs
+                # "N TTY key(s) loaded" after parsing the compile-time list).
+                m_tty = TTY_KEYS_LOADED_PATTERN.search(boot_log)
+                tty_key_count = int(m_tty.group(1)) if m_tty else 0
+                assert tty_key_count >= 1, (
+                    "Expected at least one TTY key to be loaded from "
+                    "AUTHORIZED_PUBKEYS, but boot log shows 0 (or the "
+                    "message is missing)."
+                )
+
+                # No teardown timeout assertion: a clean boot must never log
+                # "teardown: pump_{ssh_to_usb,usb_to_ssh} did not exit within 5 s".
+                # The smoke test doesn't normally trigger a teardown, but if a
+                # future test boots a state that has TCP traffic mid-startup,
+                # this catches pump-task deadlocks early.
+                assert "did not exit within 5 s" not in boot_log, (
+                    "Pump-task teardown timed out during boot — indicates a "
+                    "regression in the thread-safety of session teardown "
+                    "(see commit 7b4f36d). This means the pump_done_sem "
+                    "semaphore wasn't given by the pump tasks before the 5 s "
+                    "deadline, suggesting wolfSSH state corruption or a "
+                    "deadlock."
+                )
 
                 if missing:
                     for name in missing:

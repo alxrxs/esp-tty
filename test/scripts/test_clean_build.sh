@@ -59,7 +59,7 @@ cat > "$CONFIG_H" <<'CONFEOF'
 #define WIFI_SSID              "test-ssid"
 #define WIFI_PASS              "test-pass"
 #define SSH_PORT               2222
-#define AUTHORIZED_PUBKEY      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f placeholder"
+#define AUTHORIZED_PUBKEYS     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f placeholder"
 #define OTA_AUTHORIZED_PUBKEY  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f placeholder"
 CONFEOF
 echo "[clean_build] Minimal config.h written"

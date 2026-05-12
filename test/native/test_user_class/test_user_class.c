@@ -104,6 +104,76 @@ void test_classify_andrei_is_rejected(void)
     TEST_ASSERT_EQUAL_INT(PUBKEY_USER_REJECTED, c);
 }
 
+/* ── Additional edge-case rejections ─────────────────────────────────────── */
+
+void test_classify_tty_with_trailing_cr(void)
+{
+    pubkey_user_class_t c = pubkey_classify_user("tty\r", 4);
+    TEST_ASSERT_EQUAL_INT(PUBKEY_USER_REJECTED, c);
+}
+
+void test_classify_tty_with_trailing_lf(void)
+{
+    pubkey_user_class_t c = pubkey_classify_user("tty\n", 4);
+    TEST_ASSERT_EQUAL_INT(PUBKEY_USER_REJECTED, c);
+}
+
+void test_classify_tty_with_trailing_space(void)
+{
+    pubkey_user_class_t c = pubkey_classify_user("tty ", 4);
+    TEST_ASSERT_EQUAL_INT(PUBKEY_USER_REJECTED, c);
+}
+
+void test_classify_tty_with_leading_space(void)
+{
+    pubkey_user_class_t c = pubkey_classify_user(" tty", 4);
+    TEST_ASSERT_EQUAL_INT(PUBKEY_USER_REJECTED, c);
+}
+
+void test_classify_mixed_case_tTy(void)
+{
+    /* Case-sensitive at every position — uppercase middle byte rejects */
+    pubkey_user_class_t c = pubkey_classify_user("tTy", 3);
+    TEST_ASSERT_EQUAL_INT(PUBKEY_USER_REJECTED, c);
+}
+
+void test_classify_oTa(void)
+{
+    pubkey_user_class_t c = pubkey_classify_user("oTa", 3);
+    TEST_ASSERT_EQUAL_INT(PUBKEY_USER_REJECTED, c);
+}
+
+void test_classify_very_long_username(void)
+{
+    /* Must not crash on absurdly long input — just reject cleanly */
+    char buf[256];
+    memset(buf, 'x', 256);
+    pubkey_user_class_t c = pubkey_classify_user(buf, 256);
+    TEST_ASSERT_EQUAL_INT(PUBKEY_USER_REJECTED, c);
+}
+
+void test_classify_unicode_bytes(void)
+{
+    /* UTF-8 'é' (0xC3 0xA9) followed by 'y' — three bytes, not "tty"/"ota" */
+    const unsigned char u[3] = {0xC3, 0xA9, 'y'};
+    pubkey_user_class_t c = pubkey_classify_user((const char *)u, 3);
+    TEST_ASSERT_EQUAL_INT(PUBKEY_USER_REJECTED, c);
+}
+
+void test_classify_username_with_embedded_nul(void)
+{
+    /* Embedded NUL in the middle; claimed length 5 is not 3 → rejected */
+    const char user[] = "tt\0y\0";
+    pubkey_user_class_t c = pubkey_classify_user(user, 5);
+    TEST_ASSERT_EQUAL_INT(PUBKEY_USER_REJECTED, c);
+}
+
+void test_classify_partial_match_with_extra_byte(void)
+{
+    pubkey_user_class_t c = pubkey_classify_user("ttyx", 4);
+    TEST_ASSERT_EQUAL_INT(PUBKEY_USER_REJECTED, c);
+}
+
 /* ── Main ────────────────────────────────────────────────────────────────── */
 
 int main(void)
@@ -122,5 +192,15 @@ int main(void)
     RUN_TEST(test_classify_null_is_rejected);
     RUN_TEST(test_classify_root_is_rejected);
     RUN_TEST(test_classify_andrei_is_rejected);
+    RUN_TEST(test_classify_tty_with_trailing_cr);
+    RUN_TEST(test_classify_tty_with_trailing_lf);
+    RUN_TEST(test_classify_tty_with_trailing_space);
+    RUN_TEST(test_classify_tty_with_leading_space);
+    RUN_TEST(test_classify_mixed_case_tTy);
+    RUN_TEST(test_classify_oTa);
+    RUN_TEST(test_classify_very_long_username);
+    RUN_TEST(test_classify_unicode_bytes);
+    RUN_TEST(test_classify_username_with_embedded_nul);
+    RUN_TEST(test_classify_partial_match_with_extra_byte);
     return UNITY_END();
 }
