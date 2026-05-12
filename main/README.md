@@ -67,26 +67,18 @@ capacity, TCP keepalive parameters, and the OTA rollback delay. Enterprise Wi-Fi
 
 ## Boot sequence
 
-```
-app_main()
-  1. NVS flash init (AES-XTS-256 encrypted)
-       nvs_flash_read_security_cfg  →  nvs_flash_generate_keys on first boot
-       nvs_flash_secure_init_partition("nvs", ...)
-  2. Ring buffer + scrollback allocation (PSRAM)
-       ring_create(RING_BUFFER_BYTES) x2  →  usb_to_ssh, ssh_to_usb
-       scrollback_create(SCROLLBACK_BUFFER_BYTES)  [non-fatal if it fails]
-  3. USB CDC ACM init + task spawn
-       usb_cdc_init(...)  →  usb_tx_task (FreeRTOS task)
-       [skipped when BRIDGE_LOOPBACK is defined]
-  4. Wi-Fi STA start
-       wifi_init_sta()
-  5. SSH server start
-       ssh_server_start(usb_to_ssh, ssh_to_usb, scrollback)
-         → host_key_load_or_generate()
-         → ssh_server_task (FreeRTOS task, listens TCP/22)
-  6. Rollback self-test timer
-       xTimerCreate (one-shot, OTA_ROLLBACK_DELAY_MS)
-       → rollback_timer_cb calls rollback_decide() + esp_ota_mark_app_valid_cancel_rollback()
+```mermaid
+flowchart TB
+    start(["app_main()"])
+    nvs["1. NVS flash init (AES-XTS-256)<br/>nvs_flash_read_security_cfg<br/>nvs_flash_generate_keys on first boot<br/>nvs_flash_secure_init_partition(&quot;nvs&quot;)"]
+    rings["2. Ring buffers + scrollback (PSRAM)<br/>ring_create(RING_BUFFER_BYTES) × 2<br/>scrollback_create(SCROLLBACK_BUFFER_BYTES)"]
+    usb["3. USB CDC ACM<br/>usb_cdc_init(...)<br/>usb_tx_task FreeRTOS task<br/><i>skipped when BRIDGE_LOOPBACK is defined</i>"]
+    wifi["4. Wi-Fi STA<br/>wifi_init_sta()"]
+    ssh["5. SSH server<br/>ssh_server_start(...)<br/>→ host_key_load_or_generate()<br/>→ ssh_server_task listens TCP/22"]
+    rollback["6. Rollback self-test timer<br/>xTimerCreate one-shot<br/>OTA_ROLLBACK_DELAY_MS<br/>→ rollback_decide() + mark_app_valid"]
+    done(["app_main returns;<br/>tasks keep running"])
+
+    start --> nvs --> rings --> usb --> wifi --> ssh --> rollback --> done
 ```
 
 ## Configuration
