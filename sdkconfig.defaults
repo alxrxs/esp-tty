@@ -69,6 +69,21 @@ CONFIG_LIBC_NEWLIB=y
 # ── Logging ───────────────────────────────────────────────────────────────
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 
+# ── CPU ───────────────────────────────────────────────────────────────────
+# ESP32-S3 supports 240 MHz; the IDF default is 160 MHz.  Bumping to 240 is a
+# free 1.5x on every non-HW-accelerated path (wolfSSH framing, pump loops,
+# memcpy, etc.) at the cost of a small power increase — negligible for a
+# USB-powered devkit.
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240
+
+# ── Compiler optimization ─────────────────────────────────────────────────
+# Production: -O2 ("performance").  IDF's default is -Og ("debug"), which
+# is 20-40% slower on integer-heavy paths and often produces *larger*
+# binaries because the linker can't dead-strip as aggressively.  We keep
+# full assertions (level 2) since the device is unattended.
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
 # ── FreeRTOS ──────────────────────────────────────────────────────────────
 # Tick rate: 1000 Hz gives 1ms resolution for pdMS_TO_TICKS in pump loops.
 CONFIG_FREERTOS_HZ=1000
