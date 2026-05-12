@@ -173,31 +173,31 @@ intentionally out of scope.
 
 ## Architecture
 
-```
-                           ┌──────────────────────────────────────┐
-                           │           ESP32-S3 firmware           │
-                           │                                       │
-[ target serial ]  USB-C   │  TinyUSB CDC ACM                      │
-        │                  │       │                               │
-        └──────────────────┼───────┤  cdc_rx_callback              │
-                           │       │   → scrollback (128 KB)       │
-                           │       │   → usb_to_ssh ring (16 KB)   │
-                           │       │                               │
-                           │       │                  pump tasks   │
-                           │       │                  ┌──────────┐ │
-                           │       └──────────────────┤ wolfSSH  │ │
-                           │       ┌──────────────────┤ session  │ │
-                           │       ▼                  └──────────┘ │
-                           │  ssh_to_usb ring (16 KB)              │
-                           │       │                               │
-                           │       ▼                               │
-                           │  usb_tx_task → TinyUSB CDC ACM        │
-                           └──────────────────────────────────────┘
-                                                          │
-                                                          ▼  WiFi
-                                              ┌─────────────────────┐
-                                              │  ssh -p 2222 tty@…  │
-                                              └─────────────────────┘
+```mermaid
+flowchart LR
+    target["Target board<br/>(USB-serial)"]
+    client["SSH client<br/>(ssh -p 2222 tty@…)"]
+
+    subgraph esp["ESP32-S3 firmware"]
+        direction TB
+        rx["cdc_rx_callback<br/>(TinyUSB)"]
+        sb[("scrollback<br/>128 KB PSRAM")]
+        u2s[("usb_to_ssh ring<br/>16 KB PSRAM")]
+        ssh{{"wolfSSH session<br/>TCP 2222"}}
+        s2u[("ssh_to_usb ring<br/>16 KB PSRAM")]
+        tx["usb_tx_task<br/>(TinyUSB)"]
+
+        rx --> sb
+        rx --> u2s
+        u2s -- "pump_usb_to_ssh" --> ssh
+        ssh -- "pump_ssh_to_usb" --> s2u
+        s2u --> tx
+    end
+
+    target -- "USB-C" --> rx
+    tx -- "USB-C" --> target
+    ssh -- "WiFi" --> client
+    client -- "WiFi" --> ssh
 ```
 
 The single FreeRTOS `ssh_server_task` runs the accept loop. On each
