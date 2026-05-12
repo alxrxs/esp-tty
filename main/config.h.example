@@ -164,12 +164,16 @@
 /* Max consecutive Wi-Fi reconnect attempts before wifi_init_sta() returns
  * ESP_FAIL.  After that the event handler keeps retrying forever anyway.
  *
- * Special value 0 = unlimited retries, NO failure ever signalled.
+ * 0 (the default) = unlimited retries, NO failure ever signalled.
  * wifi_init_sta() then blocks indefinitely on first boot until an IP is
- * obtained.  Intended for off-grid / unattended deployments where the AP
- * may be intermittent and there is no host to consume the failure signal. */
-#define WIFI_MAX_RETRY              10
-/* #define WIFI_MAX_RETRY              0   // off-grid: never give up */
+ * obtained.  Suits off-grid / unattended deployments where the AP may
+ * be intermittent and there is no human to consume the failure signal.
+ *
+ * Set to a positive integer if you'd rather have the device proceed
+ * without WiFi after a finite number of failures (e.g. for a tabletop
+ * dev workflow where you might want to use the USB side without WiFi). */
+#define WIFI_MAX_RETRY              0
+/* #define WIFI_MAX_RETRY              10  // tabletop: give up after 10 tries */
 
 /* DHCP watchdog timeout (seconds).  Armed when Wi-Fi associates (L2 link
  * up); fires if no IP is obtained within this window, restarts the DHCP

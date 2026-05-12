@@ -52,12 +52,13 @@
  * (see RECONNECT_FOREVER below), so the rest of the firmware can decide
  * what to do (e.g. keep the SSH task alive for a pre-connected session).
  *
- * Set WIFI_MAX_RETRY = 0 for unlimited retries with NO failure signal —
- * intended for off-grid / unattended deployments where the AP may be
- * intermittent.  wifi_init_sta() then waits indefinitely on first boot
- * until an IP is obtained. */
+ * Default 0 = unlimited retries with NO failure signal.  Suits the
+ * off-grid / unattended use case where the AP may be intermittent and
+ * there is no human nearby to consume a failure log.  Set to a positive
+ * integer in config.h if you want wifi_init_sta() to give up and let
+ * main proceed without an IP. */
 #ifndef WIFI_MAX_RETRY
-#define WIFI_MAX_RETRY  10
+#define WIFI_MAX_RETRY  0
 #endif
 
 /* DHCP watchdog: if Wi-Fi associates (L2 link is up) but no IP arrives

@@ -124,9 +124,21 @@ firmware.
 ### 3. Build and flash
 
 ```
-pio run -e esp32s3
-pio run -e esp32s3 --target upload
+make build     # compile firmware
+make flash     # compile + flash to the device (or just: make)
 ```
+
+The `Makefile` is a thin wrapper around PlatformIO. It auto-detects a
+CH340/CH343 USB-UART bridge (the typical ESP32-S3 flash port) so the
+upload doesn't accidentally target the device's own USB-CDC port. To
+override:
+
+```
+make flash PORT=/dev/ttyUSB0
+```
+
+The underlying PlatformIO commands still work too: `pio run -e esp32s3`
+and `pio run -e esp32s3 --target upload`.
 
 ### 4. Find the device IP
 
