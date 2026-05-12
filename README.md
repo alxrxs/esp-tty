@@ -5,16 +5,20 @@ don't want to lose access to.
 
 When the server's primary network goes down — bad netplan, locked-out
 firewall rule, NIC carrier loss, mis-pulled cable, switch failure on
-the management VLAN — you reach it via this device. Plug a USB↔TTL
-adapter wired to the server's serial header (or a built-in
-USB-to-serial debug port if it has one) into an ESP32-S3 DevKit. SSH
-into the ESP32-S3 over WiFi. You're at the server's login prompt and
-can fix whatever broke the network.
+the management VLAN — you reach it via this device. Plug the
+ESP32-S3 DevKit into any free USB port on the server. The server
+sees a virtual serial port (`/dev/ttyACM0` from the ESP32-S3's
+TinyUSB CDC ACM endpoint) and runs `agetty` on it just like a
+hardware serial console. SSH into the ESP32-S3 over WiFi: you're
+at the server's login prompt over a network path that has nothing
+to do with the server's main NIC.
 
-Scope: this needs Linux to be up — the USB CDC bridge depends on the
-server's USB stack and `agetty` running. It's for "Linux is healthy,
-network is broken," not for pre-boot, kernel panic, or a hung USB
-subsystem.
+Scope: the bridge needs Linux to be up — the USB CDC interface
+depends on the server's USB stack and `agetty` running. It's for
+"Linux is healthy, network is broken," not for pre-boot, kernel
+panic, or a hung USB subsystem. The ESP32-S3 is the USB device;
+the server is the USB host; there is no serial-header / TTL-adapter
+path.
 
 ```mermaid
 flowchart LR
