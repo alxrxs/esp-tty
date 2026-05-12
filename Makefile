@@ -9,9 +9,11 @@
 
 ENV  ?= esp32s3
 
-# Prefer the project-local venv if present (created by `python -m venv .venv`),
-# fall back to a system-wide `pio` on PATH.
-PIO := $(shell test -x .venv/bin/pio && echo .venv/bin/pio || echo pio)
+# Prefer the project-local venv if present, fall back to a system-wide `pio` on PATH.
+PIO := $(shell \
+  test -x .venv/bin/pio && echo .venv/bin/pio || \
+  test -x venv/bin/pio  && echo venv/bin/pio  || \
+  echo pio)
 
 # Auto-detect the upload port by USB Vendor ID, not by device-name pattern.
 #
