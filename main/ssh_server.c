@@ -14,6 +14,7 @@
 #include "host_key.h"
 #include "pubkey_auth.h"
 #include "bridge.h"
+#include "term_resize.h"
 #include "ota_session.h"
 #include "config.h"   /* SSH_PORT, AUTHORIZED_PUBKEYS, OTA_AUTHORIZED_PUBKEY */
 
@@ -134,7 +135,7 @@ static int term_resize_cb(WOLFSSH *ssh, word32 cols, word32 rows,
     /* Inject xterm "set window size" CSI into the USB-bound stream.
      * \033[8;rows;colst — received by the Linux host's terminal layer. */
     char seq[32];
-    int n = snprintf(seq, sizeof(seq), "\033[8;%u;%ut", (unsigned)rows, (unsigned)cols);
+    int n = term_resize_format(cols, rows, seq, sizeof seq);
     if (n > 0)
         ring_send(ring, (const uint8_t *)seq, (size_t)n);
     return WS_SUCCESS;
@@ -379,16 +380,14 @@ static void ssh_server_task(void *arg)
                                                  SCROLLBACK_DEFAULT_LINES,
                                                  &dump_len);
             if (dump && dump_len > 0) {
-                /* Count lines for the header */
-                int line_count = 0;
-                for (size_t bi = 0; bi < dump_len; bi++)
-                    if (dump[bi] == '\n') line_count++;
-
+                /* Count lines + format header via the scrollback library so
+                 * the formatting is unit-testable on the native host. */
+                int  line_count = scrollback_count_newlines(dump, dump_len);
                 char hdr[64];
-                int hdr_len = snprintf(hdr, sizeof(hdr),
-                    "\r\n\033[2m--- scrollback: %d lines ---\033[0m\r\n",
-                    line_count);
-                wolfSSH_stream_send(ssh, (byte *)hdr, (word32)hdr_len);
+                int  hdr_len = scrollback_format_header(line_count,
+                                                        hdr, sizeof hdr);
+                if (hdr_len > 0)
+                    wolfSSH_stream_send(ssh, (byte *)hdr, (word32)hdr_len);
 
                 const uint8_t *p = dump;
                 size_t rem = dump_len;
@@ -399,7 +398,7 @@ static void ssh_server_task(void *arg)
                     rem -= (size_t)n;
                 }
 
-                const char *footer = "\033[2m--- live ---\033[0m\r\n";
+                const char *footer = SCROLLBACK_FOOTER;
                 wolfSSH_stream_send(ssh, (byte *)footer,
                                     (word32)strlen(footer));
                 free(dump);

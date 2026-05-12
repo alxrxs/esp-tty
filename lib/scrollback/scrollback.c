@@ -5,6 +5,40 @@
 #include "scrollback.h"
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
+
+/* ── Shared pure formatters (compiled on both native and ESP32) ─────────── */
+
+const char SCROLLBACK_FOOTER[] = "\x1b[2m--- live ---\x1b[0m\r\n";
+
+int scrollback_count_newlines(const uint8_t *buf, size_t len)
+{
+    if (!buf || len == 0) return 0;
+    int n = 0;
+    for (size_t i = 0; i < len; i++)
+        if (buf[i] == '\n') n++;
+    return n;
+}
+
+int scrollback_format_header(int line_count, char *out, size_t out_sz)
+{
+    if (line_count < 0)  return 0;
+    if (out == NULL)     return 0;
+    if (out_sz == 0)     return 0;
+
+    /* snprintf returns the number of bytes that *would* have been written
+     * (excluding the NUL), regardless of truncation.  If that count is >=
+     * out_sz, the buffer was too small — return 0 so the caller doesn't
+     * emit a half-formed escape sequence. */
+    int n = snprintf(out, out_sz,
+                     "\r\n\x1b[2m--- scrollback: %d lines ---\x1b[0m\r\n",
+                     line_count);
+
+    if (n <= 0)              return 0;  /* encoding error (should not happen) */
+    if ((size_t)n >= out_sz) return 0;  /* truncated — no room for NUL */
+
+    return n;
+}
 
 /* ── Platform shims ─────────────────────────────────────────────────────── */
 

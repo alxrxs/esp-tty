@@ -282,6 +282,151 @@ void test_multiple_pushes_accumulate(void)
     free(sb);
 }
 
+/* ── scrollback_count_newlines ───────────────────────────────────────────── */
+
+void test_count_newlines_empty(void)
+{
+    /* len == 0 → 0, regardless of buf pointer */
+    TEST_ASSERT_EQUAL_INT(0, scrollback_count_newlines((const uint8_t *)"", 0));
+    /* NULL buf → 0 */
+    TEST_ASSERT_EQUAL_INT(0, scrollback_count_newlines(NULL, 42));
+}
+
+void test_count_newlines_none(void)
+{
+    const char *s = "hello world";
+    TEST_ASSERT_EQUAL_INT(
+        0, scrollback_count_newlines((const uint8_t *)s, strlen(s)));
+}
+
+void test_count_newlines_single(void)
+{
+    const char *s = "line\n";
+    TEST_ASSERT_EQUAL_INT(
+        1, scrollback_count_newlines((const uint8_t *)s, strlen(s)));
+}
+
+void test_count_newlines_multiple(void)
+{
+    const char *s = "a\nb\nc\n";
+    TEST_ASSERT_EQUAL_INT(
+        3, scrollback_count_newlines((const uint8_t *)s, strlen(s)));
+}
+
+void test_count_newlines_consecutive(void)
+{
+    const char *s = "\n\n\n";
+    TEST_ASSERT_EQUAL_INT(
+        3, scrollback_count_newlines((const uint8_t *)s, strlen(s)));
+}
+
+void test_count_newlines_with_cr(void)
+{
+    /* Only '\n' counts; '\r' is ignored. */
+    const char *s = "a\r\nb\r\n";
+    TEST_ASSERT_EQUAL_INT(
+        2, scrollback_count_newlines((const uint8_t *)s, strlen(s)));
+}
+
+void test_count_newlines_binary(void)
+{
+    /* Buffer of 0x00..0xFF — exactly one 0x0A byte (at index 10). */
+    uint8_t buf[256];
+    for (int i = 0; i < 256; i++) buf[i] = (uint8_t)i;
+    TEST_ASSERT_EQUAL_INT(1, scrollback_count_newlines(buf, sizeof buf));
+
+    /* Now sprinkle in a few extra 0x0A bytes. */
+    buf[0]   = 0x0A;
+    buf[100] = 0x0A;
+    buf[255] = 0x0A;
+    /* Original 0x0A at index 10 is still there → 4 total. */
+    TEST_ASSERT_EQUAL_INT(4, scrollback_count_newlines(buf, sizeof buf));
+}
+
+/* ── scrollback_format_header ────────────────────────────────────────────── */
+
+void test_format_header_zero_lines(void)
+{
+    char buf[64];
+    const char *expected =
+        "\r\n\x1b[2m--- scrollback: 0 lines ---\x1b[0m\r\n";
+    int n = scrollback_format_header(0, buf, sizeof buf);
+    TEST_ASSERT_EQUAL_INT((int)strlen(expected), n);
+    TEST_ASSERT_EQUAL_STRING(expected, buf);
+}
+
+void test_format_header_typical_42_lines(void)
+{
+    char buf[64];
+    const char *expected =
+        "\r\n\x1b[2m--- scrollback: 42 lines ---\x1b[0m\r\n";
+    int n = scrollback_format_header(42, buf, sizeof buf);
+    TEST_ASSERT_EQUAL_INT((int)strlen(expected), n);
+    TEST_ASSERT_EQUAL_STRING(expected, buf);
+}
+
+void test_format_header_buffer_too_small(void)
+{
+    char buf[8];
+    int n = scrollback_format_header(42, buf, sizeof buf);
+    TEST_ASSERT_EQUAL_INT(0, n);
+}
+
+void test_format_header_null_out(void)
+{
+    /* Must return 0 without dereferencing the NULL pointer. */
+    int n = scrollback_format_header(42, NULL, 64);
+    TEST_ASSERT_EQUAL_INT(0, n);
+}
+
+void test_format_header_negative_line_count(void)
+{
+    char buf[64];
+    int n = scrollback_format_header(-1, buf, sizeof buf);
+    TEST_ASSERT_EQUAL_INT(0, n);
+}
+
+void test_format_header_exact_fit(void)
+{
+    /* "\r\n\x1b[2m--- scrollback: 7 lines ---\x1b[0m\r\n" — exactly strlen
+     * bytes of payload.  Allocate strlen+1 to fit payload + NUL. */
+    const char *expected =
+        "\r\n\x1b[2m--- scrollback: 7 lines ---\x1b[0m\r\n";
+    size_t need = strlen(expected) + 1;
+
+    char *buf_ok = malloc(need);
+    TEST_ASSERT_NOT_NULL(buf_ok);
+    int n_ok = scrollback_format_header(7, buf_ok, need);
+    TEST_ASSERT_EQUAL_INT((int)strlen(expected), n_ok);
+    TEST_ASSERT_EQUAL_STRING(expected, buf_ok);
+    free(buf_ok);
+
+    /* One byte too small (no room for NUL) → return 0. */
+    char *buf_short = malloc(need - 1);
+    TEST_ASSERT_NOT_NULL(buf_short);
+    int n_short = scrollback_format_header(7, buf_short, need - 1);
+    TEST_ASSERT_EQUAL_INT(0, n_short);
+    free(buf_short);
+}
+
+void test_format_header_large_line_count(void)
+{
+    char buf[64];
+    const char *expected =
+        "\r\n\x1b[2m--- scrollback: 999999 lines ---\x1b[0m\r\n";
+    int n = scrollback_format_header(999999, buf, sizeof buf);
+    TEST_ASSERT_EQUAL_INT((int)strlen(expected), n);
+    TEST_ASSERT_EQUAL_STRING(expected, buf);
+}
+
+/* ── SCROLLBACK_FOOTER constant ──────────────────────────────────────────── */
+
+void test_footer_constant_matches_expected(void)
+{
+    TEST_ASSERT_EQUAL_STRING("\x1b[2m--- live ---\x1b[0m\r\n",
+                             SCROLLBACK_FOOTER);
+}
+
 /* ── Main ────────────────────────────────────────────────────────────────── */
 
 int main(void)
@@ -298,5 +443,23 @@ int main(void)
     RUN_TEST(test_wrap_and_get_lines_correct);
     RUN_TEST(test_get_lines_zero_max_returns_null_or_empty);
     RUN_TEST(test_multiple_pushes_accumulate);
+
+    /* New pure-formatter tests */
+    RUN_TEST(test_count_newlines_empty);
+    RUN_TEST(test_count_newlines_none);
+    RUN_TEST(test_count_newlines_single);
+    RUN_TEST(test_count_newlines_multiple);
+    RUN_TEST(test_count_newlines_consecutive);
+    RUN_TEST(test_count_newlines_with_cr);
+    RUN_TEST(test_count_newlines_binary);
+    RUN_TEST(test_format_header_zero_lines);
+    RUN_TEST(test_format_header_typical_42_lines);
+    RUN_TEST(test_format_header_buffer_too_small);
+    RUN_TEST(test_format_header_null_out);
+    RUN_TEST(test_format_header_negative_line_count);
+    RUN_TEST(test_format_header_exact_fit);
+    RUN_TEST(test_format_header_large_line_count);
+    RUN_TEST(test_footer_constant_matches_expected);
+
     return UNITY_END();
 }

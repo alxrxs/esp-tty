@@ -78,17 +78,23 @@ idf_component_register(
         "usb_cdc.c"
         "${CMAKE_CURRENT_LIST_DIR}/../lib/ring/ring.c"
         "${CMAKE_CURRENT_LIST_DIR}/../lib/bridge/bridge.c"
+        "${CMAKE_CURRENT_LIST_DIR}/../lib/usb_cdc_drain/usb_cdc_drain.c"
+        "${CMAKE_CURRENT_LIST_DIR}/../lib/term_resize/term_resize.c"
         "ssh_server.c"
         "host_key.c"
         "${CMAKE_CURRENT_LIST_DIR}/../lib/pubkey_auth/pubkey_auth.c"
         "ota_session.c"
         "${CMAKE_CURRENT_LIST_DIR}/../lib/ota_verify/ota_verify.c"
+        "${CMAKE_CURRENT_LIST_DIR}/../lib/ota_stream/ota_stream.c"
     INCLUDE_DIRS
         "."
         "${CMAKE_CURRENT_LIST_DIR}/../lib/ring"
         "${CMAKE_CURRENT_LIST_DIR}/../lib/bridge"
+        "${CMAKE_CURRENT_LIST_DIR}/../lib/usb_cdc_drain"
+        "${CMAKE_CURRENT_LIST_DIR}/../lib/term_resize"
         "${CMAKE_CURRENT_LIST_DIR}/../lib/pubkey_auth"
         "${CMAKE_CURRENT_LIST_DIR}/../lib/ota_verify"
+        "${CMAKE_CURRENT_LIST_DIR}/../lib/ota_stream"
     REQUIRES
         wolfssl
         wolfssl__wolfssh

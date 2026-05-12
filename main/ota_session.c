@@ -21,6 +21,7 @@
 
 #include "ota_session.h"
 #include "ota_verify.h"
+#include "ota_stream.h"
 #include "config.h"   /* OTA_AUTHORIZED_PUBKEY */
 
 #include <string.h>
@@ -49,13 +50,67 @@ extern const uint8_t _binary_aes_key_start[];
 extern const uint8_t _binary_aes_key_end[];
 #endif
 
-/* ── Read/write chunk size ───────────────────────────────────────────────── */
-#define OTA_READ_CHUNK  2048
+/* Maximum total OTA image size we will accept.  The flash OTA partitions
+ * are ~4 MiB; allow some headroom for the OTA wrapper (44-byte header +
+ * 64-byte signature ≈ 108 bytes) but cap below the 8 MiB PSRAM ceiling. */
+#define MAX_OTA_SIZE             (6u * 1024u * 1024u)
+
+/* How many WS_WANT_READ-induced "transient 0-return" events the
+ * ota_stream accumulator should tolerate before giving up.  Each transient
+ * triggers a 10 ms vTaskDelay inside wolfssh_read_adapter, so 60000 ≈
+ * 10 minutes of total idle before the session is considered dead — well
+ * past the original infinite-retry behaviour for realistic uploads. */
+#define MAX_OTA_ZERO_RETRIES     60000u
 
 /* ── Helper: send a short text reply to the SSH client ──────────────────── */
 static void ssh_send_reply(WOLFSSH *ssh, const char *msg)
 {
     wolfSSH_stream_send(ssh, (byte *)msg, (word32)strlen(msg));
+}
+
+/* ── ota_stream adapter: wolfSSH_stream_read → ota_stream_read_fn ─────────
+ *
+ *   > 0           → bytes read
+ *   WS_WANT_READ  → return 0 (transient); the accumulator's retry budget
+ *                   plus the vTaskDelay below mimic the original
+ *                   "sleep 10 ms and retry" hot loop.
+ *   <= 0 other    → return -1 (terminal EOF/error)
+ */
+static int wolfssh_read_adapter(void *ctx, uint8_t *buf, size_t cap)
+{
+    WOLFSSH *ssh = (WOLFSSH *)ctx;
+    int n = wolfSSH_stream_read(ssh, (byte *)buf, (word32)cap);
+    if (n == WS_WANT_READ) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+        return 0;
+    }
+    if (n <= 0) return -1;
+    return n;
+}
+
+/* ── PSRAM-backed allocator hooks for ota_stream ─────────────────────────
+ *
+ * The OTA image is potentially several MiB so the buffer must live in PSRAM,
+ * not internal SRAM.  ota_stream uses alloc + realloc (or just realloc if
+ * we pass NULL for alloc and the first realloc(NULL, n) call falls through
+ * — but heap_caps_realloc accepts NULL for the old pointer, so we expose
+ * realloc-via-NULL as the initial-allocation path and keep alloc_fn NULL... )
+ *
+ * Cleaner: provide explicit wrappers for both so the caller flow is obvious
+ * and so the free path uses the matching heap_caps_free.  heap_caps_malloc /
+ * heap_caps_realloc / heap_caps_free all use the same MALLOC_CAP_SPIRAM pool.
+ */
+static void *psram_alloc(size_t n)
+{
+    return heap_caps_malloc(n, MALLOC_CAP_SPIRAM);
+}
+static void *psram_realloc(void *p, size_t n)
+{
+    return heap_caps_realloc(p, n, MALLOC_CAP_SPIRAM);
+}
+static void  psram_free(void *p)
+{
+    heap_caps_free(p);
 }
 
 /* ── OTA session handler ─────────────────────────────────────────────────── */
@@ -94,73 +149,37 @@ esp_err_t ota_session_handler(WOLFSSH *ssh)
         return ESP_ERR_NO_MEM;
     }
 
-    /* Allocate read buffer on the heap (stack is limited in SSH task) */
-    uint8_t *buf = malloc(OTA_READ_CHUNK);
-    if (!buf) {
-        ota_verify_abort(ctx);
-        ssh_send_reply(ssh, "OTA_ERR: OOM\n");
-        return ESP_ERR_NO_MEM;
-    }
-
-    /* Stream the OTA image from the SSH channel.
-     * We don't know the image length in advance, so we read until EOF
-     * (wolfSSH_stream_read returns WS_EOF or <= 0 after the channel closes).
-     * total_image_len is passed as 0 on the first call; ota_verify_feed
-     * accepts this on first call and we update when we find out the actual
-     * size (not possible without knowing it upfront).
+    /* Stream the OTA image from the SSH channel into a PSRAM-backed
+     * growable buffer.  We don't know the image length in advance, so we
+     * read until wolfSSH_stream_read returns <= 0 (EOF or channel close).
      *
-     * Protocol: the client sends exactly image_len bytes then closes the
-     * write side.  We detect EOF and call ota_verify_end().
+     * The growable-buffer logic lives in lib/ota_stream/ so it is native-
+     * unit-tested without wolfSSH or ESP-IDF.  Here we just supply:
+     *   - wolfssh_read_adapter : translate WS_WANT_READ → 0 (transient).
+     *   - psram_*              : place the buffer in PSRAM, NOT internal SRAM.
      *
-     * Note: we accumulate the total length as we go and re-pass it each time.
-     * Since we pass total_image_len=0 until EOF, ota_verify will reject on
-     * the first feed call.  Instead, we buffer or use a two-pass scheme.
-     *
-     * Simplest correct approach: read everything into a heap buffer (PSRAM
-     * available), then do one call.  On S3 with 8MB PSRAM this handles any
-     * realistic firmware image (4MB partition, so max ~4MB signed image).
+     * On S3 with 8 MB PSRAM, MAX_OTA_SIZE (6 MiB) comfortably handles any
+     * realistic firmware image (4 MB partition → max ~4 MB signed image).
      */
-
-    /* Use a growable buffer in PSRAM for the full image */
     uint8_t *image_buf = NULL;
     size_t   image_len = 0;
-    size_t   image_cap = 0;
 
-    bool read_error = false;
-    while (1) {
-        int n = wolfSSH_stream_read(ssh, buf, OTA_READ_CHUNK);
-        if (n == WS_WANT_READ) {
-            vTaskDelay(pdMS_TO_TICKS(10));
-            continue;
+    ota_stream_result_t sr = ota_stream_read_all(
+        wolfssh_read_adapter, ssh,
+        MAX_OTA_SIZE,
+        MAX_OTA_ZERO_RETRIES,
+        psram_alloc, psram_realloc, psram_free,
+        &image_buf, &image_len);
+
+    if (sr != OTA_STREAM_OK) {
+        if (sr == OTA_STREAM_ERR_OOM) {
+            ESP_LOGE(TAG, "OOM reading OTA image");
+        } else if (sr == OTA_STREAM_ERR_TOOBIG) {
+            ESP_LOGE(TAG, "OTA image exceeds MAX_OTA_SIZE (%u bytes)",
+                     (unsigned)MAX_OTA_SIZE);
+        } else {
+            ESP_LOGE(TAG, "OTA stream read failed: %d", (int)sr);
         }
-        if (n <= 0)
-            break;
-
-        /* Grow buffer if needed */
-        if (image_len + (size_t)n > image_cap) {
-            size_t new_cap = (image_cap == 0) ? (OTA_READ_CHUNK * 8) : (image_cap * 2);
-            if (new_cap < image_len + (size_t)n)
-                new_cap = image_len + (size_t)n;
-            uint8_t *new_buf = heap_caps_realloc(image_buf, new_cap, MALLOC_CAP_SPIRAM);
-            if (!new_buf) {
-                /* PSRAM exhausted — this is a hard OOM (8 MB PSRAM, 4 MB max image).
-                 * Do NOT fall back to realloc(): image_buf was allocated from PSRAM
-                 * and realloc() does not know that, which causes undefined behavior
-                 * (heap corruption) on ESP-IDF. Treat as a real, unrecoverable OOM. */
-                ESP_LOGE(TAG, "OOM reading OTA image (have %zu bytes so far)", image_len);
-                read_error = true;
-                break;
-            }
-            image_buf = new_buf;
-            image_cap = new_cap;
-        }
-        memcpy(image_buf + image_len, buf, n);
-        image_len += (size_t)n;
-    }
-    free(buf);
-
-    if (read_error || image_len == 0) {
-        free(image_buf);
         ota_verify_abort(ctx);
         ssh_send_reply(ssh, "OTA_ERR: failed to read image or image empty\n");
         return ESP_FAIL;
@@ -170,7 +189,7 @@ esp_err_t ota_session_handler(WOLFSSH *ssh)
 
     /* Feed the full image to the verifier */
     ota_verify_err_t e = ota_verify_feed(ctx, image_buf, image_len, image_len);
-    free(image_buf);
+    psram_free(image_buf);
 
     if (e != OTA_VERIFY_OK) {
         ota_verify_abort(ctx);

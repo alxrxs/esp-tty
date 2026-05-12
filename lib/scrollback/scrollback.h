@@ -41,6 +41,36 @@ void scrollback_push(scrollback_t *sb, const uint8_t *data, size_t len);
  */
 uint8_t *scrollback_get_lines(scrollback_t *sb, int max_lines, size_t *out_len);
 
+/* ── Pure formatters (no platform deps; safe for native unit tests) ───────── */
+
+/*
+ * Count the number of '\n' bytes in `buf[0 .. len)`.  Returns 0 for
+ * NULL/empty input.  Used by the SSH server's replay path to report how
+ * many lines of scrollback are being sent.
+ */
+int scrollback_count_newlines(const uint8_t *buf, size_t len);
+
+/*
+ * Format the scrollback replay header into `out`:
+ *   "\r\n\x1b[2m--- scrollback: N lines ---\x1b[0m\r\n"
+ *
+ * Returns the number of bytes written to `out` (not counting the
+ * implicit NUL), or 0 if:
+ *   - line_count < 0           (caller passed a bogus value)
+ *   - out is NULL
+ *   - out_sz is too small for the formatted string + NUL
+ *
+ * Always NUL-terminates `out` when it returns > 0.  For typical line
+ * counts (1–4 digits) the result is < 50 bytes; 64 is comfortable.
+ */
+int scrollback_format_header(int line_count, char *out, size_t out_sz);
+
+/*
+ * Fixed footer emitted after the scrollback dump, just before live
+ * data begins.  Defined in scrollback.c.
+ */
+extern const char SCROLLBACK_FOOTER[];
+
 #ifdef __cplusplus
 }
 #endif

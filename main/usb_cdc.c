@@ -10,9 +10,11 @@
 
 #include "usb_cdc.h"
 #include "scrollback.h"
+#include "usb_cdc_drain.h"
 #include "esp_log.h"
 
 #include <inttypes.h>
+#include <stdint.h>
 
 #ifndef BRIDGE_LOOPBACK
 
@@ -31,36 +33,39 @@ static scrollback_t  *s_scrollback  = NULL;
 /* ------------------------------------------------------------------ */
 /* TinyUSB callbacks                                                   */
 
+/*
+ * Adapter that converts tinyusb_cdcacm_read's (int itf, ...) signature into
+ * the platform-agnostic usb_cdc_drain_read_fn contract.  The interface index
+ * is smuggled through the ctx pointer.
+ */
+static int tinyusb_read_adapter(void *ctx, uint8_t *buf, size_t cap,
+                                size_t *rxd)
+{
+    int itf = (int)(intptr_t)ctx;
+    esp_err_t err = tinyusb_cdcacm_read(itf, buf, cap, rxd);
+    return (err == ESP_OK) ? 0 : -1;
+}
+
 static void cdc_rx_callback(int itf, cdcacm_event_t *event)
 {
     (void)event;
-    uint8_t buf[64];
 
     /* Drain the TinyUSB CDC RX FIFO completely.  The FIFO is
      * CONFIG_TINYUSB_CDC_RX_BUFSIZE (512 B); if we read only one 64 B chunk
      * per callback, larger host writes get stuck in the FIFO and the device
      * NAKs subsequent OUT transfers — blocking host-side writes (agetty,
-     * shells, anything writing more than 64 B at once). */
-    while (1) {
-        size_t rxd = 0;
-        esp_err_t err = tinyusb_cdcacm_read(itf, buf, sizeof(buf), &rxd);
-        if (err != ESP_OK || rxd == 0) break;
-
-        /* Capture into scrollback before the ring — works even when no SSH
-         * client is connected and the ring is full. */
-        scrollback_push(s_scrollback, buf, rxd);
-
-        /* Non-blocking ring send; data drops if the ring is full or closed. */
-        int written = ring_try_send(s_usb_to_ssh, buf, rxd);
-        if (written >= 0 && (size_t)written < rxd) {
-            static uint32_t s_drop_count = 0;
-            s_drop_count++;
-            if ((s_drop_count & 0xFF) == 1) {   /* log every 256 drops */
-                ESP_LOGW(TAG, "CDC RX overflow: dropped %zu bytes (total drops: %" PRIu32 ")",
-                         rxd - (size_t)written, s_drop_count);
-            }
-        }
-    }
+     * shells, anything writing more than 64 B at once).
+     *
+     * The drain loop lives in lib/usb_cdc_drain/ so it can be exercised by
+     * native unit tests.  The per-chunk overflow log that used to live here
+     * has been dropped: the helper reports only the total drained byte count,
+     * not per-chunk ring-full information.  Drop visibility is preserved at
+     * the source: the host's USB stack will see NAKs / write stalls when the
+     * ring is consistently full. */
+    (void)usb_cdc_drain(tinyusb_read_adapter,
+                        (void *)(intptr_t)itf,
+                        s_usb_to_ssh,
+                        s_scrollback);
 }
 
 static void cdc_line_state_callback(int itf, cdcacm_event_t *event)
