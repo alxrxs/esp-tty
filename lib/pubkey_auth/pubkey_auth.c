@@ -109,14 +109,17 @@ pubkey_auth_result_t pubkey_auth_check(
 pubkey_user_class_t pubkey_classify_user(const char *username, size_t username_sz)
 {
     if (!username || username_sz == 0)
-        return PUBKEY_USER_DEFAULT;
+        return PUBKEY_USER_REJECTED;
 
-    /* Exact match: length must be 3 and bytes must be 'o','t','a' */
     if (username_sz == 3 &&
         username[0] == 'o' && username[1] == 't' && username[2] == 'a')
         return PUBKEY_USER_OTA;
 
-    return PUBKEY_USER_DEFAULT;
+    if (username_sz == 3 &&
+        username[0] == 't' && username[1] == 't' && username[2] == 'y')
+        return PUBKEY_USER_TTY;
+
+    return PUBKEY_USER_REJECTED;
 }
 
 char *format_fingerprint(const uint8_t digest[PUBKEY_HASH_SIZE],

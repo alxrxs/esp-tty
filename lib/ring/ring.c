@@ -94,6 +94,15 @@ void ring_close(ring_t *r)
     if (r) r->closed = true;
 }
 
+void ring_reopen(ring_t *r)
+{
+    if (!r) return;
+    /* Drain any stale data left from the previous session */
+    uint8_t tmp[64];
+    while (xStreamBufferReceive(r->sb, tmp, sizeof(tmp), 0) > 0) {}
+    r->closed = false;
+}
+
 int ring_try_send(ring_t *r, const uint8_t *buf, size_t len)
 {
     if (!r || !buf) return -1;
@@ -230,6 +239,17 @@ void ring_close(ring_t *r)
     r->closed = true;
     pthread_cond_broadcast(&r->not_full);
     pthread_cond_broadcast(&r->not_empty);
+    pthread_mutex_unlock(&r->mu);
+}
+
+void ring_reopen(ring_t *r)
+{
+    if (!r) return;
+    pthread_mutex_lock(&r->mu);
+    r->head   = 0;
+    r->tail   = 0;
+    r->used   = 0;
+    r->closed = false;
     pthread_mutex_unlock(&r->mu);
 }
 

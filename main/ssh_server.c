@@ -15,11 +15,12 @@
 #include "pubkey_auth.h"
 #include "bridge.h"
 #include "ota_session.h"
-#include "config.h"   /* SSH_PORT, AUTHORIZED_PUBKEY, OTA_AUTHORIZED_PUBKEY */
+#include "config.h"   /* SSH_PORT, AUTHORIZED_PUBKEYS, OTA_AUTHORIZED_PUBKEY */
 
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/select.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <unistd.h>
@@ -61,10 +62,10 @@ static bool          s_pumps_running = false;  /* true only while both pump task
  */
 static SemaphoreHandle_t s_pump_done_sem = NULL;
 
-/* Precomputed SHA-256 of the authorized public key blob.
-   Populated at startup from AUTHORIZED_PUBKEY in config.h. */
-static uint8_t s_authkey_hash[PUBKEY_HASH_SIZE];
-static bool    s_authkey_hash_ready = false;
+/* Precomputed SHA-256 hashes for all TTY authorized keys (AUTHORIZED_PUBKEYS). */
+#define MAX_TTY_KEYS 8
+static uint8_t s_authkey_hashes[MAX_TTY_KEYS][PUBKEY_HASH_SIZE];
+static int     s_authkey_count = 0;
 
 /* Precomputed SHA-256 of the OTA authorized public key blob.
    Populated at startup from OTA_AUTHORIZED_PUBKEY in config.h. */
@@ -83,36 +84,41 @@ static int user_auth_callback(byte authType, WS_UserAuthData *authData,
     if (authType != WOLFSSH_USERAUTH_PUBLICKEY)
         return WOLFSSH_USERAUTH_FAILURE;
 
-    if (!s_authkey_hash_ready)
+    if (s_authkey_count == 0)
         return WOLFSSH_USERAUTH_FAILURE;
 
-    /* Determine which key hash to check based on the username */
     pubkey_user_class_t uclass = pubkey_classify_user(
         (const char *)authData->username, authData->usernameSz);
 
-    const uint8_t *expected_hash;
+    if (uclass == PUBKEY_USER_REJECTED) {
+        ESP_LOGW(TAG, "Auth rejected: unknown username '%.*s'",
+                 (int)authData->usernameSz, (const char *)authData->username);
+        return WOLFSSH_USERAUTH_FAILURE;
+    }
+
     if (uclass == PUBKEY_USER_OTA) {
         if (!s_ota_authkey_hash_ready) {
             ESP_LOGW(TAG, "OTA auth attempted but OTA key not configured");
             return WOLFSSH_USERAUTH_FAILURE;
         }
-        expected_hash = s_ota_authkey_hash;
-    } else {
-        expected_hash = s_authkey_hash;
-    }
-
-    pubkey_auth_result_t res = pubkey_auth_check(
-        authData->sf.publicKey.publicKey,
-        authData->sf.publicKey.publicKeySz,
-        expected_hash);
-
-    if (res != PUBKEY_AUTH_OK) {
-        ESP_LOGW(TAG, "Auth rejected: unknown public key (user=%.*s)",
-                 (int)authData->usernameSz, (const char *)authData->username);
+        if (pubkey_auth_check(authData->sf.publicKey.publicKey,
+                              authData->sf.publicKey.publicKeySz,
+                              s_ota_authkey_hash) == PUBKEY_AUTH_OK)
+            return WOLFSSH_USERAUTH_SUCCESS;
+        ESP_LOGW(TAG, "Auth rejected: unknown public key (user=ota)");
         return WOLFSSH_USERAUTH_INVALID_PUBLICKEY;
     }
 
-    return WOLFSSH_USERAUTH_SUCCESS;
+    /* PUBKEY_USER_TTY: accept if any configured key matches */
+    for (int i = 0; i < s_authkey_count; i++) {
+        if (pubkey_auth_check(authData->sf.publicKey.publicKey,
+                              authData->sf.publicKey.publicKeySz,
+                              s_authkey_hashes[i]) == PUBKEY_AUTH_OK)
+            return WOLFSSH_USERAUTH_SUCCESS;
+    }
+    ESP_LOGW(TAG, "Auth rejected: unknown public key (user=%.*s)",
+             (int)authData->usernameSz, (const char *)authData->username);
+    return WOLFSSH_USERAUTH_INVALID_PUBLICKEY;
 }
 
 /* ------------------------------------------------------------------ */
@@ -180,7 +186,6 @@ static void pump_ssh_to_usb(void *arg)
                 &s_pump_stop);
     /* Signal the other direction to stop */
     s_pump_stop = true;
-    ring_close(a->ring);
     free(a);
     /* Signal teardown that this pump direction has exited.
      * teardown_active_session() waits on s_pump_done_sem twice before
@@ -212,16 +217,19 @@ static void teardown_active_session(void)
     if (s_active_ssh == NULL) return;
 
     s_pump_stop = true;
+    /* Unblock pump_usb_to_ssh which may be blocked on ring_recv(s_usb_to_ssh). */
+    ring_close(s_usb_to_ssh);
 
-    wolfSSH_shutdown(s_active_ssh);
+    /* Close the socket first: this makes wolfSSH_stream_read/send in the pump
+     * tasks return an error, causing them to exit.  We must NOT call any
+     * wolfSSH_* functions here while the pumps may still be inside wolfSSH —
+     * wolfSSL is not thread-safe and concurrent access corrupts the heap. */
     if (s_active_fd >= 0) {
         close(s_active_fd);
         s_active_fd = -1;
     }
 
-    /* Wait for both pump tasks to signal completion before freeing
-     * the wolfSSH context. Without this, an old pump task could continue
-     * calling wolfSSH_stream_read on a freed pointer (use-after-free).
+    /* Wait for both pump tasks to signal completion before touching wolfSSH.
      * Each pump task gives s_pump_done_sem once just before vTaskDelete;
      * we take twice (one per direction). Timeout of 5 s is a safety net.
      * Only wait when pump tasks were actually launched (not for OTA sessions
@@ -235,6 +243,9 @@ static void teardown_active_session(void)
         s_pumps_running = false;
     }
 
+    /* Pumps are gone — now safe to call wolfSSH_free.  We skip wolfSSH_shutdown
+     * because the socket is already closed: there is no way to send the SSH
+     * disconnect packet to the peer.  The peer will see the TCP RST/FIN. */
     wolfSSH_free(s_active_ssh);
     s_active_ssh = NULL;
 }
@@ -395,6 +406,11 @@ static void ssh_server_task(void *arg)
             }
         }
 
+        /* Re-open rings in case they were closed by the previous session's
+         * pump exit.  Must happen before pump tasks start reading/writing. */
+        ring_reopen(s_ssh_to_usb);
+        ring_reopen(s_usb_to_ssh);
+
         /* Launch bridge pump tasks */
         pump_arg_t *a2b = malloc(sizeof(*a2b));
         pump_arg_t *b2a = malloc(sizeof(*b2a));
@@ -414,9 +430,21 @@ static void ssh_server_task(void *arg)
         xTaskCreate(pump_ssh_to_usb, "pump_a2b", 8192, a2b, 6, NULL);
         xTaskCreate(pump_usb_to_ssh, "pump_b2a", 8192, b2a, 6, NULL);
 
-        /* Block until the session ends (pump tasks set s_pump_stop) */
+        /* Block until the session ends (pump tasks set s_pump_stop), but
+         * also poll the listen socket so an incoming connection preempts the
+         * current session. Without this, a new client would queue in the
+         * kernel backlog until the current session naturally ends. */
         while (!s_pump_stop) {
-            vTaskDelay(pdMS_TO_TICKS(200));
+            fd_set rfds;
+            FD_ZERO(&rfds);
+            FD_SET(listen_fd, &rfds);
+            struct timeval ptv = { .tv_sec = 0, .tv_usec = 200000 };
+            int sel = select(listen_fd + 1, &rfds, NULL, NULL, &ptv);
+            if (sel > 0 && FD_ISSET(listen_fd, &rfds)) {
+                ESP_LOGI(TAG, "New connection pending — preempting session");
+                s_pump_stop = true;
+                break;
+            }
         }
 
         ESP_LOGI(TAG, "Session ended, cleaning up");
@@ -437,12 +465,23 @@ esp_err_t ssh_server_start(ring_t *usb_to_ssh, ring_t *ssh_to_usb,
     s_ssh_to_usb = ssh_to_usb;
     s_scrollback = scrollback;
 
-    /* Precompute authorized key hash */
-    if (!pubkey_compute_hash(AUTHORIZED_PUBKEY, s_authkey_hash)) {
-        ESP_LOGE(TAG, "Failed to parse AUTHORIZED_PUBKEY from config.h");
+    /* Precompute hashes for all TTY authorized keys */
+    {
+        static const char *const keys[] = { AUTHORIZED_PUBKEYS };
+        int n = (int)(sizeof(keys) / sizeof(keys[0]));
+        if (n > MAX_TTY_KEYS) n = MAX_TTY_KEYS;
+        for (int i = 0; i < n; i++) {
+            if (pubkey_compute_hash(keys[i], s_authkey_hashes[s_authkey_count]))
+                s_authkey_count++;
+            else
+                ESP_LOGW(TAG, "Failed to parse TTY key %d from config.h", i);
+        }
+    }
+    if (s_authkey_count == 0) {
+        ESP_LOGE(TAG, "No valid keys in AUTHORIZED_PUBKEYS");
         return ESP_ERR_INVALID_ARG;
     }
-    s_authkey_hash_ready = true;
+    ESP_LOGI(TAG, "%d TTY key(s) loaded", s_authkey_count);
 
     /* Precompute OTA authorized key hash (optional — OTA disabled if not configured) */
 #ifdef OTA_AUTHORIZED_PUBKEY

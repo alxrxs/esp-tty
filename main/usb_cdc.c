@@ -35,28 +35,30 @@ static void cdc_rx_callback(int itf, cdcacm_event_t *event)
 {
     (void)event;
     uint8_t buf[64];
-    size_t  rxd = 0;
 
-    esp_err_t err = tinyusb_cdcacm_read(itf, buf, sizeof(buf), &rxd);
-    if (err != ESP_OK || rxd == 0) return;
+    /* Drain the TinyUSB CDC RX FIFO completely.  The FIFO is
+     * CONFIG_TINYUSB_CDC_RX_BUFSIZE (512 B); if we read only one 64 B chunk
+     * per callback, larger host writes get stuck in the FIFO and the device
+     * NAKs subsequent OUT transfers — blocking host-side writes (agetty,
+     * shells, anything writing more than 64 B at once). */
+    while (1) {
+        size_t rxd = 0;
+        esp_err_t err = tinyusb_cdcacm_read(itf, buf, sizeof(buf), &rxd);
+        if (err != ESP_OK || rxd == 0) break;
 
-    /* Use the non-blocking variant — ring_send() can block up to 50 ms per
-     * chunk, which risks stalling USB enumeration when called from a TinyUSB
-     * callback (interrupt-adjacent context).  ring_try_send() returns
-     * immediately; on overflow we drop the data and log a warning once per
-     * N dropped bursts (rate-limited to avoid flooding). */
-    /* Capture into scrollback before the ring — works even when no SSH
-     * client is connected and the ring is full.  scrollback_push only
-     * holds the lock while updating two integers, so it never stalls here. */
-    scrollback_push(s_scrollback, buf, rxd);
+        /* Capture into scrollback before the ring — works even when no SSH
+         * client is connected and the ring is full. */
+        scrollback_push(s_scrollback, buf, rxd);
 
-    int written = ring_try_send(s_usb_to_ssh, buf, rxd);
-    if (written >= 0 && (size_t)written < rxd) {
-        static uint32_t s_drop_count = 0;
-        s_drop_count++;
-        if ((s_drop_count & 0xFF) == 1) {   /* log every 256 drops */
-            ESP_LOGW(TAG, "CDC RX overflow: dropped %zu bytes (total drops: %" PRIu32 ")",
-                     rxd - (size_t)written, s_drop_count);
+        /* Non-blocking ring send; data drops if the ring is full or closed. */
+        int written = ring_try_send(s_usb_to_ssh, buf, rxd);
+        if (written >= 0 && (size_t)written < rxd) {
+            static uint32_t s_drop_count = 0;
+            s_drop_count++;
+            if ((s_drop_count & 0xFF) == 1) {   /* log every 256 drops */
+                ESP_LOGW(TAG, "CDC RX overflow: dropped %zu bytes (total drops: %" PRIu32 ")",
+                         rxd - (size_t)written, s_drop_count);
+            }
         }
     }
 }
@@ -77,14 +79,14 @@ static void usb_tx_task(void *arg)
 
     while (1) {
         int n = ring_recv(s_ssh_to_usb, buf, sizeof(buf));
-        if (n <= 0) break;
-
+        if (n <= 0) {
+            /* Ring closed between sessions — wait for it to reopen. */
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
         tinyusb_cdcacm_write_queue(TINYUSB_CDC_ACM_0, buf, (size_t)n);
         tinyusb_cdcacm_write_flush(TINYUSB_CDC_ACM_0, 0);
     }
-
-    ESP_LOGW(TAG, "TX task exiting (ring closed)");
-    vTaskDelete(NULL);
 }
 
 /* ------------------------------------------------------------------ */

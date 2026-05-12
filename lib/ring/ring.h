@@ -50,6 +50,13 @@ int ring_recv(ring_t *r, uint8_t *buf, size_t cap);
 void ring_close(ring_t *r);
 
 /*
+ * Re-open a previously closed ring so it can be reused for a new session.
+ * Drains any stale data remaining from the old session.
+ * Safe to call only when no tasks are currently blocked on the ring.
+ */
+void ring_reopen(ring_t *r);
+
+/*
  * Non-blocking variant of ring_send.
  * Writes as many bytes as currently fit without blocking.
  * Returns the number of bytes successfully written (0 .. len).

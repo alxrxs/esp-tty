@@ -66,9 +66,9 @@ pubkey_auth_result_t pubkey_auth_check(
  * pubkey_user_class_t — result of classifying an SSH username.
  */
 typedef enum {
-    PUBKEY_USER_DEFAULT,  /* normal session: use the default authkey hash */
-    PUBKEY_USER_OTA,      /* OTA session: use the OTA authkey hash        */
-    PUBKEY_USER_REJECTED, /* reserved for future use (e.g. anonymous)     */
+    PUBKEY_USER_TTY,      /* normal session: username "tty", use TTY key set  */
+    PUBKEY_USER_OTA,      /* OTA session: username "ota", use OTA key          */
+    PUBKEY_USER_REJECTED, /* unknown username — reject before checking key     */
 } pubkey_user_class_t;
 
 /*
@@ -77,9 +77,9 @@ typedef enum {
  * username     : pointer to the username bytes (may be NULL)
  * username_sz  : byte length of the username (NOT including NUL)
  *
- * Returns PUBKEY_USER_OTA if the username is exactly "ota" (length 3,
- * case-sensitive).  Returns PUBKEY_USER_DEFAULT in all other cases.
- * NULL-safe (returns PUBKEY_USER_DEFAULT for NULL username).
+ * Returns PUBKEY_USER_OTA for exactly "ota", PUBKEY_USER_TTY for exactly
+ * "tty", and PUBKEY_USER_REJECTED for everything else (including NULL).
+ * Comparisons are case-sensitive and length-exact.
  */
 pubkey_user_class_t pubkey_classify_user(const char *username, size_t username_sz);
 
