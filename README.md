@@ -400,17 +400,28 @@ deep mocking that has not been done:
 
 ## Dependencies
 
+Install the Python side from `requirements.txt`:
+
+```
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+```
+
+That installs PlatformIO (the build orchestrator) and `cryptography`
+(used by `scripts/sign_firmware.py` for AES-256-GCM + ECDSA-P256).
+The Makefile picks `.venv/bin/pio` automatically.
+
 | Dependency | Version / source |
 |---|---|
-| PlatformIO Core | Current stable |
+| PlatformIO Core | `requirements.txt` → `platformio>=6.1.0` (tested with 6.1.19) |
+| `cryptography` | `requirements.txt` → `cryptography>=3.0` (for OTA signing) |
 | ESP-IDF | 5.4.1 LTS (pinned via `espressif32@6.11.0`) |
 | wolfSSL | 5.8.2~1 (IDF component manager, `wolfssl/wolfssl`) |
 | wolfSSH | 1.4.20 (IDF component manager, `wolfssl/wolfssh`) |
 | mbedtls | Built into ESP-IDF; hardware-accelerated on S3 |
 | TinyUSB | Built into ESP-IDF |
 | QEMU Espressif fork | `esp_develop_9.2.2_20250817` (optional, for QEMU tests) |
-| openssl | System openssl (for key generation and native test stubs) |
-| python3-cryptography | `pip install cryptography` (for `sign_firmware.py`) |
+| openssl | System binary (used by `gen_ota_key.sh` for key generation) |
 
 ## Known limitations and future work
 

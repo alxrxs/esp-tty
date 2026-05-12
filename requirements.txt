@@ -1,0 +1,20 @@
+# Python dependencies for esp-tty firmware development.
+#
+# Install into a project-local venv (recommended — keeps your system Python
+# clean and lets the Makefile auto-detect the PIO binary):
+#
+#   python3 -m venv .venv
+#   .venv/bin/pip install -r requirements.txt
+#
+# Then `make`, `make build`, `make flash`, or `.venv/bin/pio` all Just Work.
+#
+# If you prefer a system-wide install on Debian/Ubuntu (where pip would
+# otherwise refuse on PEP 668 grounds):
+#
+#   pip install -r requirements.txt --break-system-packages
+#
+# Versions: lower-bounds only — newer is fine. The pins below mark the
+# minimum API levels actually used.
+
+platformio>=6.1.0      # build orchestrator + ESP-IDF wrapper
+cryptography>=3.0      # AES-256-GCM + ECDSA-P256 for scripts/sign_firmware.py
