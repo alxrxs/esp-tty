@@ -162,8 +162,24 @@
  * -------------------------------------------------------------------------- */
 
 /* Max consecutive Wi-Fi reconnect attempts before wifi_init_sta() returns
- * ESP_FAIL.  After that the event handler keeps retrying forever. */
+ * ESP_FAIL.  After that the event handler keeps retrying forever anyway.
+ *
+ * Special value 0 = unlimited retries, NO failure ever signalled.
+ * wifi_init_sta() then blocks indefinitely on first boot until an IP is
+ * obtained.  Intended for off-grid / unattended deployments where the AP
+ * may be intermittent and there is no host to consume the failure signal. */
 #define WIFI_MAX_RETRY              10
+/* #define WIFI_MAX_RETRY              0   // off-grid: never give up */
+
+/* DHCP watchdog timeout (seconds).  Armed when Wi-Fi associates (L2 link
+ * up); fires if no IP is obtained within this window, restarts the DHCP
+ * client, and re-arms.  Loops forever until DHCP succeeds.
+ *
+ * Protects against the case where the AP is up but the DHCP server is
+ * stuck — lwIP gives up DHCP DISCOVER after a few retries on its own,
+ * leaving the device IP-less indefinitely.  Set to 0 to disable. */
+#define DHCP_RETRY_TIMEOUT_SEC      30
+/* #define DHCP_RETRY_TIMEOUT_SEC      0   // disable watchdog */
 
 /* Max number of TTY pubkeys that can appear in AUTHORIZED_PUBKEYS.
  * Bump if you have more than 8 admins. */

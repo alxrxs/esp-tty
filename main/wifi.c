@@ -19,6 +19,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/timers.h"
 
 #include "esp_event.h"
 #include "esp_log.h"
@@ -49,9 +50,23 @@
 /* Maximum consecutive reconnect attempts before wifi_init_sta() returns
  * ESP_FAIL.  After that the event handler still keeps trying indefinitely
  * (see RECONNECT_FOREVER below), so the rest of the firmware can decide
- * what to do (e.g. keep the SSH task alive for a pre-connected session). */
+ * what to do (e.g. keep the SSH task alive for a pre-connected session).
+ *
+ * Set WIFI_MAX_RETRY = 0 for unlimited retries with NO failure signal —
+ * intended for off-grid / unattended deployments where the AP may be
+ * intermittent.  wifi_init_sta() then waits indefinitely on first boot
+ * until an IP is obtained. */
 #ifndef WIFI_MAX_RETRY
 #define WIFI_MAX_RETRY  10
+#endif
+
+/* DHCP watchdog: if Wi-Fi associates (L2 link is up) but no IP arrives
+ * within this many seconds, restart the DHCP client (stop + start).
+ * Catches the case where the AP is up but the DHCP server is unresponsive
+ * — lwIP gives up DHCP DISCOVER after a handful of retries; this loops
+ * forever.  Set to 0 to disable. */
+#ifndef DHCP_RETRY_TIMEOUT_SEC
+#define DHCP_RETRY_TIMEOUT_SEC  30
 #endif
 
 /* DHCP-client hostname.  Sent in the DHCP DISCOVER request, so the device
@@ -123,6 +138,26 @@ static int                s_retry_num = 0;
  * from a task if needed. */
 static esp_netif_t *s_sta_netif = NULL;
 
+/* DHCP watchdog: armed on STA_CONNECTED, disarmed on STA_GOT_IP.  If it
+ * fires before an IP arrives, we kick the DHCP client and re-arm. */
+#if DHCP_RETRY_TIMEOUT_SEC > 0
+static TimerHandle_t s_dhcp_watchdog = NULL;
+
+static void dhcp_watchdog_cb(TimerHandle_t t)
+{
+    (void)t;
+    if (!s_sta_netif) return;
+    ESP_LOGW(TAG, "no IP after %d s — restarting DHCP client",
+             DHCP_RETRY_TIMEOUT_SEC);
+    /* dhcpc_stop() may return ESP_ERR_ESP_NETIF_DHCP_ALREADY_STOPPED;
+     * either way, dhcpc_start() restarts the discover sequence. */
+    esp_netif_dhcpc_stop(s_sta_netif);
+    esp_netif_dhcpc_start(s_sta_netif);
+    /* Re-arm so this loops until we get a lease. */
+    xTimerStart(s_dhcp_watchdog, 0);
+}
+#endif
+
 /* --------------------------------------------------------------------------
  * Event handler
  *
@@ -140,6 +175,19 @@ static void wifi_event_handler(void *arg,
             ESP_LOGI(TAG, "STA started, connecting to \"%s\" …", WIFI_SSID);
             esp_wifi_connect();
 
+        } else if (event_id == WIFI_EVENT_STA_CONNECTED) {
+            /* L2 association succeeded; DHCP DISCOVER should follow within
+             * a few seconds.  Arm the watchdog so a stuck DHCP server
+             * doesn't leave us without an IP forever. */
+#if DHCP_RETRY_TIMEOUT_SEC > 0
+            if (s_dhcp_watchdog) {
+                xTimerChangePeriod(s_dhcp_watchdog,
+                                   pdMS_TO_TICKS(DHCP_RETRY_TIMEOUT_SEC * 1000),
+                                   0);
+                xTimerStart(s_dhcp_watchdog, 0);
+            }
+#endif
+
         } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
             wifi_event_sta_disconnected_t *ev =
                 (wifi_event_sta_disconnected_t *)event_data;
@@ -147,10 +195,21 @@ static void wifi_event_handler(void *arg,
             /* Clear the connected bit so callers that poll it see the drop. */
             xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
 
-            if (s_retry_num < WIFI_MAX_RETRY) {
+#if DHCP_RETRY_TIMEOUT_SEC > 0
+            /* L2 link is down; pause the watchdog until we re-associate. */
+            if (s_dhcp_watchdog) xTimerStop(s_dhcp_watchdog, 0);
+#endif
+
+            const bool infinite = (WIFI_MAX_RETRY == 0);
+            if (infinite || s_retry_num < WIFI_MAX_RETRY) {
                 s_retry_num++;
-                ESP_LOGW(TAG, "disconnected (reason %d), retry %d/%d",
-                         ev->reason, s_retry_num, WIFI_MAX_RETRY);
+                if (infinite) {
+                    ESP_LOGW(TAG, "disconnected (reason %d), retry %d (infinite)",
+                             ev->reason, s_retry_num);
+                } else {
+                    ESP_LOGW(TAG, "disconnected (reason %d), retry %d/%d",
+                             ev->reason, s_retry_num, WIFI_MAX_RETRY);
+                }
                 esp_wifi_connect();
             } else {
                 /* Signal permanent failure to wifi_init_sta()'s wait. */
@@ -176,6 +235,11 @@ static void wifi_event_handler(void *arg,
         ESP_LOGI(TAG, "Netmask    : " IPSTR, IP2STR(&ev->ip_info.netmask));
         ESP_LOGI(TAG, "Gateway    : " IPSTR, IP2STR(&ev->ip_info.gw));
 
+#if DHCP_RETRY_TIMEOUT_SEC > 0
+        /* DHCP succeeded — disarm the watchdog. */
+        if (s_dhcp_watchdog) xTimerStop(s_dhcp_watchdog, 0);
+#endif
+
         s_retry_num = 0;
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
     }
@@ -200,6 +264,23 @@ esp_err_t wifi_init_sta(void)
     /* 1. Create the EventGroup used to synchronise with app_main / ssh_task. */
     s_wifi_event_group = xEventGroupCreate();
     configASSERT(s_wifi_event_group);
+
+#if DHCP_RETRY_TIMEOUT_SEC > 0
+    /* Create the DHCP watchdog as a one-shot timer; the event handler
+     * arms it on WIFI_EVENT_STA_CONNECTED, the callback re-arms it after
+     * each kick.  Period set here as a safe initial value; actual period
+     * is set via xTimerChangePeriod when armed. */
+    s_dhcp_watchdog = xTimerCreate(
+        "dhcp_wd",
+        pdMS_TO_TICKS(DHCP_RETRY_TIMEOUT_SEC * 1000),
+        pdFALSE,    /* one-shot; callback re-arms manually */
+        NULL,
+        dhcp_watchdog_cb);
+    if (!s_dhcp_watchdog) {
+        ESP_LOGW(TAG, "Failed to create DHCP watchdog timer — DHCP "
+                      "retries will rely on lwIP's default behaviour");
+    }
+#endif
 
     /* 2. Initialise the TCP/IP stack and create the default event loop.
      *    Order matters: esp_netif_init() before esp_event_loop_create_default()
