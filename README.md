@@ -1,24 +1,31 @@
 # esp-tty — Nano Console Server
 
-Wireless serial console for any USB-serial target.
+Wireless out-of-band serial console — designed for a Linux server you
+don't want to lose access to.
 
-Plug a target board (Arduino, ESP32, RP2040, Raspberry Pi, network switch,
-laptop debug port — anything that exposes a USB-serial port) into an
-ESP32-S3 DevKit. SSH into the ESP32-S3 over WiFi. You are at the target's
-serial console. No UART cable to your workstation, no terminal-emulator
-window per target, no swapping which device is plugged into your laptop.
+When the server's primary network goes down (bad config, dead switch,
+misrouted cable, BIOS hang, post-OTA wedge), you reach it via this
+device. Plug the server's USB-serial port — or a USB↔TTL adapter
+wired to its serial header — into an ESP32-S3 DevKit. SSH into the
+ESP32-S3 over WiFi. You're at the server's login prompt, with full
+kernel-log visibility while you fix whatever broke the network.
 
 ```mermaid
 flowchart LR
-    target["Target board"] -- "USB-C" --> esp["ESP32-S3"] -- "WiFi" --> ssh["SSH client"]
+    target["Linux server<br/>(USB-serial)"] -- "USB-C" --> esp["ESP32-S3"] -- "WiFi" --> ssh["SSH client"]
 ```
 
+Any USB-serial target works — single-board computers, network
+switches, microcontroller dev boards, anything exposing a CDC ACM
+device — but the design intent is the always-on out-of-band console
+for an unattended server.
+
 A single SSH session is active at a time; opening a second one
-preempts the first within ~200 ms. Public-key authentication only. The
-username `tty` selects an interactive console session; the username
-`ota` accepts a signed-and-encrypted firmware update over the same SSH
-channel. Any other username is rejected before any key material is
-inspected.
+preempts the first within ~200 ms. Public-key authentication only.
+The username `tty` selects an interactive console session; the
+username `ota` accepts a signed-and-encrypted firmware update over
+the same SSH channel. Any other username is rejected before any key
+material is inspected.
 
 ## Features
 
@@ -96,9 +103,9 @@ Verify the fingerprint matches what was printed on first boot. The
 username **must** be `tty` for a console session — any other name is
 rejected.
 
-### Host-side setup
+### Server-side setup
 
-On the Linux box the ESP32-S3 plugs into via USB, enable the stock
+On the Linux server the ESP32-S3 plugs into via USB, enable the stock
 systemd serial-getty on the CDC device:
 
 ```
@@ -106,8 +113,10 @@ systemctl enable --now serial-getty@ttyACM0.service
 ```
 
 No drop-ins, no `TERM=` override, no special agetty flags needed.
-SSHing into the device now lands you at the host's login prompt over
-the bridge.
+SSHing into the device now lands you at the server's login prompt
+over the bridge, with full TTY behaviour (echo, line editing,
+job control, scrollback). This is the primary use case: a second
+network path to your server's console, independent of its main NIC.
 
 ## Configuration
 
@@ -178,7 +187,7 @@ intentionally out of scope.
 
 ```mermaid
 flowchart LR
-    target["Target board<br/>(USB-serial)"]
+    target["Linux server<br/>(USB-serial)"]
     client["SSH client<br/>(ssh tty@…)"]
 
     subgraph esp["ESP32-S3 firmware"]
