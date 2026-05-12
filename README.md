@@ -25,10 +25,15 @@ flowchart LR
     target["Linux server<br/>(USB-serial)"] -- "USB-C" --> esp["ESP32-S3"] -- "WiFi" --> ssh["SSH client"]
 ```
 
-Any USB-serial target works -- single-board computers, network
-switches, microcontroller dev boards, anything exposing a CDC ACM
-device -- but the design intent is the always-on out-of-band console
-for an unattended server.
+The other end has to be a USB *host* running something with a TTY
+on the resulting CDC node -- i.e. a general-purpose OS that runs an
+agetty / serial-console on /dev/ttyACM*. In practice that means a
+Linux server (the design intent), a Linux single-board computer
+(Raspberry Pi, etc.) running `serial-getty@ttyACM0`, or any other
+Linux/BSD/macOS host you want a remote console on. Network switches,
+microcontroller dev boards, and other USB-device peripherals don't
+fit -- they don't host USB, and they don't run a getty on a CDC node
+even if they did.
 
 A single SSH session is active at a time; opening a second one
 preempts the first within ~200 ms. Public-key authentication only.
