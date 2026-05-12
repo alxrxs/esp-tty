@@ -4,6 +4,8 @@
 patches/
   wolfssl__wolfssl/
     0001-rename-thread_local-enum-value-to-avoid-C11-keyword-conflict.patch
+  wolfssl__wolfssh/
+    0001-expose-resize-cb-setters-without-NO_FILESYSTEM.patch
 ```
 
 ## Why patches are stored here instead of in managed_components/
@@ -68,6 +70,28 @@ the bridge component in `components/wolfssl/` already excludes it from
 compilation (it uses linker section symbols as C variables, which is
 incompatible with the PlatformIO build). The patch is applied anyway to avoid
 confusion if the file is ever included in a future build configuration.
+
+### wolfssl__wolfssh/0001-expose-resize-cb-setters-without-NO_FILESYSTEM.patch
+
+**File patched:**
+`managed_components/wolfssl__wolfssh/src/ssh.c`
+
+**Problem:** `wolfSSH_SetTerminalResizeCb` and `wolfSSH_SetTerminalResizeCtx`
+are compiled inside `#if defined(WOLFSSH_TERM) && !defined(NO_FILESYSTEM)`.
+Our embedded build defines `NO_FILESYSTEM` (a hard constraint — wolfSSL cannot
+use filesystem APIs on the ESP32), so both symbols are compiled out despite
+`WOLFSSH_TERM` being defined. The header `wolfssh/ssh.h` declares them
+unconditionally, causing an undefined-reference linker error.
+
+**Fix:** Split the closing `#endif` so that `wolfSSH_ChangeTerminalSize`
+(which genuinely needs filesystem support to send resize requests) stays inside
+the combined guard, while the two callback-setter functions — which only write
+into `WOLFSSH` struct fields and have no filesystem dependency — move into a
+plain `#if defined(WOLFSSH_TERM)` block.
+
+**Upstream status:** The `!defined(NO_FILESYSTEM)` guard on the setter
+functions appears to be an oversight — there is no filesystem operation in
+their bodies. A fix has not been merged upstream as of 1.4.22.
 
 **Adding new patches:** Place `.patch` files under
 `patches/<idf_component_name>/`, where `<idf_component_name>` matches the

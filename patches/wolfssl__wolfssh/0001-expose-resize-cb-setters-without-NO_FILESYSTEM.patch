@@ -1,0 +1,11 @@
+--- a/src/ssh.c
++++ b/src/ssh.c
+@@ -1434,6 +1434,8 @@ int wolfSSH_ChangeTerminalSize(WOLFSSH* ssh, word32 columns, word32 rows,
+ }
+
+
++#endif /* defined(WOLFSSH_TERM) && !defined(NO_FILESYSTEM) */
++#if defined(WOLFSSH_TERM)
+ void wolfSSH_SetTerminalResizeCb(WOLFSSH* ssh, WS_CallbackTerminalSize cb)
+ {
+     ssh->termResizeCb = cb;
