@@ -63,8 +63,42 @@ static bool          s_pumps_running = false;  /* true only while both pump task
  */
 static SemaphoreHandle_t s_pump_done_sem = NULL;
 
-/* Precomputed SHA-256 hashes for all TTY authorized keys (AUTHORIZED_PUBKEYS). */
+/* Maximum number of TTY pubkeys to load from AUTHORIZED_PUBKEYS.
+ * Bump in config.h if you need more than 8 keys. */
+#ifndef MAX_TTY_KEYS
 #define MAX_TTY_KEYS 8
+#endif
+
+/* SSH handshake + auth timeout (seconds). The first wolfSSH_accept() call
+ * blocks until this many seconds elapse with no progress; protects against
+ * slow/malicious clients holding the session slot. */
+#ifndef SSH_HANDSHAKE_TIMEOUT_SEC
+#define SSH_HANDSHAKE_TIMEOUT_SEC 30
+#endif
+
+/* TCP keepalive: detect silently-dropped connections.
+ *   IDLE  = seconds of inactivity before the first probe
+ *   INTVL = seconds between subsequent probes
+ *   COUNT = number of unanswered probes before the connection is dropped
+ * Defaults (60/10/3) detect a dead peer in ~90 s. Tune up for cellular
+ * links (e.g. 600/60/3), down for fragile LANs. */
+#ifndef TCP_KEEPALIVE_IDLE_SEC
+#define TCP_KEEPALIVE_IDLE_SEC   60
+#endif
+#ifndef TCP_KEEPALIVE_INTVL_SEC
+#define TCP_KEEPALIVE_INTVL_SEC  10
+#endif
+#ifndef TCP_KEEPALIVE_COUNT
+#define TCP_KEEPALIVE_COUNT      3
+#endif
+
+/* Number of lines of scrollback to replay when a new SSH client connects.
+ * Lower this if you find the connect-time scrollback too noisy. */
+#ifndef SCROLLBACK_REPLAY_LINES
+#define SCROLLBACK_REPLAY_LINES  SCROLLBACK_DEFAULT_LINES   /* 1000 */
+#endif
+
+/* Precomputed SHA-256 hashes for all TTY authorized keys (AUTHORIZED_PUBKEYS). */
 static uint8_t s_authkey_hashes[MAX_TTY_KEYS][PUBKEY_HASH_SIZE];
 static int     s_authkey_count = 0;
 
@@ -318,9 +352,9 @@ static void ssh_server_task(void *arg)
 
         xSemaphoreGive(s_session_mutex);
 
-        /* 30 s timeout for handshake + auth — prevents a slow/malicious
+        /* Bounded timeout for handshake + auth — prevents a slow/malicious
          * client from holding the session slot indefinitely. */
-        struct timeval tv = { .tv_sec = 30, .tv_usec = 0 };
+        struct timeval tv = { .tv_sec = SSH_HANDSHAKE_TIMEOUT_SEC, .tv_usec = 0 };
         setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
         /* SSH handshake + auth (blocking, bounded by SO_RCVTIMEO) */
@@ -343,9 +377,9 @@ static void ssh_server_task(void *arg)
         /* TCP keepalive: detect silently-dropped connections.
          * After 60 s idle, send a probe every 10 s; give up after 3 misses. */
         int ka_on    = 1;
-        int ka_idle  = 60;
-        int ka_intvl = 10;
-        int ka_cnt   = 3;
+        int ka_idle  = TCP_KEEPALIVE_IDLE_SEC;
+        int ka_intvl = TCP_KEEPALIVE_INTVL_SEC;
+        int ka_cnt   = TCP_KEEPALIVE_COUNT;
         setsockopt(client_fd, SOL_SOCKET,  SO_KEEPALIVE,  &ka_on,    sizeof(ka_on));
         setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPIDLE,  &ka_idle,  sizeof(ka_idle));
         setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPINTVL, &ka_intvl, sizeof(ka_intvl));
@@ -371,13 +405,13 @@ static void ssh_server_task(void *arg)
         wolfSSH_SetTerminalResizeCtx(ssh, s_ssh_to_usb);
 
         /* Replay scrollback before going live ─────────────────────────
-         * Send the last SCROLLBACK_DEFAULT_LINES lines of USB device
+         * Send the last SCROLLBACK_REPLAY_LINES lines of USB device
          * output so the user sees e.g. kernel panics or boot logs that
          * arrived while no SSH client was connected. */
         if (s_scrollback) {
             size_t dump_len = 0;
             uint8_t *dump = scrollback_get_lines(s_scrollback,
-                                                 SCROLLBACK_DEFAULT_LINES,
+                                                 SCROLLBACK_REPLAY_LINES,
                                                  &dump_len);
             if (dump && dump_len > 0) {
                 /* Count lines + format header via the scrollback library so

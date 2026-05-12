@@ -96,3 +96,61 @@
 #define USB_PRODUCT_STRING       "Your Product"
 #define USB_SERIAL_STRING        "SN-00000001"
 #define USB_CDC_STRING           "Your Product CDC"
+
+/* --------------------------------------------------------------------------
+ * Network identity
+ *
+ * Sent as the DHCP DISCOVER hostname, so the device shows up by name in the
+ * router's lease table (and is reachable as <hostname>.<local-domain> if the
+ * router forwards local DNS).  Keep it short, lowercase, no dots — RFC 952
+ * applies (letters, digits, hyphens; must start with a letter).
+ * -------------------------------------------------------------------------- */
+#define DEVICE_HOSTNAME          "esp-tty"
+
+/* --------------------------------------------------------------------------
+ * Operational tuning — leave the defaults unless you have a reason
+ * -------------------------------------------------------------------------- */
+
+/* Max consecutive Wi-Fi reconnect attempts before wifi_init_sta() returns
+ * ESP_FAIL.  After that the event handler keeps retrying forever. */
+#define WIFI_MAX_RETRY              10
+
+/* Max number of TTY pubkeys that can appear in AUTHORIZED_PUBKEYS.
+ * Bump if you have more than 8 admins. */
+#define MAX_TTY_KEYS                8
+
+/* SSH handshake + auth timeout (seconds).  A client that does not complete
+ * authentication within this window is dropped, freeing the session slot. */
+#define SSH_HANDSHAKE_TIMEOUT_SEC   30
+
+/* TCP keepalive on the SSH socket (RFC 1122 §4.2.3.6).
+ *   IDLE  = seconds of inactivity before the first probe
+ *   INTVL = seconds between subsequent probes
+ *   COUNT = unanswered probes before the connection is dropped
+ * Defaults detect a dead peer in about 90 s.  Bump IDLE for cellular
+ * (e.g. 600 / 60 / 3); lower for fragile LAN paths. */
+#define TCP_KEEPALIVE_IDLE_SEC      60
+#define TCP_KEEPALIVE_INTVL_SEC     10
+#define TCP_KEEPALIVE_COUNT         3
+
+/* How long the new firmware has to prove itself before the bootloader
+ * rolls back.  Starts ticking at app_main(); the SSH server marks the
+ * image valid this many ms after boot. */
+#define OTA_ROLLBACK_DELAY_MS       30000
+
+/* --------------------------------------------------------------------------
+ * Memory sizing (PSRAM-backed) — increase only if you have a concrete need
+ * -------------------------------------------------------------------------- */
+
+/* Per-direction ring buffer between SSH and USB CDC.  16 KB handles
+ * bursty workloads at 115200 baud with room to spare. */
+#define RING_BUFFER_BYTES           (16 * 1024)
+
+/* Scrollback capacity: total bytes retained.  At 80 cols this is roughly
+ * 1600 lines of plain text; higher with shorter lines, lower with binary
+ * output.  Increase if your target produces dense log bursts. */
+#define SCROLLBACK_BUFFER_BYTES     (128 * 1024)
+
+/* Number of lines of scrollback to replay when a new SSH client connects.
+ * Lower this if the connect-time scrollback feels noisy. */
+#define SCROLLBACK_REPLAY_LINES     1000

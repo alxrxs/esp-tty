@@ -54,6 +54,14 @@
 #define WIFI_MAX_RETRY  10
 #endif
 
+/* DHCP-client hostname.  Sent in the DHCP DISCOVER request, so the device
+ * shows up by name in router lease tables (and is reachable as
+ * <hostname>.<local-domain> if the router runs a forwarding resolver).
+ * Define DEVICE_HOSTNAME in config.h to override. */
+#ifndef DEVICE_HOSTNAME
+#define DEVICE_HOSTNAME  "esp-tty"
+#endif
+
 #ifndef WIFI_USE_ENTERPRISE
 /* ── PSK path only ─────────────────────────────────────────────────────── */
 
@@ -201,6 +209,16 @@ esp_err_t wifi_init_sta(void)
 
     s_sta_netif = esp_netif_create_default_wifi_sta();
     configASSERT(s_sta_netif);
+
+    /* Hostname sent in DHCP DISCOVER; lets the router/DNS reach us by name.
+     * Must be set after netif creation but before the DHCP client runs
+     * (which happens implicitly once we get an IP). */
+    esp_err_t herr = esp_netif_set_hostname(s_sta_netif, DEVICE_HOSTNAME);
+    if (herr == ESP_OK)
+        ESP_LOGI(TAG, "DHCP hostname: %s", DEVICE_HOSTNAME);
+    else
+        ESP_LOGW(TAG, "esp_netif_set_hostname(\"%s\") failed: %s",
+                 DEVICE_HOSTNAME, esp_err_to_name(herr));
 
     /* 3. Initialise the Wi-Fi driver with the default (ROM-based) config. */
     wifi_init_config_t driver_cfg = WIFI_INIT_CONFIG_DEFAULT();

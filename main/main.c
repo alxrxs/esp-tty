@@ -17,22 +17,35 @@
 #include "usb_cdc.h"
 #include "ssh_server.h"
 #include "rollback_decision.h"
+#include "config.h"   /* RING_BUFFER_BYTES, SCROLLBACK_BUFFER_BYTES,
+                         OTA_ROLLBACK_DELAY_MS (all optional, defaults below) */
 
 static const char *TAG = "main";
 
-/* 16 KB ring buffers allocated in PSRAM (8 MB available on N16R8).
-   Both allocated here so app_main owns their lifetimes. */
-#define RING_SIZE (16 * 1024)
+/* Per-direction ring buffer size (PSRAM-backed). Override in config.h
+ * if you need more headroom for bursty workloads. */
+#ifndef RING_BUFFER_BYTES
+#define RING_BUFFER_BYTES (16 * 1024)
+#endif
+
+/* Scrollback capacity in bytes (PSRAM-backed circular buffer). Larger
+ * values let the device retain more history of the target's serial output
+ * between SSH sessions; bounded by free PSRAM. */
+#ifndef SCROLLBACK_BUFFER_BYTES
+#define SCROLLBACK_BUFFER_BYTES SCROLLBACK_BUFFER_BYTES   /* 128 KB by default */
+#endif
 
 /* ── Rollback self-test ───────────────────────────────────────────────────
  * After CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y, newly booted firmware is
  * in ESP_OTA_IMG_PENDING_VERIFY state.  If the app crashes or WDT fires
  * before marking valid, the bootloader rolls back to the previous image.
  *
- * We mark valid after ~30 seconds of successful SSH server operation.
- * The one-shot timer fires from a FreeRTOS timer task (not app_main).
- */
-#define ROLLBACK_DELAY_MS 30000
+ * We mark valid after this many milliseconds of successful SSH server
+ * operation. The one-shot timer fires from a FreeRTOS timer task
+ * (not app_main). */
+#ifndef OTA_ROLLBACK_DELAY_MS
+#define OTA_ROLLBACK_DELAY_MS 30000
+#endif
 
 static void rollback_timer_cb(TimerHandle_t xTimer)
 {
@@ -91,22 +104,22 @@ void app_main(void)
     ESP_LOGI(TAG, "NVS initialised (AES-XTS-256 encrypted)");
 
     /* ── 2. Shared ring buffers + scrollback (PSRAM) ─────────────── */
-    ring_t *usb_to_ssh = ring_create(RING_SIZE);
-    ring_t *ssh_to_usb = ring_create(RING_SIZE);
+    ring_t *usb_to_ssh = ring_create(RING_BUFFER_BYTES);
+    ring_t *ssh_to_usb = ring_create(RING_BUFFER_BYTES);
     if (!usb_to_ssh || !ssh_to_usb) {
         ESP_LOGE(TAG, "Failed to allocate ring buffers in PSRAM");
         abort();
     }
     ESP_LOGI(TAG, "Ring buffers allocated (%d KB each in PSRAM)",
-             RING_SIZE / 1024);
+             RING_BUFFER_BYTES / 1024);
 
-    scrollback_t *scrollback = scrollback_create(SCROLLBACK_DEFAULT_CAP);
+    scrollback_t *scrollback = scrollback_create(SCROLLBACK_BUFFER_BYTES);
     if (!scrollback) {
         /* Non-fatal: SSH sessions work, just no replay on connect. */
         ESP_LOGW(TAG, "scrollback_create failed — continuing without replay");
     } else {
         ESP_LOGI(TAG, "Scrollback buffer allocated (%u KB in PSRAM)",
-                 (unsigned)(SCROLLBACK_DEFAULT_CAP / 1024));
+                 (unsigned)(SCROLLBACK_BUFFER_BYTES / 1024));
     }
 
     /* ── 3. USB CDC ACM (Linux host serial port) ─────────────────── */
@@ -138,13 +151,13 @@ void app_main(void)
     /* One-shot 30-second timer: if the SSH server is still running by then,
        we consider the image valid and cancel pending rollback. */
     TimerHandle_t rollback_timer = xTimerCreate(
-        "rollback", pdMS_TO_TICKS(ROLLBACK_DELAY_MS),
+        "rollback", pdMS_TO_TICKS(OTA_ROLLBACK_DELAY_MS),
         pdFALSE,    /* one-shot */
         NULL,
         rollback_timer_cb);
     if (rollback_timer) {
         xTimerStart(rollback_timer, 0);
-        ESP_LOGI(TAG, "Rollback timer started (%d ms)", ROLLBACK_DELAY_MS);
+        ESP_LOGI(TAG, "Rollback timer started (%d ms)", OTA_ROLLBACK_DELAY_MS);
     } else {
         ESP_LOGW(TAG, "Failed to create rollback timer — calling mark_valid now");
         esp_ota_mark_app_valid_cancel_rollback();
