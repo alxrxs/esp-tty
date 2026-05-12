@@ -20,7 +20,7 @@ to confirm the image and cancel any pending bootloader rollback. If the timer
 cannot be created due to memory exhaustion, the mark-valid call is made
 immediately as a fail-safe.
 
-The SSH server (`ssh_server.c`) listens on `SSH_PORT` (default 2222) and handles
+The SSH server (`ssh_server.c`) listens on `SSH_PORT` (default 22) and handles
 all authentication and session management. Compile-time cipher hardening is
 applied via `wolfssh_options.h`: AES-CBC, AES-192, SHA-1 MACs, and DH key
 exchange are all disabled. The host key is an Ed25519 keypair generated once on
@@ -83,7 +83,7 @@ app_main()
   5. SSH server start
        ssh_server_start(usb_to_ssh, ssh_to_usb, scrollback)
          → host_key_load_or_generate()
-         → ssh_server_task (FreeRTOS task, listens TCP/2222)
+         → ssh_server_task (FreeRTOS task, listens TCP/22)
   6. Rollback self-test timer
        xTimerCreate (one-shot, OTA_ROLLBACK_DELAY_MS)
        → rollback_timer_cb calls rollback_decide() + esp_ota_mark_app_valid_cancel_rollback()
@@ -107,7 +107,7 @@ cp main/config.h.example main/config.h
 | `EAP_DISABLE_TIME_CHECK` | Bypass cert-expiry check if SNTP is not yet synced |
 | `AUTHORIZED_PUBKEYS` | Comma-separated ED25519 public keys for `tty` sessions (up to `MAX_TTY_KEYS`) |
 | `OTA_AUTHORIZED_PUBKEY` | Single ED25519 public key for `ota` sessions |
-| `SSH_PORT` | TCP port for the SSH server (default 2222) |
+| `SSH_PORT` | TCP port for the SSH server (default 22) |
 | `USB_VID` / `USB_PID` | TinyUSB device descriptor VID and PID |
 | `USB_MANUFACTURER_STRING` / `USB_PRODUCT_STRING` | USB string descriptors |
 | `DEVICE_HOSTNAME` | DHCP hostname (shows in router lease table) |

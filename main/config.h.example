@@ -40,7 +40,7 @@
 /* --------------------------------------------------------------------------
  * SSH server
  * -------------------------------------------------------------------------- */
-#define SSH_PORT    2222
+#define SSH_PORT    22
 
 /* One OR MORE authorised public keys in OpenSSH format, comma-separated.
  * This macro is consumed verbatim as the initializer for a C array of strings:
@@ -61,7 +61,7 @@
  * This one is still a single string (not a list).
  * Only ED25519 keys are supported.
  *
- * Usage: ssh -i <ota-key> -p 2222 ota@<device-ip> < firmware.bin.ota
+ * Usage: ssh -i <ota-key> ota@<device-ip> < firmware.bin.ota
  */
 #define OTA_AUTHORIZED_PUBKEY  "ssh-ed25519 AAAA..."
 

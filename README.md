@@ -22,7 +22,7 @@ inspected.
 ## Features
 
 - **Wireless serial bridge** — TinyUSB CDC ACM ↔ wolfSSH stream over
-  WiFi (TCP 2222), two 16 KB PSRAM ring buffers in between.
+  WiFi (TCP 22 by default), two 16 KB PSRAM ring buffers in between.
 - **128 KB scrollback** — captures the target's serial output even when
   no SSH client is connected; the last 1000 lines are replayed on every
   new SSH session.
@@ -82,13 +82,13 @@ I (1099) wifi: DHCP hostname: esp-tty
 I (1203) wifi: WiFi MAC: 1c:db:d4:74:a1:fc
 I (5026) wifi: IP address : 192.168.1.42
 I (5037) host_key: Host key SHA-256 fingerprint: 88:e0:a6:58:...
-I (5079) ssh_server: Listening on TCP port 2222
+I (5079) ssh_server: Listening on TCP port 22
 ```
 
 Connect:
 
 ```
-ssh -p 2222 tty@192.168.1.42
+ssh tty@192.168.1.42
 ```
 
 Verify the fingerprint matches what was printed on first boot. The
@@ -132,7 +132,7 @@ Sign and encrypt a built firmware image, then stream it over SSH:
 
 ```
 python3 scripts/sign_firmware.py .pio/build/esp32s3/firmware.bin
-ssh -i ~/.ssh/ota_key -p 2222 ota@<device-ip> < .pio/build/esp32s3/firmware.bin.ota
+ssh -i ~/.ssh/ota_key ota@<device-ip> < .pio/build/esp32s3/firmware.bin.ota
 ```
 
 The device:
@@ -176,14 +176,14 @@ intentionally out of scope.
 ```mermaid
 flowchart LR
     target["Target board<br/>(USB-serial)"]
-    client["SSH client<br/>(ssh -p 2222 tty@…)"]
+    client["SSH client<br/>(ssh tty@…)"]
 
     subgraph esp["ESP32-S3 firmware"]
         direction TB
         rx["cdc_rx_callback<br/>(TinyUSB)"]
         sb[("scrollback<br/>128 KB PSRAM")]
         u2s[("usb_to_ssh ring<br/>16 KB PSRAM")]
-        ssh{{"wolfSSH session<br/>TCP 2222"}}
+        ssh{{"wolfSSH session<br/>TCP 22"}}
         s2u[("ssh_to_usb ring<br/>16 KB PSRAM")]
         tx["usb_tx_task<br/>(TinyUSB)"]
 
