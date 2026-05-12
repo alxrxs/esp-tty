@@ -16,6 +16,7 @@
 /* ── wolfSSH features ──────────────────────────────────────────── */
 #define WOLFSSH_TEST_SERVER         /* enable server-side API        */
 #define WOLFSSH_TERM                /* accept PTY requests           */
+#define WOLFSSH_SHELL               /* enable window-change resize callback */
 #define DEFAULT_WINDOW_SZ  2000    /* shrunk for embedded use       */
 
 /* ── Crypto: ED25519 only (RSA disabled to save ~40 KB flash) ──── */

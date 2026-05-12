@@ -133,10 +133,8 @@ esp_err_t ota_session_handler(WOLFSSH *ssh)
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
-        if (n <= 0) {
-            /* EOF or error */
+        if (n <= 0)
             break;
-        }
 
         /* Grow buffer if needed */
         if (image_len + (size_t)n > image_cap) {

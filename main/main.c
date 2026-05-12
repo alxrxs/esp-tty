@@ -12,6 +12,7 @@
 #include "freertos/timers.h"
 
 #include "ring.h"
+#include "scrollback.h"
 #include "wifi.h"
 #include "usb_cdc.h"
 #include "ssh_server.h"
@@ -89,7 +90,7 @@ void app_main(void)
     ESP_ERROR_CHECK(err);
     ESP_LOGI(TAG, "NVS initialised (AES-XTS-256 encrypted)");
 
-    /* ── 2. Shared ring buffers (PSRAM) ──────────────────────────── */
+    /* ── 2. Shared ring buffers + scrollback (PSRAM) ─────────────── */
     ring_t *usb_to_ssh = ring_create(RING_SIZE);
     ring_t *ssh_to_usb = ring_create(RING_SIZE);
     if (!usb_to_ssh || !ssh_to_usb) {
@@ -99,9 +100,18 @@ void app_main(void)
     ESP_LOGI(TAG, "Ring buffers allocated (%d KB each in PSRAM)",
              RING_SIZE / 1024);
 
+    scrollback_t *scrollback = scrollback_create(SCROLLBACK_DEFAULT_CAP);
+    if (!scrollback) {
+        /* Non-fatal: SSH sessions work, just no replay on connect. */
+        ESP_LOGW(TAG, "scrollback_create failed — continuing without replay");
+    } else {
+        ESP_LOGI(TAG, "Scrollback buffer allocated (%u KB in PSRAM)",
+                 (unsigned)(SCROLLBACK_DEFAULT_CAP / 1024));
+    }
+
     /* ── 3. USB CDC ACM (Linux host serial port) ─────────────────── */
 #ifndef BRIDGE_LOOPBACK
-    ESP_ERROR_CHECK(usb_cdc_init(usb_to_ssh, ssh_to_usb));
+    ESP_ERROR_CHECK(usb_cdc_init(usb_to_ssh, ssh_to_usb, scrollback));
     ESP_ERROR_CHECK(usb_cdc_start_task());
     ESP_LOGI(TAG, "USB CDC ACM ready — plug USB-C cable to native USB port");
 #else
@@ -122,7 +132,7 @@ void app_main(void)
     /* host_key_load_or_generate needs Wi-Fi up for hardware RNG entropy.
        The assignment above ensures Wi-Fi start() has been called even
        if IP acquisition failed. */
-    ESP_ERROR_CHECK(ssh_server_start(usb_to_ssh, ssh_to_usb));
+    ESP_ERROR_CHECK(ssh_server_start(usb_to_ssh, ssh_to_usb, scrollback));
 
     /* ── 6. Rollback self-test timer ────────────────────────────────────── */
     /* One-shot 30-second timer: if the SSH server is still running by then,

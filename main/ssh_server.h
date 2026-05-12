@@ -16,6 +16,7 @@
 
 #include "esp_err.h"
 #include "ring.h"
+#include "scrollback.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -32,7 +33,8 @@ extern "C" {
  * This function creates a wolfSSH context internally and calls
  * host_key_load_or_generate() to populate it.
  */
-esp_err_t ssh_server_start(ring_t *usb_to_ssh, ring_t *ssh_to_usb);
+esp_err_t ssh_server_start(ring_t *usb_to_ssh, ring_t *ssh_to_usb,
+                           scrollback_t *scrollback);
 
 #ifdef __cplusplus
 }

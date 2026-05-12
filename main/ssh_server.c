@@ -10,15 +10,18 @@
  */
 
 #include "ssh_server.h"
+#include "scrollback.h"
 #include "host_key.h"
 #include "pubkey_auth.h"
 #include "bridge.h"
 #include "ota_session.h"
 #include "config.h"   /* SSH_PORT, AUTHORIZED_PUBKEY, OTA_AUTHORIZED_PUBKEY */
 
+#include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <unistd.h>
 #include <sys/time.h>
 
@@ -38,6 +41,7 @@ static const char *TAG = "ssh_server";
 static WOLFSSH_CTX  *s_ctx         = NULL;
 static ring_t       *s_usb_to_ssh  = NULL;
 static ring_t       *s_ssh_to_usb  = NULL;
+static scrollback_t *s_scrollback  = NULL;
 
 /* Active session (protected by s_session_mutex) */
 static SemaphoreHandle_t s_session_mutex;
@@ -109,6 +113,25 @@ static int user_auth_callback(byte authType, WS_UserAuthData *authData,
     }
 
     return WOLFSSH_USERAUTH_SUCCESS;
+}
+
+/* ------------------------------------------------------------------ */
+/* Terminal resize callback                                            */
+/* ------------------------------------------------------------------ */
+
+static int term_resize_cb(WOLFSSH *ssh, word32 cols, word32 rows,
+                          word32 widthPx, word32 heightPx, void *ctx)
+{
+    (void)ssh; (void)widthPx; (void)heightPx;
+    if (!ctx || cols == 0 || rows == 0) return WS_SUCCESS;
+    ring_t *ring = (ring_t *)ctx;
+    /* Inject xterm "set window size" CSI into the USB-bound stream.
+     * \033[8;rows;colst — received by the Linux host's terminal layer. */
+    char seq[32];
+    int n = snprintf(seq, sizeof(seq), "\033[8;%u;%ut", (unsigned)rows, (unsigned)cols);
+    if (n > 0)
+        ring_send(ring, (const uint8_t *)seq, (size_t)n);
+    return WS_SUCCESS;
 }
 
 /* ------------------------------------------------------------------ */
@@ -305,6 +328,17 @@ static void ssh_server_task(void *arg)
         struct timeval tv_off = { 0 };
         setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv_off, sizeof(tv_off));
 
+        /* TCP keepalive: detect silently-dropped connections.
+         * After 60 s idle, send a probe every 10 s; give up after 3 misses. */
+        int ka_on    = 1;
+        int ka_idle  = 60;
+        int ka_intvl = 10;
+        int ka_cnt   = 3;
+        setsockopt(client_fd, SOL_SOCKET,  SO_KEEPALIVE,  &ka_on,    sizeof(ka_on));
+        setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPIDLE,  &ka_idle,  sizeof(ka_idle));
+        setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPINTVL, &ka_intvl, sizeof(ka_intvl));
+        setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPCNT,   &ka_cnt,   sizeof(ka_cnt));
+
         /* Check if this is an OTA session (username == "ota") */
         const char *uname = wolfSSH_GetUsername(ssh);
         if (pubkey_classify_user(uname, uname ? strlen(uname) : 0) == PUBKEY_USER_OTA) {
@@ -317,6 +351,48 @@ static void ssh_server_task(void *arg)
             teardown_active_session();
             xSemaphoreGive(s_session_mutex);
             continue;
+        }
+
+        /* Register terminal resize callback — forwards window-change events
+         * from the SSH client as CSI sequences into the USB-bound ring. */
+        wolfSSH_SetTerminalResizeCb(ssh, term_resize_cb);
+        wolfSSH_SetTerminalResizeCtx(ssh, s_ssh_to_usb);
+
+        /* Replay scrollback before going live ─────────────────────────
+         * Send the last SCROLLBACK_DEFAULT_LINES lines of USB device
+         * output so the user sees e.g. kernel panics or boot logs that
+         * arrived while no SSH client was connected. */
+        if (s_scrollback) {
+            size_t dump_len = 0;
+            uint8_t *dump = scrollback_get_lines(s_scrollback,
+                                                 SCROLLBACK_DEFAULT_LINES,
+                                                 &dump_len);
+            if (dump && dump_len > 0) {
+                /* Count lines for the header */
+                int line_count = 0;
+                for (size_t bi = 0; bi < dump_len; bi++)
+                    if (dump[bi] == '\n') line_count++;
+
+                char hdr[64];
+                int hdr_len = snprintf(hdr, sizeof(hdr),
+                    "\r\n\033[2m--- scrollback: %d lines ---\033[0m\r\n",
+                    line_count);
+                wolfSSH_stream_send(ssh, (byte *)hdr, (word32)hdr_len);
+
+                const uint8_t *p = dump;
+                size_t rem = dump_len;
+                while (rem > 0) {
+                    int n = wolfSSH_stream_send(ssh, (byte *)p, (word32)rem);
+                    if (n <= 0) break;
+                    p   += (size_t)n;
+                    rem -= (size_t)n;
+                }
+
+                const char *footer = "\033[2m--- live ---\033[0m\r\n";
+                wolfSSH_stream_send(ssh, (byte *)footer,
+                                    (word32)strlen(footer));
+                free(dump);
+            }
         }
 
         /* Launch bridge pump tasks */
@@ -354,10 +430,12 @@ static void ssh_server_task(void *arg)
 /* Public API                                                          */
 /* ------------------------------------------------------------------ */
 
-esp_err_t ssh_server_start(ring_t *usb_to_ssh, ring_t *ssh_to_usb)
+esp_err_t ssh_server_start(ring_t *usb_to_ssh, ring_t *ssh_to_usb,
+                           scrollback_t *scrollback)
 {
     s_usb_to_ssh = usb_to_ssh;
     s_ssh_to_usb = ssh_to_usb;
+    s_scrollback = scrollback;
 
     /* Precompute authorized key hash */
     if (!pubkey_compute_hash(AUTHORIZED_PUBKEY, s_authkey_hash)) {

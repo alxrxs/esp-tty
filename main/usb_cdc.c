@@ -9,6 +9,7 @@
  */
 
 #include "usb_cdc.h"
+#include "scrollback.h"
 #include "esp_log.h"
 
 #include <inttypes.h>
@@ -19,11 +20,13 @@
 #include "freertos/task.h"
 #include "tinyusb.h"
 #include "tinyusb_cdc_acm.h"
+#include "tinyusb_default_config.h"
 
 static const char *TAG = "usb_cdc";
 
-static ring_t *s_usb_to_ssh = NULL;
-static ring_t *s_ssh_to_usb = NULL;
+static ring_t        *s_usb_to_ssh  = NULL;
+static ring_t        *s_ssh_to_usb  = NULL;
+static scrollback_t  *s_scrollback  = NULL;
 
 /* ------------------------------------------------------------------ */
 /* TinyUSB callbacks                                                   */
@@ -42,6 +45,11 @@ static void cdc_rx_callback(int itf, cdcacm_event_t *event)
      * callback (interrupt-adjacent context).  ring_try_send() returns
      * immediately; on overflow we drop the data and log a warning once per
      * N dropped bursts (rate-limited to avoid flooding). */
+    /* Capture into scrollback before the ring — works even when no SSH
+     * client is connected and the ring is full.  scrollback_push only
+     * holds the lock while updating two integers, so it never stalls here. */
+    scrollback_push(s_scrollback, buf, rxd);
+
     int written = ring_try_send(s_usb_to_ssh, buf, rxd);
     if (written >= 0 && (size_t)written < rxd) {
         static uint32_t s_drop_count = 0;
@@ -82,12 +90,14 @@ static void usb_tx_task(void *arg)
 /* ------------------------------------------------------------------ */
 /* Public API                                                          */
 
-esp_err_t usb_cdc_init(ring_t *usb_to_ssh, ring_t *ssh_to_usb)
+esp_err_t usb_cdc_init(ring_t *usb_to_ssh, ring_t *ssh_to_usb,
+                       scrollback_t *scrollback)
 {
     s_usb_to_ssh = usb_to_ssh;
     s_ssh_to_usb = ssh_to_usb;
+    s_scrollback = scrollback;
 
-    const tinyusb_config_t tusb_cfg = {0};
+    const tinyusb_config_t tusb_cfg = TINYUSB_DEFAULT_CONFIG();
     ESP_ERROR_CHECK(tinyusb_driver_install(&tusb_cfg));
 
     const tinyusb_config_cdcacm_t acm_cfg = {
@@ -116,9 +126,10 @@ esp_err_t usb_cdc_start_task(void)
 
 #else /* BRIDGE_LOOPBACK — stubs, never called */
 
-esp_err_t usb_cdc_init(ring_t *usb_to_ssh, ring_t *ssh_to_usb)
+esp_err_t usb_cdc_init(ring_t *usb_to_ssh, ring_t *ssh_to_usb,
+                       scrollback_t *scrollback)
 {
-    (void)usb_to_ssh; (void)ssh_to_usb;
+    (void)usb_to_ssh; (void)ssh_to_usb; (void)scrollback;
     return ESP_OK;
 }
 

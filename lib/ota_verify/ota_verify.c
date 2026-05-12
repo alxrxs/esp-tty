@@ -81,6 +81,12 @@ static const char *TAG = "ota_verify";
 #define HDR_TAG_OFF      28
 /* HDR_CT_OFF = 44 = OTA_HEADER_SIZE */
 
+/* psa_hash_update internally allocates a copy of its input from the internal
+ * SRAM heap (mbedtls_calloc).  On ESP32-S3 internal SRAM is ~512 KB total, so
+ * calls with a multi-hundred-KB buffer fail with PSA_ERROR_INSUFFICIENT_MEMORY.
+ * Chunk all hash + decrypt calls to this size to stay within the heap budget. */
+#define OTA_CRYPTO_CHUNK  4096
+
 /* ── Context struct ──────────────────────────────────────────────────────── */
 struct ota_verify_ctx {
     /* Header accumulation */
@@ -214,19 +220,19 @@ static int pem_extract_ec_point(const uint8_t *pem, size_t pem_len,
      * the OID region), we anchor on the known fixed DER structure:
      *   - Total DER length must be exactly 91 bytes.
      *   - Byte 0..1: 30 59 (outer SEQUENCE)
-     *   - Byte 22: 03 (BIT STRING tag)
-     *   - Byte 23: 42 (BIT STRING length = 66)
-     *   - Byte 24: 00 (no unused bits)
-     *   - Byte 25: 04 (uncompressed point marker)
-     *   - Bytes 25..89: the 65-byte EC point
+     *   - Byte 23: 03 (BIT STRING tag)
+     *   - Byte 24: 42 (BIT STRING length = 66)
+     *   - Byte 25: 00 (no unused bits)
+     *   - Byte 26: 04 (uncompressed point marker)
+     *   - Bytes 26..90: the 65-byte EC point
      */
     if (der_len != 91) return -1;
     if (der[0] != 0x30 || der[1] != 0x59) return -1;  /* outer SEQUENCE */
-    if (der[22] != 0x03 || der[23] != 0x42) return -1; /* BIT STRING tag+len */
-    if (der[24] != 0x00) return -1;                     /* no unused bits */
-    if (der[25] != 0x04) return -1;                     /* uncompressed point marker */
+    if (der[23] != 0x03 || der[24] != 0x42) return -1; /* BIT STRING tag+len */
+    if (der[25] != 0x00) return -1;                     /* no unused bits */
+    if (der[26] != 0x04) return -1;                     /* uncompressed point marker */
 
-    memcpy(point_out, &der[25], 65);
+    memcpy(point_out, &der[26], 65);
     return 0;
 }
 
@@ -501,20 +507,23 @@ ota_verify_err_t ota_verify_feed(ota_verify_ctx_t *ctx,
                 push -= from_tail;
             }
 
-            /* Push additional confirmed bytes directly from p */
-            if (push > 0) {
+            /* Push additional confirmed bytes directly from p, in chunks
+             * so that psa_hash_update's internal copy fits in SRAM heap. */
+            while (push > 0) {
+                size_t take = (push < OTA_CRYPTO_CHUNK) ? push : OTA_CRYPTO_CHUNK;
 #ifdef OTA_USE_PSA
-                if (psa_hash_update(&ctx->hash_op, p, push) != PSA_SUCCESS)
+                if (psa_hash_update(&ctx->hash_op, p, take) != PSA_SUCCESS)
                     return OTA_VERIFY_ERR_CRYPTO;
 #else
-                if (mbedtls_sha256_update(&ctx->sha, p, push) != 0)
+                if (mbedtls_sha256_update(&ctx->sha, p, take) != 0)
                     return OTA_VERIFY_ERR_CRYPTO;
 #endif
-                ota_verify_err_t e = decrypt_write(ctx, p, push);
+                ota_verify_err_t e = decrypt_write(ctx, p, take);
                 if (e != OTA_VERIFY_OK) return e;
-                ctx->ct_bytes_fed += push;
-                p   += push;
-                rem -= push;
+                ctx->ct_bytes_fed += take;
+                p    += take;
+                rem  -= take;
+                push -= take;
             }
 
             /* Fill tail with new bytes */
