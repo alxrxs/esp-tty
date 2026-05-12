@@ -224,6 +224,32 @@ esp_err_t wifi_init_sta(void)
     wifi_init_config_t driver_cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&driver_cfg));
 
+#ifdef WIFI_MAC_BYTES
+    /* Override the factory-burned MAC.  Must be locally administered:
+     * first octet's bit 1 must be set AND bit 0 (multicast) must be clear,
+     * i.e. low nibble of byte 0 is one of 2, 6, A, or E. esp_wifi_set_mac
+     * rejects globally-administered MACs unless a custom MAC is also burned
+     * in eFuse (which this project never does). */
+    {
+        const uint8_t custom_mac[6] = WIFI_MAC_BYTES;
+        esp_err_t merr = esp_wifi_set_mac(WIFI_IF_STA, (uint8_t *)custom_mac);
+        if (merr != ESP_OK) {
+            ESP_LOGW(TAG, "esp_wifi_set_mac failed: %s — falling back to factory MAC",
+                     esp_err_to_name(merr));
+        }
+    }
+#endif
+
+    /* Log the active MAC (factory or overridden) so it's easy to find for
+     * static DHCP reservations / firewall rules. */
+    {
+        uint8_t active_mac[6];
+        if (esp_wifi_get_mac(WIFI_IF_STA, active_mac) == ESP_OK)
+            ESP_LOGI(TAG, "WiFi MAC: %02x:%02x:%02x:%02x:%02x:%02x",
+                     active_mac[0], active_mac[1], active_mac[2],
+                     active_mac[3], active_mac[4], active_mac[5]);
+    }
+
     /* 4. Register event handlers.
      *    instance_any_id  → all WIFI_EVENT sub-events (start, disconnect, …)
      *    instance_got_ip  → IP_EVENT_STA_GOT_IP only */

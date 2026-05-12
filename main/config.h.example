@@ -107,6 +107,27 @@
  * -------------------------------------------------------------------------- */
 #define DEVICE_HOSTNAME          "esp-tty"
 
+/* Optional: override the factory-burned WiFi station MAC address.
+ *
+ * Each ESP32-S3 has a unique MAC burned at the factory — by default the
+ * firmware uses that.  The active MAC is logged at boot ("WiFi MAC: ...")
+ * so you can copy it into a router's static DHCP reservation.
+ *
+ * Reasons to override:
+ *   - swap in a replacement board and keep the same DHCP lease / firewall
+ *     rules without reconfiguring upstream
+ *   - clone a known identity for testing
+ *   - rotate MACs across deployments for privacy
+ *
+ * CONSTRAINT: the MAC must be locally administered.  That means the first
+ * octet must have bit 1 SET and bit 0 (multicast) CLEAR — i.e. its low
+ * nibble is one of 2, 6, A, or E.  Valid first bytes include 02, 06, 0A,
+ * 0E, 12, 16, 1A, 1E, etc.  A globally-administered MAC will be rejected
+ * because this project never burns a custom MAC into eFuse.  Leave the
+ * line below commented out to keep the factory MAC.
+ */
+/* #define WIFI_MAC_BYTES  { 0x02, 0x12, 0x34, 0x56, 0x78, 0x9A } */
+
 /* --------------------------------------------------------------------------
  * Operational tuning — leave the defaults unless you have a reason
  * -------------------------------------------------------------------------- */
