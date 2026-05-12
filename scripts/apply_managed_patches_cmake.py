@@ -20,8 +20,10 @@ def _run(cmd, cwd, check=True):
     result = subprocess.run(
         cmd,
         cwd=cwd,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        start_new_session=True,
     )
     if check and result.returncode != 0:
         raise RuntimeError(
@@ -58,12 +60,17 @@ def apply_patches(project_dir):
             patch_name = os.path.relpath(patch_file, patches_dir)
 
             # Check if already applied via reverse dry-run.
+            # On macOS BSD patch, if the patch is NOT applied, `patch -R` still
+            # exits 0 after printing "Unreversed ... Ignore -R? [y]" and falling
+            # through to a forward dry-run.  A clean reverse (no such message)
+            # with exit 0 is the only reliable "already applied" signal.
             check_result = _run(
                 ["patch", "--dry-run", "-R", "-p1", "-i", patch_file],
                 cwd=component_path,
                 check=False,
             )
-            if check_result.returncode == 0:
+            output = check_result.stdout.decode() + check_result.stderr.decode()
+            if check_result.returncode == 0 and "Unreversed" not in output:
                 print(f"[patches] Already applied: {patch_name}", flush=True)
                 continue
 
