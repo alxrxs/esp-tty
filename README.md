@@ -43,8 +43,15 @@ the ring buffers moved to internal SRAM and the ring size reduced significantly.
   SHA-256/512 via the ESP32-S3 AES and SHA peripherals (wolfSSL Espressif port).
 - Ed25519 host key generated on first boot and stored in encrypted NVS.
   Fingerprint printed to UART on every boot.
-- Public-key-only authentication. Two authorized keys: one for normal console
-  sessions (any username), one for OTA sessions (username must be `ota`).
+- Public-key-only authentication. Two enforced usernames:
+  - `tty@<device>` — for serial console sessions; the firmware accepts up to
+    8 authorized keys defined as a comma-separated list in `AUTHORIZED_PUBKEYS`
+    (see `config.h.example`).
+  - `ota@<device>` — for OTA firmware updates; single authorized key in
+    `OTA_AUTHORIZED_PUBKEY`.
+  Any other username is rejected before the key is even checked.
+- Running at **240 MHz** with `-O2` for production builds (~1.5× faster than
+  the IDF default 160 MHz / `-Og`).
 - Encrypted NVS using AES-XTS-256 with the key stored in the `nvs_keys`
   partition. No eFuses are burned.
 - Signed and encrypted OTA updates over SSH: ECDSA-P256 signature + AES-256-GCM
@@ -96,10 +103,11 @@ Software only (no hardware unit on this silicon):
 ```
 cp main/config.h.example main/config.h
 # Edit with your values:
-#   WIFI_SSID         — your network SSID
-#   WIFI_PASS         — your WPA2/WPA3-Personal passphrase
-#   AUTHORIZED_PUBKEY — your ~/.ssh/id_ed25519.pub content
-#   OTA_AUTHORIZED_PUBKEY — a public key for OTA deploys (can be the same key)
+#   WIFI_SSID              — your network SSID
+#   WIFI_PASS              — your WPA2/WPA3-Personal passphrase
+#   AUTHORIZED_PUBKEYS     — comma-separated list of ~/.ssh/id_ed25519.pub
+#                            contents (up to 8 keys; any matches succeeds)
+#   OTA_AUTHORIZED_PUBKEY  — a public key for OTA deploys (can be the same key)
 ```
 
 ### 2. Generate OTA signing keys
@@ -137,10 +145,27 @@ I (1236) ssh_server: Listening on TCP port 2222
 ### 5. Connect
 
 ```
-ssh -p 2222 user@192.168.1.42
+ssh -p 2222 tty@192.168.1.42
 ```
 
 Verify the fingerprint against what was printed to UART on first boot.
+
+The username **must be `tty`** for a console session (or `ota` for an OTA
+upload); any other username is rejected.
+
+### 6. Linux host setup (on the box the device plugs into)
+
+The ESP32-S3 enumerates as a USB CDC device at `/dev/ttyACM0`. To expose a
+shell on it (so SSH'ing into the device gives you a login on that host),
+enable the stock systemd serial-getty:
+
+```
+systemctl enable --now serial-getty@ttyACM0.service
+```
+
+That's it — no drop-ins, no `TERM=` overrides, no agetty flags. The default
+invocation works because the firmware fully drains the USB CDC RX FIFO per
+callback, so `agetty` writes never stall mid-banner.
 
 ## OTA usage
 
@@ -211,8 +236,9 @@ ssh client           ESP32-S3
 esp-tty/
   main/               Application source (ssh_server, ota_session, wifi, usb_cdc)
                       See main/README.md
-  lib/                Shared libraries (ring, bridge, pubkey_auth, ota_verify,
-                        rollback_decision)
+  lib/                Shared libraries: ring, bridge, pubkey_auth, ota_verify,
+                        ota_stream, rollback_decision, scrollback,
+                        usb_cdc_drain, term_resize
                       See lib/README.md
   components/         Local wolfSSL bridge IDF component
                       See components/README.md
@@ -278,20 +304,26 @@ pio test -e native
 
 ## Testing
 
-### Native unit tests — 73 test cases
+### Native unit tests — 155 test cases
 
-Run on the host without any hardware or emulator.
+Run on the host without any hardware or emulator. See `test/README.md` for the
+per-suite breakdown.
 
-| Suite | Cases | Coverage |
-|---|---|---|
-| test_ring | 10 | FIFO ordering, wrap-around, close-unblocks-reader, backpressure, try_send |
-| test_bridge | 3 | Full-duplex ordering, stop-flag termination, no-drop guarantee |
-| test_pubkey_auth | 11 | OpenSSH key line parsing, base64 decode, SHA-256 hash computation |
-| test_auth_check | 5 | Constant-time hash comparison, NULL handling |
-| test_host_key | 9 | format_fingerprint (colon-hex formatting, boundary/null cases) |
-| test_ota_verify | 20 | Header parsing, streaming feed, ECDSA verify, GCM tag, error codes |
-| test_rollback_decision | 6 | rollback_decide() for all OTA image states |
-| test_user_class | 9 | pubkey_classify_user() routing (ota vs. default, edge cases) |
+| Suite | Cases |
+|---|---|
+| test_ring | 17 |
+| test_bridge | 5 |
+| test_bridge_scrollback | 4 |
+| test_cdc_drain | 6 |
+| test_term_resize | 10 |
+| test_scrollback | 26 |
+| test_ota_stream | 7 |
+| test_pubkey_auth | 12 |
+| test_host_key | 9 |
+| test_auth_check | 10 |
+| test_user_class | 23 |
+| test_ota_verify | 20 |
+| test_rollback_decision | 6 |
 
 ```
 pio test -e native
