@@ -68,15 +68,30 @@
 /* --------------------------------------------------------------------------
  * USB CDC device descriptors
  *
- * These strings show up in lsusb output and OS device-manager UIs. They are
- * passed to TinyUSB at runtime (via tinyusb_config_t.descriptor.string), so
- * changing them here takes effect on the next flash — no Kconfig edit needed.
+ * All of these values are passed to TinyUSB at runtime (via
+ * tinyusb_config_t.descriptor.{device,string}), overriding the Kconfig
+ * defaults in sdkconfig.defaults. Edit them here, reflash, done — no
+ * `make menuconfig` needed.
  *
- * VID/PID/bcdDevice still come from sdkconfig.defaults
- * (CONFIG_TINYUSB_DESC_USE_ESPRESSIF_VID, _USE_DEFAULT_PID, _BCD_DEVICE).
- * Most projects keep the Espressif VID; changing VID requires a real
- * USB-IF vendor ID.
+ * IMPORTANT — about VID / PID:
+ *   The defaults are Espressif's VID (0x303a) and the "default TinyUSB CDC"
+ *   PID (0x4001). Espressif allows reuse of these on ESP32-S3 chips for
+ *   development. They are NOT yours to ship commercially.
+ *
+ *   For a published open-source project, request a free PID under VID 0x1209
+ *   from https://pid.codes — that's the open-hardware-friendly registry. For
+ *   a commercial product, USB-IF assigns vendor IDs for $5,000.
+ *
+ *   Picking a random VID/PID combo is a USB spec violation and can collide
+ *   with future allocations. Don't.
+ *
+ *   Linux/macOS pick up CDC ACM devices by class, not by VID/PID, so any
+ *   change here only affects lsusb display + Windows driver-matching.
  * -------------------------------------------------------------------------- */
+#define USB_VID                  0x303a     /* Espressif Systems */
+#define USB_PID                  0x4001     /* TinyUSB default CDC */
+#define USB_DEVICE_VERSION       0x0100     /* bcdDevice = 1.0.0 (BCD encoded) */
+
 #define USB_MANUFACTURER_STRING  "Your Company"
 #define USB_PRODUCT_STRING       "Your Product"
 #define USB_SERIAL_STRING        "SN-00000001"

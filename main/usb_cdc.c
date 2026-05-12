@@ -27,6 +27,27 @@
 
 static const char *TAG = "usb_cdc";
 
+/* Custom USB device descriptor. Overrides sdkconfig at runtime via
+ * tinyusb_config_t.descriptor.device. Class/SubClass/Protocol = EF/02/01
+ * mark this as a USB composite device using Interface Association Descriptors
+ * (IAD), which is what TinyUSB's default CDC descriptor expects. */
+static const tusb_desc_device_t s_device_descriptor = {
+    .bLength            = sizeof(tusb_desc_device_t),
+    .bDescriptorType    = TUSB_DESC_DEVICE,
+    .bcdUSB             = 0x0200,                 /* USB 2.0 */
+    .bDeviceClass       = TUSB_CLASS_MISC,
+    .bDeviceSubClass    = MISC_SUBCLASS_COMMON,
+    .bDeviceProtocol    = MISC_PROTOCOL_IAD,
+    .bMaxPacketSize0    = CFG_TUD_ENDPOINT0_SIZE, /* 64 */
+    .idVendor           = USB_VID,
+    .idProduct          = USB_PID,
+    .bcdDevice          = USB_DEVICE_VERSION,
+    .iManufacturer      = 0x01,
+    .iProduct           = 0x02,
+    .iSerialNumber      = 0x03,
+    .bNumConfigurations = 0x01,
+};
+
 /* Custom USB string descriptors. Overrides sdkconfig's CONFIG_TINYUSB_DESC_*_STRING
  * at runtime via tinyusb_config_t.descriptor.string.
  *
@@ -120,6 +141,7 @@ esp_err_t usb_cdc_init(ring_t *usb_to_ssh, ring_t *ssh_to_usb,
     s_scrollback = scrollback;
 
     tinyusb_config_t tusb_cfg = TINYUSB_DEFAULT_CONFIG();
+    tusb_cfg.descriptor.device       = &s_device_descriptor;
     tusb_cfg.descriptor.string       = s_usb_strings;
     tusb_cfg.descriptor.string_count = sizeof(s_usb_strings) / sizeof(s_usb_strings[0]);
     ESP_ERROR_CHECK(tinyusb_driver_install(&tusb_cfg));
