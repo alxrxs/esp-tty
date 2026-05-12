@@ -119,12 +119,41 @@
  *   - clone a known identity for testing
  *   - rotate MACs across deployments for privacy
  *
- * CONSTRAINT: the MAC must be locally administered.  That means the first
- * octet must have bit 1 SET and bit 0 (multicast) CLEAR — i.e. its low
- * nibble is one of 2, 6, A, or E.  Valid first bytes include 02, 06, 0A,
- * 0E, 12, 16, 1A, 1E, etc.  A globally-administered MAC will be rejected
- * because this project never burns a custom MAC into eFuse.  Leave the
- * line below commented out to keep the factory MAC.
+ * CONSTRAINT — the MAC MUST be locally administered and unicast.
+ *
+ * In the first byte:
+ *   bit 1 (the "locally administered" bit) MUST be 1
+ *   bit 0 (the "multicast" bit)            MUST be 0
+ *
+ * Equivalently, the low nibble of byte 0 must be 2, 6, A, or E.  Valid
+ * first bytes (mask 0x03 == 0x02):
+ *
+ *     02 06 0A 0E
+ *     12 16 1A 1E
+ *     22 26 2A 2E
+ *     32 36 3A 3E
+ *     42 46 4A 4E
+ *     52 56 5A 5E
+ *     62 66 6A 6E
+ *     72 76 7A 7E
+ *     82 86 8A 8E
+ *     92 96 9A 9E
+ *     A2 A6 AA AE
+ *     B2 B6 BA BE
+ *     C2 C6 CA CE
+ *     D2 D6 DA DE
+ *     E2 E6 EA EE
+ *     F2 F6 FA FE
+ *
+ * INVALID examples that look reasonable but will be REJECTED at boot:
+ *   00:11:22:…  (globally-administered range — assigned to an OUI)
+ *   01:…        (multicast bit set)
+ *   FF:FF:…     (broadcast)
+ *
+ * ESP-IDF refuses any first byte outside the table above because this
+ * project never burns a custom MAC into eFuse.  Leave the line below
+ * commented out to keep the factory MAC; wifi.c will print a clear error
+ * naming the constraint if you set an invalid one.
  */
 /* #define WIFI_MAC_BYTES  { 0x02, 0x12, 0x34, 0x56, 0x78, 0x9A } */
 

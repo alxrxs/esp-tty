@@ -225,17 +225,35 @@ esp_err_t wifi_init_sta(void)
     ESP_ERROR_CHECK(esp_wifi_init(&driver_cfg));
 
 #ifdef WIFI_MAC_BYTES
-    /* Override the factory-burned MAC.  Must be locally administered:
-     * first octet's bit 1 must be set AND bit 0 (multicast) must be clear,
-     * i.e. low nibble of byte 0 is one of 2, 6, A, or E. esp_wifi_set_mac
-     * rejects globally-administered MACs unless a custom MAC is also burned
-     * in eFuse (which this project never does). */
+    /* Override the factory-burned MAC.
+     *
+     * Constraint: ESP-IDF only accepts a locally-administered unicast MAC
+     * unless a custom MAC has also been burned into eFuse — which this
+     * project never does.  "Locally-administered unicast" means:
+     *   - first octet bit 1 = 1  (locally administered)
+     *   - first octet bit 0 = 0  (unicast, not multicast)
+     * Equivalently: the low nibble of byte 0 is one of 2, 6, A, or E.
+     * Valid first-byte prefixes: 02, 06, 0A, 0E, 12, 16, 1A, 1E, 22, 26, …
+     *
+     * We pre-validate here so a wrong MAC produces a clear error instead
+     * of the generic ESP_ERR_INVALID_ARG that esp_wifi_set_mac returns. */
     {
         const uint8_t custom_mac[6] = WIFI_MAC_BYTES;
-        esp_err_t merr = esp_wifi_set_mac(WIFI_IF_STA, (uint8_t *)custom_mac);
-        if (merr != ESP_OK) {
-            ESP_LOGW(TAG, "esp_wifi_set_mac failed: %s — falling back to factory MAC",
-                     esp_err_to_name(merr));
+        if ((custom_mac[0] & 0x03) != 0x02) {
+            ESP_LOGE(TAG,
+                     "WIFI_MAC_BYTES first byte 0x%02x is not a locally-"
+                     "administered unicast MAC. The low nibble of byte 0 "
+                     "must be 2, 6, A, or E (e.g. 02, 06, 0A, 0E, 12, …). "
+                     "Falling back to the factory MAC.",
+                     custom_mac[0]);
+        } else {
+            esp_err_t merr = esp_wifi_set_mac(WIFI_IF_STA,
+                                              (uint8_t *)custom_mac);
+            if (merr != ESP_OK) {
+                ESP_LOGW(TAG,
+                         "esp_wifi_set_mac failed: %s — falling back to "
+                         "factory MAC", esp_err_to_name(merr));
+            }
         }
     }
 #endif
