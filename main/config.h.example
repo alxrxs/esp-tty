@@ -64,3 +64,20 @@
  * Usage: ssh -i <ota-key> -p 2222 ota@<device-ip> < firmware.bin.ota
  */
 #define OTA_AUTHORIZED_PUBKEY  "ssh-ed25519 AAAA..."
+
+/* --------------------------------------------------------------------------
+ * USB CDC device descriptors
+ *
+ * These strings show up in lsusb output and OS device-manager UIs. They are
+ * passed to TinyUSB at runtime (via tinyusb_config_t.descriptor.string), so
+ * changing them here takes effect on the next flash — no Kconfig edit needed.
+ *
+ * VID/PID/bcdDevice still come from sdkconfig.defaults
+ * (CONFIG_TINYUSB_DESC_USE_ESPRESSIF_VID, _USE_DEFAULT_PID, _BCD_DEVICE).
+ * Most projects keep the Espressif VID; changing VID requires a real
+ * USB-IF vendor ID.
+ * -------------------------------------------------------------------------- */
+#define USB_MANUFACTURER_STRING  "Your Company"
+#define USB_PRODUCT_STRING       "Your Product"
+#define USB_SERIAL_STRING        "SN-00000001"
+#define USB_CDC_STRING           "Your Product CDC"

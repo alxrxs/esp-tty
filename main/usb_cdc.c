@@ -11,6 +11,7 @@
 #include "usb_cdc.h"
 #include "scrollback.h"
 #include "usb_cdc_drain.h"
+#include "config.h"            /* USB_MANUFACTURER_STRING etc. */
 #include "esp_log.h"
 
 #include <inttypes.h>
@@ -25,6 +26,20 @@
 #include "tinyusb_default_config.h"
 
 static const char *TAG = "usb_cdc";
+
+/* Custom USB string descriptors. Overrides sdkconfig's CONFIG_TINYUSB_DESC_*_STRING
+ * at runtime via tinyusb_config_t.descriptor.string.
+ *
+ * Index 0 is the 2-byte language identifier (0x0409 = US English) encoded as
+ * a string. Indices 1-4 are referenced by the device descriptor's
+ * iManufacturer/iProduct/iSerialNumber and the CDC interface's iInterface. */
+static const char *const s_usb_strings[] = {
+    (const char[]){0x09, 0x04},   /* 0: LANGID = 0x0409 (US English) */
+    USB_MANUFACTURER_STRING,       /* 1: iManufacturer */
+    USB_PRODUCT_STRING,            /* 2: iProduct */
+    USB_SERIAL_STRING,             /* 3: iSerialNumber */
+    USB_CDC_STRING,                /* 4: CDC interface name */
+};
 
 static ring_t        *s_usb_to_ssh  = NULL;
 static ring_t        *s_ssh_to_usb  = NULL;
@@ -104,7 +119,9 @@ esp_err_t usb_cdc_init(ring_t *usb_to_ssh, ring_t *ssh_to_usb,
     s_ssh_to_usb = ssh_to_usb;
     s_scrollback = scrollback;
 
-    const tinyusb_config_t tusb_cfg = TINYUSB_DEFAULT_CONFIG();
+    tinyusb_config_t tusb_cfg = TINYUSB_DEFAULT_CONFIG();
+    tusb_cfg.descriptor.string       = s_usb_strings;
+    tusb_cfg.descriptor.string_count = sizeof(s_usb_strings) / sizeof(s_usb_strings[0]);
     ESP_ERROR_CHECK(tinyusb_driver_install(&tusb_cfg));
 
     const tinyusb_config_cdcacm_t acm_cfg = {
