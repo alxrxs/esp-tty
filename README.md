@@ -3,12 +3,18 @@
 Wireless out-of-band serial console — designed for a Linux server you
 don't want to lose access to.
 
-When the server's primary network goes down (bad config, dead switch,
-misrouted cable, BIOS hang, post-OTA wedge), you reach it via this
-device. Plug the server's USB-serial port — or a USB↔TTL adapter
-wired to its serial header — into an ESP32-S3 DevKit. SSH into the
-ESP32-S3 over WiFi. You're at the server's login prompt, with full
-kernel-log visibility while you fix whatever broke the network.
+When the server's primary network goes down — bad netplan, locked-out
+firewall rule, NIC carrier loss, mis-pulled cable, switch failure on
+the management VLAN — you reach it via this device. Plug a USB↔TTL
+adapter wired to the server's serial header (or a built-in
+USB-to-serial debug port if it has one) into an ESP32-S3 DevKit. SSH
+into the ESP32-S3 over WiFi. You're at the server's login prompt and
+can fix whatever broke the network.
+
+Scope: this needs Linux to be up — the USB CDC bridge depends on the
+server's USB stack and `agetty` running. It's for "Linux is healthy,
+network is broken," not for pre-boot, kernel panic, or a hung USB
+subsystem.
 
 ```mermaid
 flowchart LR
