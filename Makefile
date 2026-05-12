@@ -13,13 +13,18 @@ ENV  ?= esp32s3
 # fall back to a system-wide `pio` on PATH.
 PIO := $(shell test -x .venv/bin/pio && echo .venv/bin/pio || echo pio)
 
-# Port auto-detect: prefer a CH340/CH343 USB-UART bridge (VID 1a86), since
-# that is the canonical flash port on most ESP32-S3 dev boards. PlatformIO's
-# own auto-detect can pick the wrong device when the ESP32-S3's native USB
-# CDC is also enumerated (which is exactly what this firmware exposes).
+# Auto-detect the upload port by USB Vendor ID, not by device-name pattern.
 #
-# Override with `make flash PORT=/dev/ttyXXX` if needed.
-PORT ?= $(firstword $(wildcard /dev/serial/by-id/usb-1a86_*))
+# Why VID-based detection: this firmware exposes the ESP32-S3's native USB
+# as a CDC ACM device (the SSH↔USB bridge endpoint). On both Linux and
+# macOS Big Sur+, that CDC interface enumerates with the SAME name pattern
+# (/dev/ttyACM*, /dev/cu.usbmodem*) as a USB-UART bridge — so we can't tell
+# them apart by filename. The helper script asks the kernel which node
+# belongs to the CH340/CH343 bridge (VID 0x1A86) and prints that.
+#
+# Falls back to PlatformIO's own auto-detect when the helper finds nothing.
+# Override at any time with: make flash PORT=/dev/...
+PORT ?= $(shell scripts/detect_upload_port.sh)
 UPLOAD_FLAGS := $(if $(PORT),--upload-port $(PORT),)
 
 .PHONY: flash build
