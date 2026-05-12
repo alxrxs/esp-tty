@@ -1,4 +1,4 @@
-# esp-tty — convenience Makefile around PlatformIO
+# esp-tty -- convenience Makefile around PlatformIO
 #
 # Targets:
 #   make build    Compile firmware (no upload)
@@ -16,9 +16,9 @@ PIO := $(shell test -x .venv/bin/pio && echo .venv/bin/pio || echo pio)
 # Auto-detect the upload port by USB Vendor ID, not by device-name pattern.
 #
 # Why VID-based detection: this firmware exposes the ESP32-S3's native USB
-# as a CDC ACM device (the SSH↔USB bridge endpoint). On both Linux and
+# as a CDC ACM device (the SSH<->USB bridge endpoint). On both Linux and
 # macOS Big Sur+, that CDC interface enumerates with the SAME name pattern
-# (/dev/ttyACM*, /dev/cu.usbmodem*) as a USB-UART bridge — so we can't tell
+# (/dev/ttyACM*, /dev/cu.usbmodem*) as a USB-UART bridge -- so we can't tell
 # them apart by filename. The helper script asks the kernel which node
 # belongs to the CH340/CH343 bridge (VID 0x1A86) and prints that.
 #

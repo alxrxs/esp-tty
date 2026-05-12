@@ -1,11 +1,11 @@
 #!/bin/sh
-# detect_upload_port.sh — print the device node of the CH340/CH343 USB-UART
+# detect_upload_port.sh -- print the device node of the CH340/CH343 USB-UART
 # bridge typically used to flash ESP32-S3 dev boards.  Prints nothing if no
 # such device is connected; the Makefile then falls back to PlatformIO's
 # own auto-detect.
 #
 # Why this exists: this firmware exposes the ESP32-S3's native USB as a
-# CDC ACM device (the SSH↔USB bridge endpoint).  On modern Linux/macOS that
+# CDC ACM device (the SSH<->USB bridge endpoint).  On modern Linux/macOS that
 # CDC interface enumerates with the SAME name pattern as a USB-UART bridge
 # (e.g. /dev/cu.usbmodem* on macOS Big Sur+), so we can't tell them apart
 # by filename.  We have to ask the kernel for the USB Vendor ID instead:
@@ -37,6 +37,6 @@ case "$(uname -s)" in
         done
         ;;
     *)
-        # Other OSes (Windows under WSL, BSDs, …): let PlatformIO auto-detect.
+        # Other OSes (Windows under WSL, BSDs, ...): let PlatformIO auto-detect.
         ;;
 esac

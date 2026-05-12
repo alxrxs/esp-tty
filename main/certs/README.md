@@ -13,7 +13,7 @@ directory is ignored entirely and the firmware uses ordinary WPA2-PSK.
 
 Three `.example` placeholder files (`ca.pem.example`, `client.crt.example`,
 `client.key.example`) are tracked in git and show the expected PEM structure.
-The real files — `ca.pem`, `client.crt`, and `client.key` — are gitignored via
+The real files -- `ca.pem`, `client.crt`, and `client.key` -- are gitignored via
 the `main/certs/*.pem`, `main/certs/*.crt`, and `main/certs/*.key` rules in
 `.gitignore`, with `!main/certs/*.example` preserving the stubs. Never commit
 real key material.
@@ -66,7 +66,7 @@ _binary_client_key_start / _binary_client_key_end
 
 CMake registers the cert paths as `CMAKE_CONFIGURE_DEPENDS` entries, so
 adding or removing the files automatically triggers a CMake reconfigure on
-the next `pio run` — a single build invocation is always sufficient.
+the next `pio run` -- a single build invocation is always sufficient.
 
 ## Certificate time validation
 

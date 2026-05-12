@@ -1,17 +1,17 @@
 /*
- * host_key.h — ED25519 SSH host key: generate-or-load from NVS
+ * host_key.h -- ED25519 SSH host key: generate-or-load from NVS
  *
  * On first boot, generates a fresh ED25519 key via wolfCrypt + ESP32
  * hardware RNG and persists it to NVS.  On subsequent boots, loads the
  * stored key.  Prints the SHA-256 fingerprint (base64) to the UART log
  * so the user can verify it on the first SSH connection.
  *
- * Reset: `idf.py erase-flash` wipes NVS → next boot generates a fresh key.
+ * Reset: `idf.py erase-flash` wipes NVS -> next boot generates a fresh key.
  * No eFuses are burned.
  *
  * Extension point for DS peripheral / eFuse-backed storage:
  *   Replace the nvs_set_blob / nvs_get_blob calls in host_key.c with
- *   DS peripheral APIs — no other changes required.
+ *   DS peripheral APIs -- no other changes required.
  */
 
 #pragma once

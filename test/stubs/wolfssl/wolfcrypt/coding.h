@@ -1,4 +1,4 @@
-/* Native test stub: coding.h — Base64_Decode backed by OpenSSL */
+/* Native test stub: coding.h -- Base64_Decode backed by OpenSSL */
 #pragma once
 #include <openssl/evp.h>
 #include <string.h>
@@ -45,7 +45,7 @@ static inline int Base64_Decode(const byte *in, word32 inLen,
 
     word32 decoded_len = (word32)(written + final);
     if (decoded_len > max_out) {
-        /* Decoded data exceeds caller's buffer — mimic wolfCrypt BUFFER_E */
+        /* Decoded data exceeds caller's buffer -- mimic wolfCrypt BUFFER_E */
         free(tmp);
         return BUFFER_E;
     }

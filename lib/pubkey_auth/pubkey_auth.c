@@ -1,5 +1,5 @@
 /*
- * pubkey_auth.c — OpenSSH public key parsing and hash-based auth
+ * pubkey_auth.c -- OpenSSH public key parsing and hash-based auth
  */
 
 #include "pubkey_auth.h"
@@ -19,7 +19,7 @@ bool pubkey_parse_b64(const char *openssh_line,
 {
     if (!openssh_line || !b64_start || !b64_len) return false;
 
-    /* Skip key-type token ("ssh-ed25519 ", "ecdsa-sha2-nistp256 ", …) */
+    /* Skip key-type token ("ssh-ed25519 ", "ecdsa-sha2-nistp256 ", ...) */
     const char *p = openssh_line;
     while (*p && *p != ' ') p++;
     if (*p != ' ') return false;
@@ -96,7 +96,7 @@ pubkey_auth_result_t pubkey_auth_check(
     /*
      * Constant-time comparison: accumulate XOR differences through a volatile
      * aggregator so the compiler cannot short-circuit the loop.  Do not use
-     * memcmp() — it may return early on the first differing byte, leaking
+     * memcmp() -- it may return early on the first differing byte, leaking
      * timing information about the expected hash.
      */
     volatile uint8_t diff = 0;

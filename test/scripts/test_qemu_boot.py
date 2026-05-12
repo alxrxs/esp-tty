@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-test_qemu_boot.py — QEMU boot smoke test for esp-tty
+test_qemu_boot.py -- QEMU boot smoke test for esp-tty
 
 Builds the wokwi firmware (BRIDGE_LOOPBACK mode), merges a flash image,
 runs it under QEMU, and checks that the SSH server starts within the timeout.
@@ -47,14 +47,14 @@ FAILURE_PATTERNS = [
 
 # Required patterns that must appear before SUCCESS_PATTERN
 # Note: NVS_KEYGEN uses an em-dash (U+2014) as in main.c
-NVS_KEYGEN_PATTERN      = re.compile(r"NVS keys not found — generating new AES-XTS-256 key")
+NVS_KEYGEN_PATTERN      = re.compile(r"NVS keys not found -- generating new AES-XTS-256 key")
 FINGERPRINT_PATTERN     = re.compile(r"Host key SHA-256 fingerprint: ([0-9a-f]{2}(?::[0-9a-f]{2}){31})")
 TTY_KEYS_LOADED_PATTERN = re.compile(r"(\d+) TTY key\(s\) loaded")
 PUMP_TEARDOWN_TIMEOUT_PATTERN = re.compile(r"did not exit within 5 s")
 
 
 def build_firmware():
-    print("[test_qemu_boot] Building wokwi firmware …")
+    print("[test_qemu_boot] Building wokwi firmware ...")
     result = subprocess.run(
         ["pio", "run", "-e", "wokwi"],
         cwd=PROJECT_DIR,
@@ -67,11 +67,11 @@ def build_firmware():
 
 
 def merge_flash(flash_img=FLASH_IMG):
-    print(f"[test_qemu_boot] Merging flash image → {flash_img} …")
+    print(f"[test_qemu_boot] Merging flash image -> {flash_img} ...")
     # Offsets must match partitions.csv:
     #   bootloader  0x0000
     #   partitions  0x8000
-    #   otadata     0x10000  (2 KB OTA data — marks ota_0 as active)
+    #   otadata     0x10000  (2 KB OTA data -- marks ota_0 as active)
     #   ota_0       0x20000  (firmware binary)
     subprocess.run(
         [
@@ -112,7 +112,7 @@ def run_qemu(timeout_secs, flash_img=FLASH_IMG, label="test_qemu_boot"):
           "missing_patterns": list[str],  # names of required patterns not seen
         }
     """
-    print(f"[{label}] Starting QEMU (timeout={timeout_secs}s) …")
+    print(f"[{label}] Starting QEMU (timeout={timeout_secs}s) ...")
     proc = subprocess.Popen(
         [
             QEMU,
@@ -156,7 +156,7 @@ def run_qemu(timeout_secs, flash_img=FLASH_IMG, label="test_qemu_boot"):
                 # Check all required patterns were seen
                 missing = []
                 if not nvs_keygen_seen:
-                    missing.append("NVS keys not found — generating new AES-XTS-256 key")
+                    missing.append("NVS keys not found -- generating new AES-XTS-256 key")
                 if fingerprint is None:
                     missing.append("Host key SHA-256 fingerprint: <32 hex pairs>")
 
@@ -177,7 +177,7 @@ def run_qemu(timeout_secs, flash_img=FLASH_IMG, label="test_qemu_boot"):
                 # future test boots a state that has TCP traffic mid-startup,
                 # this catches pump-task deadlocks early.
                 assert "did not exit within 5 s" not in boot_log, (
-                    "Pump-task teardown timed out during boot — indicates a "
+                    "Pump-task teardown timed out during boot -- indicates a "
                     "regression in the thread-safety of session teardown "
                     "(see commit 7b4f36d). This means the pump_done_sem "
                     "semaphore wasn't given by the pump tasks before the 5 s "
@@ -187,7 +187,7 @@ def run_qemu(timeout_secs, flash_img=FLASH_IMG, label="test_qemu_boot"):
 
                 if missing:
                     for name in missing:
-                        print(f"\n[{label}] FAIL — required pattern not seen: {name!r}")
+                        print(f"\n[{label}] FAIL -- required pattern not seen: {name!r}")
                     proc.terminate()
                     return {
                         "success": False,
@@ -197,7 +197,7 @@ def run_qemu(timeout_secs, flash_img=FLASH_IMG, label="test_qemu_boot"):
                         "missing_patterns": missing,
                     }
 
-                print(f"\n[{label}] PASS — SSH server listening on port {port}")
+                print(f"\n[{label}] PASS -- SSH server listening on port {port}")
                 print(f"[{label}] Fingerprint: {fingerprint}")
                 proc.terminate()
                 return {
@@ -210,7 +210,7 @@ def run_qemu(timeout_secs, flash_img=FLASH_IMG, label="test_qemu_boot"):
 
             for fp in FAILURE_PATTERNS:
                 if fp.search(line):
-                    print(f"\n[{label}] FAIL — crash detected: {line}")
+                    print(f"\n[{label}] FAIL -- crash detected: {line}")
                     proc.terminate()
                     return {
                         "success": False,
@@ -226,7 +226,7 @@ def run_qemu(timeout_secs, flash_img=FLASH_IMG, label="test_qemu_boot"):
         except Exception:
             proc.kill()
 
-    print(f"\n[{label}] FAIL — timed out waiting for SSH server")
+    print(f"\n[{label}] FAIL -- timed out waiting for SSH server")
     return {
         "success": False,
         "port": None,
@@ -257,7 +257,7 @@ def check_elf_symbols(elf_path):
                 nm_bin = candidate
                 break
         else:
-            print(f"[check_elf_symbols] FAIL — nm binary not found in {TOOLCHAIN_BIN}")
+            print(f"[check_elf_symbols] FAIL -- nm binary not found in {TOOLCHAIN_BIN}")
             return False
 
     print(f"[check_elf_symbols] Using nm: {nm_bin}")
@@ -269,17 +269,17 @@ def check_elf_symbols(elf_path):
             capture_output=True, text=True, check=True,
         )
     except subprocess.CalledProcessError as e:
-        print(f"[check_elf_symbols] FAIL — nm failed: {e}")
+        print(f"[check_elf_symbols] FAIL -- nm failed: {e}")
         return False
 
     nm_output = nm_result.stdout
 
-    # ── Check 1: AES-192 must be ABSENT ──────────────────────────────────────
+    # -- Check 1: AES-192 must be ABSENT --------------------------------------
     # nm output format: "<addr> <type> <name>"
     # We check only the symbol NAME (third field), not the full line,
     # to avoid false positives from addresses that happen to contain "192".
     # Data symbols ('d'/'D') from mbedTLS cipher info tables are expected and
-    # harmless — they're static descriptors, not callable AES-192 code.
+    # harmless -- they're static descriptors, not callable AES-192 code.
     # We flag only TEXT symbols ('t'/'T') named with aes*192 or 192*aes to
     # detect if wolfSSL has compiled in an AES-192 encryption function.
     aes192_matches = []
@@ -290,26 +290,26 @@ def check_elf_symbols(elf_path):
         # nm output: addr type name  OR  type name (for undefined symbols)
         sym_name = parts[-1]   # symbol name is always last
         sym_type = parts[-2] if len(parts) >= 2 else ""
-        # Flag AES-192 TEXT (code) symbols — these indicate compiled-in AES-192 routines
+        # Flag AES-192 TEXT (code) symbols -- these indicate compiled-in AES-192 routines
         if re.search(r'(?i)(aes.*192|192.*aes)', sym_name) and sym_type.lower() in ('t',):
             aes192_matches.append(line)
     if aes192_matches:
-        print("[check_elf_symbols] FAIL — AES-192 code symbols found in ELF (NO_AES_192 regression):")
+        print("[check_elf_symbols] FAIL -- AES-192 code symbols found in ELF (NO_AES_192 regression):")
         for line in aes192_matches:
             print(f"  {line}")
         return False
-    print("[check_elf_symbols] OK — no AES-192 code symbols (NO_AES_192 is effective)")
+    print("[check_elf_symbols] OK -- no AES-192 code symbols (NO_AES_192 is effective)")
 
-    # ── Check 2: HW crypto symbols must be PRESENT ───────────────────────────
+    # -- Check 2: HW crypto symbols must be PRESENT ---------------------------
     required_hw_symbols = ["esp_sha_try_hw_lock", "wc_esp32AesEncrypt"]
     ok = True
     for sym in required_hw_symbols:
         if sym not in nm_output:
-            print(f"[check_elf_symbols] FAIL — HW crypto symbol missing: {sym!r}")
+            print(f"[check_elf_symbols] FAIL -- HW crypto symbol missing: {sym!r}")
             print("  wolfSSL HW acceleration may have silently regressed to SW-only")
             ok = False
     if ok:
-        print("[check_elf_symbols] OK — HW crypto symbols present:", ", ".join(required_hw_symbols))
+        print("[check_elf_symbols] OK -- HW crypto symbols present:", ", ".join(required_hw_symbols))
 
     return ok
 
@@ -334,7 +334,7 @@ def main():
     # Post-boot ELF symbol checks
     elf_path = os.path.join(PIO_BUILD, "firmware.elf")
     if not check_elf_symbols(elf_path):
-        print("[test_qemu_boot] FAIL — ELF symbol regression check failed")
+        print("[test_qemu_boot] FAIL -- ELF symbol regression check failed")
         sys.exit(1)
 
     print("[test_qemu_boot] All checks passed")

@@ -1,5 +1,5 @@
 /*
- * ring.c — StreamBuffer wrapper (ESP32 target) / pthread (native tests)
+ * ring.c -- StreamBuffer wrapper (ESP32 target) / pthread (native tests)
  */
 
 #include "ring.h"
@@ -115,7 +115,7 @@ int ring_try_send(ring_t *r, const uint8_t *buf, size_t len)
 }
 
 /* ============================================================
- * Native (host) implementation — pthread mutex + condvar
+ * Native (host) implementation -- pthread mutex + condvar
  * ============================================================ */
 #else /* RING_NATIVE */
 

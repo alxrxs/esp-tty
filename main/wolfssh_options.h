@@ -1,5 +1,5 @@
 /*
- * wolfssh_options.h — wolfSSH + wolfSSL user settings for esp-tty
+ * wolfssh_options.h -- wolfSSH + wolfSSL user settings for esp-tty
  *
  * Included via WOLFSSL_USER_SETTINGS (set in CMakeLists / platformio.ini).
  * Defines the minimum feature set for ED25519 host key + pubkey auth.
@@ -7,31 +7,31 @@
 
 #pragma once
 
-/* ── ESP32 platform ─────────────────────────────────────────────── */
+/* -- ESP32 platform ----------------------------------------------- */
 #define WOLFSSL_ESPIDF
 #define WOLFSSL_ESP32
 #define ESP_ENABLE_WOLFSSH
 #define WOLFSSL_WOLFSSH
 
-/* ── wolfSSH features ──────────────────────────────────────────── */
+/* -- wolfSSH features -------------------------------------------- */
 #define WOLFSSH_TEST_SERVER         /* enable server-side API        */
 #define WOLFSSH_TERM                /* accept PTY requests           */
 #define WOLFSSH_SHELL               /* enable window-change resize callback */
 #define DEFAULT_WINDOW_SZ  2000    /* shrunk for embedded use       */
 
-/* ── Crypto: ED25519 only (RSA disabled to save ~40 KB flash) ──── */
+/* -- Crypto: ED25519 only (RSA disabled to save ~40 KB flash) ---- */
 #define HAVE_ECC
 #define HAVE_CURVE25519
 #define HAVE_ED25519
 #define WOLFSSL_SHA512              /* required by ED25519           */
 #define USE_FAST_MATH
 
-/* ── Embedded constraints ──────────────────────────────────────── */
+/* -- Embedded constraints ---------------------------------------- */
 #define NO_FILESYSTEM
 #define NO_OLD_TLS
 #define WOLFSSL_SMALL_STACK
 #define NO_RSA
 #define WOLFSSH_NO_RSA
 
-/* ── ESP32 hardware acceleration ───────────────────────────────── */
+/* -- ESP32 hardware acceleration --------------------------------- */
 #define NO_WOLFSSL_ESP32_CRYPT_HASH_SHA224

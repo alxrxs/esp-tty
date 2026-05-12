@@ -1,4 +1,4 @@
-# scripts/ — Build and Key Management Scripts
+# scripts/ -- Build and Key Management Scripts
 
 This directory contains the build-system hooks and developer utilities for the
 esp-tty firmware project.  The scripts fall into two groups: those that run
@@ -45,8 +45,8 @@ files do not exist when SCons tries to assemble them, causing an immediate build
 failure.
 
 The hook fixes this by invoking ESP-IDF's `data_file_embed_asm.cmake` script
-directly at PlatformIO script-evaluation time — before SCons has read the build
-graph — writing the `.S` files into `BUILD_DIR` exactly where the cmake codemodel
+directly at PlatformIO script-evaluation time -- before SCons has read the build
+graph -- writing the `.S` files into `BUILD_DIR` exactly where the cmake codemodel
 says they live.  Each file is regenerated only when its source data file is newer
 than the existing `.S`, keeping incremental builds efficient.  The hook is a no-op
 if the certificate or key source files are absent.
@@ -101,9 +101,9 @@ Makefile falls back to PlatformIO's own auto-detection.
 
 Generates the three files required to sign and decrypt OTA firmware images:
 
-- `ota_keys/sign.key.pem` — ECDSA-P256 private key (gitignored, keep secret)
-- `ota_keys/sign.pub.pem` — ECDSA-P256 public key (gitignored, embedded in firmware via `gen_eap_certs_asm.py`)
-- `ota_keys/aes.key` — 32 raw bytes, AES-256-GCM encryption key (gitignored, embedded in firmware)
+- `ota_keys/sign.key.pem` -- ECDSA-P256 private key (gitignored, keep secret)
+- `ota_keys/sign.pub.pem` -- ECDSA-P256 public key (gitignored, embedded in firmware via `gen_eap_certs_asm.py`)
+- `ota_keys/aes.key` -- 32 raw bytes, AES-256-GCM encryption key (gitignored, embedded in firmware)
 
 The script is idempotent in the safe direction: if any of the three files already
 exist it exits with an error rather than overwriting them, preventing accidental

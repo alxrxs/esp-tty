@@ -1,5 +1,5 @@
 /*
- * bridge.c — pure byte pump, no platform dependencies
+ * bridge.c -- pure byte pump, no platform dependencies
  */
 
 #include "bridge.h"

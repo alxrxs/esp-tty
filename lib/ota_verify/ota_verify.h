@@ -1,5 +1,5 @@
 /*
- * ota_verify.h — streaming OTA image verifier / decryptor for esp-tty
+ * ota_verify.h -- streaming OTA image verifier / decryptor for esp-tty
  *
  * Image format (produced by scripts/sign_firmware.py):
  *
@@ -22,7 +22,7 @@
  *   3. Only call esp_ota_set_boot_partition() if ECDSA verify succeeds.
  *   4. AES-GCM authentication tag is verified during decrypt; if it fails
  *      the session is aborted and the partition is left untouched (or
- *      partially written — but bootloader will not select it because step 3
+ *      partially written -- but bootloader will not select it because step 3
  *      did not run).
  *
  * Thread safety: each ota_verify_ctx_t must be used from a single task.
@@ -38,7 +38,7 @@
 extern "C" {
 #endif
 
-/* ── Error codes ─────────────────────────────────────────────────────────── */
+/* -- Error codes ----------------------------------------------------------- */
 
 typedef enum {
     OTA_VERIFY_OK            = 0,
@@ -51,11 +51,11 @@ typedef enum {
     OTA_VERIFY_ERR_OOM       = -7,  /* memory allocation error  */
     OTA_VERIFY_ERR_CRYPTO    = -8,  /* mbedtls internal error   */
     OTA_VERIFY_ERR_PARAM          = -9,  /* bad parameter            */
-    OTA_VERIFY_ERR_LENGTH_MISMATCH = -10, /* plaintext_len ≠ actual ciphertext received */
-    OTA_VERIFY_ERR_EMPTY_IMAGE    = -11, /* plaintext_len == 0 — refusing empty firmware */
+    OTA_VERIFY_ERR_LENGTH_MISMATCH = -10, /* plaintext_len != actual ciphertext received */
+    OTA_VERIFY_ERR_EMPTY_IMAGE    = -11, /* plaintext_len == 0 -- refusing empty firmware */
 } ota_verify_err_t;
 
-/* ── Header constants ────────────────────────────────────────────────────── */
+/* -- Header constants ------------------------------------------------------ */
 
 #define OTA_MAGIC           "ESPOTA1\0"
 #define OTA_MAGIC_LEN       8
@@ -65,13 +65,13 @@ typedef enum {
 #define OTA_SIG_LEN         64
 #define OTA_HEADER_SIZE     (OTA_MAGIC_LEN + 4 + 4 + OTA_IV_LEN + OTA_TAG_LEN)  /* 44 */
 
-/* ── Streaming context ───────────────────────────────────────────────────── */
+/* -- Streaming context ----------------------------------------------------- */
 
-/* Opaque context — implementation in ota_verify.c */
+/* Opaque context -- implementation in ota_verify.c */
 typedef struct ota_verify_ctx ota_verify_ctx_t;
 
 /*
- * ota_verify_begin — initialise a streaming verification session.
+ * ota_verify_begin -- initialise a streaming verification session.
  *
  * pub_key_pem      : ECDSA-P256 public key in PEM format (NUL-terminated)
  * pub_key_pem_len  : length including the NUL terminator
@@ -85,7 +85,7 @@ ota_verify_ctx_t *ota_verify_begin(const uint8_t *pub_key_pem,
                                    const uint8_t  aes_key[32]);
 
 /*
- * ota_verify_feed — feed the next chunk of the OTA image stream.
+ * ota_verify_feed -- feed the next chunk of the OTA image stream.
  *
  * Data must be fed in order, starting from byte 0 of the signed image.
  * Internally the function:
@@ -107,7 +107,7 @@ ota_verify_err_t ota_verify_feed(ota_verify_ctx_t *ctx,
                                   size_t            total_image_len);
 
 /*
- * ota_verify_end — finalise the session.
+ * ota_verify_end -- finalise the session.
  *
  * Verifies the ECDSA signature and AES-GCM tag.
  * On success:
@@ -127,7 +127,7 @@ ota_verify_err_t ota_verify_feed(ota_verify_ctx_t *ctx,
 ota_verify_err_t ota_verify_end(ota_verify_ctx_t *ctx);
 
 /*
- * ota_verify_abort — tear down the session without committing anything.
+ * ota_verify_abort -- tear down the session without committing anything.
  *
  * Safe to call after any ota_verify_feed failure or if the SSH session
  * is interrupted mid-stream.  Frees the context.
@@ -135,7 +135,7 @@ ota_verify_err_t ota_verify_end(ota_verify_ctx_t *ctx);
 void ota_verify_abort(ota_verify_ctx_t *ctx);
 
 /*
- * ota_verify_strerror — human-readable string for an error code.
+ * ota_verify_strerror -- human-readable string for an error code.
  */
 const char *ota_verify_strerror(ota_verify_err_t err);
 

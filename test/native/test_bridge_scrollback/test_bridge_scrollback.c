@@ -1,5 +1,5 @@
 /*
- * test_bridge_scrollback.c — integration tests for scrollback replay
+ * test_bridge_scrollback.c -- integration tests for scrollback replay
  *
  * Simulates the SSH session flow:
  *   1. Push N lines of data into a scrollback buffer.
@@ -25,7 +25,7 @@
 void setUp(void)    {}
 void tearDown(void) {}
 
-/* ── Helpers ─────────────────────────────────────────────────────────────── */
+/* -- Helpers --------------------------------------------------------------- */
 
 static int count_newlines(const uint8_t *buf, size_t len)
 {
@@ -35,7 +35,7 @@ static int count_newlines(const uint8_t *buf, size_t len)
     return n;
 }
 
-/* ── Test 1: push 50 lines, request last 20, verify count and tail ────────── */
+/* -- Test 1: push 50 lines, request last 20, verify count and tail ---------- */
 
 void test_get_last_20_of_50_lines(void)
 {
@@ -77,7 +77,7 @@ void test_get_last_20_of_50_lines(void)
     free(sb);
 }
 
-/* ── Test 2: request more lines than stored — returns everything ──────────── */
+/* -- Test 2: request more lines than stored -- returns everything ------------ */
 
 void test_get_more_lines_than_stored_returns_all(void)
 {
@@ -101,10 +101,10 @@ void test_get_more_lines_than_stored_returns_all(void)
     free(sb);
 }
 
-/* ── Test 3: scrollback after ring+bridge pump pipeline ─────────────────────
+/* -- Test 3: scrollback after ring+bridge pump pipeline ---------------------
  *
  * Topology:
- *   producer → [src_ring] → bridge_pump → [dst_ring] → consumer → scrollback
+ *   producer -> [src_ring] -> bridge_pump -> [dst_ring] -> consumer -> scrollback
  *
  * The bridge_pump runs in a background thread.  The consumer thread drains
  * dst_ring and pushes every byte into the scrollback.  After all data flows
@@ -180,12 +180,12 @@ void test_bridge_pump_into_scrollback(void)
         total_bytes += (size_t)ln;
     }
 
-    /* Start bridge_pump (ab → ba) */
+    /* Start bridge_pump (ab -> ba) */
     pump_arg_t parg = {.src = ab, .dst = ba, .stop = false};
     pthread_t pump_thr;
     pthread_create(&pump_thr, NULL, pump_thread, &parg);
 
-    /* Start consumer (drains ba → scrollback) */
+    /* Start consumer (drains ba -> scrollback) */
     consumer_arg_t carg = {.src = ba, .sb = sb,
                            .total_expected = total_bytes, .result = 99};
     pthread_t cons_thr;
@@ -227,7 +227,7 @@ void test_bridge_pump_into_scrollback(void)
     free(sb);
 }
 
-/* ── Test 4: push exactly 50 lines, request last 20, verify no off-by-one ── */
+/* -- Test 4: push exactly 50 lines, request last 20, verify no off-by-one -- */
 
 void test_ssh_session_replay_20_of_50(void)
 {
@@ -266,7 +266,7 @@ void test_ssh_session_replay_20_of_50(void)
     free(sb);
 }
 
-/* ── Main ────────────────────────────────────────────────────────────────── */
+/* -- Main ------------------------------------------------------------------ */
 
 int main(void)
 {

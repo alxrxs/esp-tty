@@ -1,10 +1,10 @@
 /*
- * ota_stream.h — streaming "read-all" accumulator for OTA image transfer.
+ * ota_stream.h -- streaming "read-all" accumulator for OTA image transfer.
  *
  * Extracted from main/ota_session.c so the same growable-buffer / transient-
  * retry logic can be unit-tested natively without wolfSSH or ESP-IDF.
  *
- * The library is plain C — no ESP-IDF, no wolfSSH includes.  The caller
+ * The library is plain C -- no ESP-IDF, no wolfSSH includes.  The caller
  * supplies:
  *   - a read callback (with a void* ctx) that returns bytes-read / 0 /
  *     <0, mirroring the wolfSSH_stream_read convention with WS_WANT_READ
@@ -19,14 +19,14 @@
  *     overflow that cap.
  *
  * Error semantics:
- *   - read_fn returning <0 before any bytes were stored → OTA_STREAM_ERR_EMPTY
+ *   - read_fn returning <0 before any bytes were stored -> OTA_STREAM_ERR_EMPTY
  *     (we never allocated, *out_buf stays NULL).
  *   - read_fn returning 0 more than `max_zero_retries` times in a row
- *     (without any intervening progress) → treated as EOF.  If no bytes
- *     were ever read → OTA_STREAM_ERR_EMPTY; otherwise success.
- *   - alloc / realloc returning NULL → OTA_STREAM_ERR_OOM; the partial
+ *     (without any intervening progress) -> treated as EOF.  If no bytes
+ *     were ever read -> OTA_STREAM_ERR_EMPTY; otherwise success.
+ *   - alloc / realloc returning NULL -> OTA_STREAM_ERR_OOM; the partial
  *     buffer is freed via free_fn before returning.
- *   - max_bytes exceeded → OTA_STREAM_ERR_TOOBIG; partial buffer freed.
+ *   - max_bytes exceeded -> OTA_STREAM_ERR_TOOBIG; partial buffer freed.
  *
  * On any error path *out_buf is set to NULL and *out_len to 0.  On success
  * the caller owns *out_buf and must release it with the matching free_fn
@@ -45,7 +45,7 @@ extern "C" {
 /*
  * Read-callback type.  Returns:
  *   > 0 : bytes read into buf
- *   0   : transient (no data yet) — caller should retry (think WS_WANT_READ)
+ *   0   : transient (no data yet) -- caller should retry (think WS_WANT_READ)
  *   < 0 : terminal error / EOF
  */
 typedef int (*ota_stream_read_fn)(void *ctx, uint8_t *buf, size_t cap);

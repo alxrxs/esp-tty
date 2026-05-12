@@ -1,5 +1,5 @@
 /*
- * test_scrollback.c — unit tests for the scrollback circular buffer (native)
+ * test_scrollback.c -- unit tests for the scrollback circular buffer (native)
  *
  * Compiled with -DUNIT_TEST which activates the pthread-backed native
  * implementation in lib/scrollback/scrollback.c.
@@ -16,7 +16,7 @@
 void setUp(void)    {}
 void tearDown(void) {}
 
-/* ── Helpers ─────────────────────────────────────────────────────────────── */
+/* -- Helpers --------------------------------------------------------------- */
 
 /* Count newlines in a byte buffer. */
 static int count_newlines(const uint8_t *buf, size_t len)
@@ -27,17 +27,17 @@ static int count_newlines(const uint8_t *buf, size_t len)
     return n;
 }
 
-/* ── Basic construction ──────────────────────────────────────────────────── */
+/* -- Basic construction ---------------------------------------------------- */
 
 void test_create_returns_non_null(void)
 {
     scrollback_t *sb = scrollback_create(256);
     TEST_ASSERT_NOT_NULL(sb);
-    free(sb);  /* direct free is not the API; but scrollback has no destroy —
+    free(sb);  /* direct free is not the API; but scrollback has no destroy --
                   we rely on process exit for tests; just confirm create works */
 }
 
-/* ── Empty buffer ────────────────────────────────────────────────────────── */
+/* -- Empty buffer ---------------------------------------------------------- */
 
 void test_empty_buffer_get_lines_returns_null(void)
 {
@@ -52,7 +52,7 @@ void test_empty_buffer_get_lines_returns_null(void)
     free(sb);
 }
 
-/* ── Push then get_lines ─────────────────────────────────────────────────── */
+/* -- Push then get_lines --------------------------------------------------- */
 
 void test_push_then_get_lines_returns_content(void)
 {
@@ -73,7 +73,7 @@ void test_push_then_get_lines_returns_content(void)
     free(sb);
 }
 
-/* ── Wrap-around: push more than capacity, oldest data overwritten ────────── */
+/* -- Wrap-around: push more than capacity, oldest data overwritten ---------- */
 
 void test_overflow_wraps_oldest_data(void)
 {
@@ -105,7 +105,7 @@ void test_overflow_wraps_oldest_data(void)
     free(sb);
 }
 
-/* ── get_lines respects max_lines < total lines ───────────────────────────── */
+/* -- get_lines respects max_lines < total lines ----------------------------- */
 
 void test_get_lines_returns_last_n_lines(void)
 {
@@ -137,7 +137,7 @@ void test_get_lines_returns_last_n_lines(void)
     free(sb);
 }
 
-/* ── max_lines > total lines returns everything ───────────────────────────── */
+/* -- max_lines > total lines returns everything ----------------------------- */
 
 void test_get_lines_max_exceeds_total_returns_all(void)
 {
@@ -158,7 +158,7 @@ void test_get_lines_max_exceeds_total_returns_all(void)
     free(sb);
 }
 
-/* ── Data with no newlines: get_lines returns entire buffer ───────────────── */
+/* -- Data with no newlines: get_lines returns entire buffer ----------------- */
 
 void test_no_newlines_returns_entire_buffer(void)
 {
@@ -172,7 +172,7 @@ void test_no_newlines_returns_entire_buffer(void)
     uint8_t *out = scrollback_get_lines(sb, 5, &len);
 
     TEST_ASSERT_NOT_NULL(out);
-    /* No newlines → the entire buffer is treated as one partial line */
+    /* No newlines -> the entire buffer is treated as one partial line */
     TEST_ASSERT_EQUAL_size_t(strlen(data), len);
     TEST_ASSERT_EQUAL_MEMORY(data, out, len);
 
@@ -180,7 +180,7 @@ void test_no_newlines_returns_entire_buffer(void)
     free(sb);
 }
 
-/* ── Exact capacity boundary: push exactly cap bytes ─────────────────────── */
+/* -- Exact capacity boundary: push exactly cap bytes ----------------------- */
 
 void test_exact_capacity_push(void)
 {
@@ -203,7 +203,7 @@ void test_exact_capacity_push(void)
     free(sb);
 }
 
-/* ── Wrap-around across circular boundary with line counting ──────────────── */
+/* -- Wrap-around across circular boundary with line counting ---------------- */
 
 void test_wrap_and_get_lines_correct(void)
 {
@@ -237,7 +237,7 @@ void test_wrap_and_get_lines_correct(void)
     free(sb);
 }
 
-/* ── get_lines with max_lines == 0 returns nothing (empty frame) ─────────── */
+/* -- get_lines with max_lines == 0 returns nothing (empty frame) ----------- */
 
 void test_get_lines_zero_max_returns_null_or_empty(void)
 {
@@ -260,7 +260,7 @@ void test_get_lines_zero_max_returns_null_or_empty(void)
     free(sb);
 }
 
-/* ── Multiple pushes accumulate correctly ─────────────────────────────────── */
+/* -- Multiple pushes accumulate correctly ----------------------------------- */
 
 void test_multiple_pushes_accumulate(void)
 {
@@ -282,13 +282,13 @@ void test_multiple_pushes_accumulate(void)
     free(sb);
 }
 
-/* ── scrollback_count_newlines ───────────────────────────────────────────── */
+/* -- scrollback_count_newlines --------------------------------------------- */
 
 void test_count_newlines_empty(void)
 {
-    /* len == 0 → 0, regardless of buf pointer */
+    /* len == 0 -> 0, regardless of buf pointer */
     TEST_ASSERT_EQUAL_INT(0, scrollback_count_newlines((const uint8_t *)"", 0));
-    /* NULL buf → 0 */
+    /* NULL buf -> 0 */
     TEST_ASSERT_EQUAL_INT(0, scrollback_count_newlines(NULL, 42));
 }
 
@@ -330,7 +330,7 @@ void test_count_newlines_with_cr(void)
 
 void test_count_newlines_binary(void)
 {
-    /* Buffer of 0x00..0xFF — exactly one 0x0A byte (at index 10). */
+    /* Buffer of 0x00..0xFF -- exactly one 0x0A byte (at index 10). */
     uint8_t buf[256];
     for (int i = 0; i < 256; i++) buf[i] = (uint8_t)i;
     TEST_ASSERT_EQUAL_INT(1, scrollback_count_newlines(buf, sizeof buf));
@@ -339,11 +339,11 @@ void test_count_newlines_binary(void)
     buf[0]   = 0x0A;
     buf[100] = 0x0A;
     buf[255] = 0x0A;
-    /* Original 0x0A at index 10 is still there → 4 total. */
+    /* Original 0x0A at index 10 is still there -> 4 total. */
     TEST_ASSERT_EQUAL_INT(4, scrollback_count_newlines(buf, sizeof buf));
 }
 
-/* ── scrollback_format_header ────────────────────────────────────────────── */
+/* -- scrollback_format_header ---------------------------------------------- */
 
 void test_format_header_zero_lines(void)
 {
@@ -388,7 +388,7 @@ void test_format_header_negative_line_count(void)
 
 void test_format_header_exact_fit(void)
 {
-    /* "\r\n\x1b[2m--- scrollback: 7 lines ---\x1b[0m\r\n" — exactly strlen
+    /* "\r\n\x1b[2m--- scrollback: 7 lines ---\x1b[0m\r\n" -- exactly strlen
      * bytes of payload.  Allocate strlen+1 to fit payload + NUL. */
     const char *expected =
         "\r\n\x1b[2m--- scrollback: 7 lines ---\x1b[0m\r\n";
@@ -401,7 +401,7 @@ void test_format_header_exact_fit(void)
     TEST_ASSERT_EQUAL_STRING(expected, buf_ok);
     free(buf_ok);
 
-    /* One byte too small (no room for NUL) → return 0. */
+    /* One byte too small (no room for NUL) -> return 0. */
     char *buf_short = malloc(need - 1);
     TEST_ASSERT_NOT_NULL(buf_short);
     int n_short = scrollback_format_header(7, buf_short, need - 1);
@@ -419,7 +419,7 @@ void test_format_header_large_line_count(void)
     TEST_ASSERT_EQUAL_STRING(expected, buf);
 }
 
-/* ── SCROLLBACK_FOOTER constant ──────────────────────────────────────────── */
+/* -- SCROLLBACK_FOOTER constant -------------------------------------------- */
 
 void test_footer_constant_matches_expected(void)
 {
@@ -427,7 +427,7 @@ void test_footer_constant_matches_expected(void)
                              SCROLLBACK_FOOTER);
 }
 
-/* ── Main ────────────────────────────────────────────────────────────────── */
+/* -- Main ------------------------------------------------------------------ */
 
 int main(void)
 {

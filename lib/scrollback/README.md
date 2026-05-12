@@ -1,4 +1,4 @@
-# lib/scrollback — USB output capture and SSH replay buffer
+# lib/scrollback -- USB output capture and SSH replay buffer
 
 This module maintains a circular byte buffer that continuously captures all
 output arriving from the USB CDC device, even when no SSH client is connected.
@@ -11,10 +11,10 @@ and the default replay depth is 1000 lines (`SCROLLBACK_DEFAULT_LINES`).
 
 ## Files
 
-- **scrollback.h** — public interface.  Declares the opaque `scrollback_t`
+- **scrollback.h** -- public interface.  Declares the opaque `scrollback_t`
   type, the four primary API functions, the two pure formatting helpers, and the
   `SCROLLBACK_FOOTER` string constant.
-- **scrollback.c** — implementation.  The pure formatters and the
+- **scrollback.c** -- implementation.  The pure formatters and the
   `SCROLLBACK_FOOTER` definition are compiled unconditionally on both targets.
   The circular-buffer implementation is selected by an `#ifdef UNIT_TEST` guard:
   on ESP32 targets the struct uses a FreeRTOS `SemaphoreHandle_t` and allocates
@@ -25,30 +25,30 @@ and the default replay depth is 1000 lines (`SCROLLBACK_DEFAULT_LINES`).
 
 ## API
 
-- `scrollback_create(cap)` — allocate a new buffer with `cap` bytes of circular
+- `scrollback_create(cap)` -- allocate a new buffer with `cap` bytes of circular
   storage.  Returns `NULL` on allocation failure.
-- `scrollback_push(sb, data, len)` — append bytes to the ring, overwriting the
+- `scrollback_push(sb, data, len)` -- append bytes to the ring, overwriting the
   oldest content once the buffer is full.  Non-blocking; safe to call from the
   TinyUSB CDC RX callback context.  On ESP32 the lock is held only for the
   duration of the `memcpy` (at most 64 bytes per CDC chunk), so contention is
   at the microsecond level.
-- `scrollback_get_lines(sb, max_lines, &out_len)` — allocate and return a
+- `scrollback_get_lines(sb, max_lines, &out_len)` -- allocate and return a
   linearised copy of the last `max_lines` newline-delimited lines stored in the
   buffer.  Scans backward through the ring without holding the lock (a brief
   lock is taken only to snapshot the mutable `head` and `used` fields), so minor
   tearing under concurrent pushes is accepted as a trade-off in this
   debug-replay path.  Returns `NULL` when the buffer is empty or allocation
   fails; the caller must `free()` the returned pointer.
-- `scrollback_count_newlines(buf, len)` — pure function; counts `'\n'` bytes in
+- `scrollback_count_newlines(buf, len)` -- pure function; counts `'\n'` bytes in
   an arbitrary buffer.  Returns 0 for NULL or zero-length input.  Used by the
   SSH replay path to report the line count in the header.
-- `scrollback_format_header(line_count, out, out_sz)` — pure function; formats
+- `scrollback_format_header(line_count, out, out_sz)` -- pure function; formats
   the dimmed ANSI banner `"\r\n\x1b[2m--- scrollback: N lines ---\x1b[0m\r\n"`
   into a caller-supplied buffer.  Returns the byte count written (excluding the
   NUL), or 0 if `line_count` is negative, `out` is NULL, or `out_sz` is too
   small for the formatted string plus its NUL terminator.  A 64-byte buffer is
   comfortable for counts up to six digits.
-- `SCROLLBACK_FOOTER` — the fixed string `"\x1b[2m--- live ---\x1b[0m\r\n"`
+- `SCROLLBACK_FOOTER` -- the fixed string `"\x1b[2m--- live ---\x1b[0m\r\n"`
   emitted after the replay dump to mark the boundary between historical and live
   output.
 

@@ -1,4 +1,4 @@
-# ── EAP-TLS certificate embedding ────────────────────────────────────────────
+# -- EAP-TLS certificate embedding --------------------------------------------
 # When main/certs/ca.pem, client.crt, and client.key all exist, embed them
 # into the binary via EMBED_TXTFILES.  This produces linker symbols:
 #   _binary_ca_pem_start / _binary_ca_pem_end
@@ -6,17 +6,17 @@
 #   _binary_client_key_start / _binary_client_key_end
 #
 # The files must be present (real certs, not the .example stubs) for a
-# WIFI_USE_ENTERPRISE build.  Copy the .example files → real names and fill
+# WIFI_USE_ENTERPRISE build.  Copy the .example files -> real names and fill
 # them in; they are gitignored.  See main/certs/README.md for details.
 #
 # Ordering guarantee: ESP-IDF's CMakeLists.txt is evaluated in two passes:
-#   1. Script mode (-P component_get_requirements.cmake) — dependency graph.
-#   2. Project mode (normal cmake configure) — actual build graph.
+#   1. Script mode (-P component_get_requirements.cmake) -- dependency graph.
+#   2. Project mode (normal cmake configure) -- actual build graph.
 # CMAKE_CONFIGURE_DEPENDS is only valid in project mode; we guard it with
 # CMAKE_SCRIPT_MODE_FILE so the CONFIGURE_DEPENDS property is registered in
 # project mode only.  Once registered, CMake automatically re-runs configure
 # whenever the cert files appear or disappear, so a single `pio run` always
-# suffices — no "run it twice on first build" workaround needed.
+# suffices -- no "run it twice on first build" workaround needed.
 set(EAP_CERT_DIR "${CMAKE_CURRENT_LIST_DIR}/certs")
 if(EXISTS "${EAP_CERT_DIR}/ca.pem" AND
    EXISTS "${EAP_CERT_DIR}/client.crt" AND
@@ -26,7 +26,7 @@ if(EXISTS "${EAP_CERT_DIR}/ca.pem" AND
         "certs/client.crt"
         "certs/client.key"
     )
-    message(STATUS "esp-tty: EAP-TLS cert files found — embedding into firmware")
+    message(STATUS "esp-tty: EAP-TLS cert files found -- embedding into firmware")
 else()
     set(EAP_EMBED_FILES "")
 endif()
@@ -42,12 +42,12 @@ if(NOT CMAKE_SCRIPT_MODE_FILE)
     )
 endif()
 
-# ── OTA signing key embedding ─────────────────────────────────────────────────
+# -- OTA signing key embedding -------------------------------------------------
 # When ota_keys/sign.pub.pem and ota_keys/aes.key exist, embed them into the
 # firmware.  These are the real keys (gitignored); see ota_keys/README.md.
 #
-# sign.pub.pem → EMBED_TXTFILES → _binary_sign_pub_pem_start/_end (NUL-appended)
-# aes.key      → EMBED_FILES    → _binary_aes_key_start/_end        (raw 32 bytes)
+# sign.pub.pem -> EMBED_TXTFILES -> _binary_sign_pub_pem_start/_end (NUL-appended)
+# aes.key      -> EMBED_FILES    -> _binary_aes_key_start/_end        (raw 32 bytes)
 #
 # If the files are absent (e.g., CI without keys), OTA is built without key
 # material and the OTA session will fail gracefully at runtime.
@@ -56,12 +56,12 @@ if(EXISTS "${OTA_KEY_DIR}/sign.pub.pem" AND EXISTS "${OTA_KEY_DIR}/aes.key")
     set(OTA_EMBED_TXT "ota_keys/sign.pub.pem")
     set(OTA_EMBED_BIN "ota_keys/aes.key")
     set(OTA_KEYS_PRESENT TRUE)
-    message(STATUS "esp-tty: OTA key files found — embedding into firmware")
+    message(STATUS "esp-tty: OTA key files found -- embedding into firmware")
 else()
     set(OTA_EMBED_TXT "")
     set(OTA_EMBED_BIN "")
     set(OTA_KEYS_PRESENT FALSE)
-    message(STATUS "esp-tty: OTA key files NOT found — OTA will be non-functional at runtime")
+    message(STATUS "esp-tty: OTA key files NOT found -- OTA will be non-functional at runtime")
 endif()
 
 if(NOT CMAKE_SCRIPT_MODE_FILE)

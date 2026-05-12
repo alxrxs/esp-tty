@@ -1,5 +1,5 @@
 /*
- * scrollback.h — Circular byte buffer that captures USB device output
+ * scrollback.h -- Circular byte buffer that captures USB device output
  *
  * Written continuously by the USB CDC callback (even with no SSH client
  * connected), then replayed to each SSH client when it connects.
@@ -18,7 +18,7 @@ extern "C" {
 
 typedef struct scrollback_t scrollback_t;
 
-/* Default capacity: 128 KB ≈ 1600 lines at 80 chars/line */
+/* Default capacity: 128 KB ~= 1600 lines at 80 chars/line */
 #define SCROLLBACK_DEFAULT_CAP   (128u * 1024u)
 
 /* Lines to replay to each newly-connected SSH client */
@@ -41,7 +41,7 @@ void scrollback_push(scrollback_t *sb, const uint8_t *data, size_t len);
  */
 uint8_t *scrollback_get_lines(scrollback_t *sb, int max_lines, size_t *out_len);
 
-/* ── Pure formatters (no platform deps; safe for native unit tests) ───────── */
+/* -- Pure formatters (no platform deps; safe for native unit tests) --------- */
 
 /*
  * Count the number of '\n' bytes in `buf[0 .. len)`.  Returns 0 for
@@ -61,7 +61,7 @@ int scrollback_count_newlines(const uint8_t *buf, size_t len);
  *   - out_sz is too small for the formatted string + NUL
  *
  * Always NUL-terminates `out` when it returns > 0.  For typical line
- * counts (1–4 digits) the result is < 50 bytes; 64 is comfortable.
+ * counts (1-4 digits) the result is < 50 bytes; 64 is comfortable.
  */
 int scrollback_format_header(int line_count, char *out, size_t out_sz);
 

@@ -1,4 +1,4 @@
-# lib/ota_verify — streaming OTA image verifier and decryptor
+# lib/ota_verify -- streaming OTA image verifier and decryptor
 
 This module authenticates and decrypts OTA firmware images before writing them
 to flash. It consumes the binary format produced by `scripts/sign_firmware.py`
@@ -38,12 +38,12 @@ returning, re-parsing the written file and re-verifying the signature.
 
 The public interface (`ota_verify.h`) is a three-function streaming API:
 
-- `ota_verify_begin(pub_key_pem, pub_key_pem_len, aes_key)` — allocate and
+- `ota_verify_begin(pub_key_pem, pub_key_pem_len, aes_key)` -- allocate and
   initialise a heap-resident `ota_verify_ctx_t`. Imports the AES-256 and
   ECDSA-P256 public keys into the PSA Crypto keystore on device, or into the
   mbedtls context on the native build. Returns `NULL` on allocation failure or
   if the key material is malformed.
-- `ota_verify_feed(ctx, data, len, total_image_len)` — feed the next contiguous
+- `ota_verify_feed(ctx, data, len, total_image_len)` -- feed the next contiguous
   chunk of the image, in order from byte 0. The first call establishes the total
   image size and validates it is at least `OTA_HEADER_SIZE + OTA_SIG_LEN` bytes.
   Internally the function accumulates the 44-byte header on first call(s), then
@@ -54,7 +54,7 @@ The public interface (`ota_verify.h`) is a three-function streaming API:
   or hasher. The header is hashed in full before any ciphertext bytes are
   processed. Ciphertext hash and decrypt operations are chunked to 4096 bytes to
   stay within the ESP32-S3 internal SRAM budget.
-- `ota_verify_end(ctx)` — finalise the session. First checks that the number of
+- `ota_verify_end(ctx)` -- finalise the session. First checks that the number of
   ciphertext bytes received matches `plaintext_len` from the header
   (`OTA_VERIFY_ERR_LENGTH_MISMATCH` if not). Then verifies the ECDSA-P256
   signature via `psa_verify_hash` (gate 1). Then calls `psa_aead_verify` to
@@ -63,7 +63,7 @@ The public interface (`ota_verify.h`) is a three-function streaming API:
   `esp_ota_set_boot_partition`. On any failure it calls `esp_ota_abort` and
   returns the relevant error code; the boot partition is never changed. Frees the
   context in all paths.
-- `ota_verify_abort(ctx)` — safe teardown for mid-stream cancellation. If the
+- `ota_verify_abort(ctx)` -- safe teardown for mid-stream cancellation. If the
   header was already parsed (i.e. a flash write handle was opened), it calls
   `esp_ota_abort` to discard the partial write. Safe to call with `NULL`.
 

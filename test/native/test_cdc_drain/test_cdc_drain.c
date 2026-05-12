@@ -1,5 +1,5 @@
 /*
- * test_cdc_drain.c — unit tests for usb_cdc_drain (native)
+ * test_cdc_drain.c -- unit tests for usb_cdc_drain (native)
  *
  * Drives the drain helper with stub read functions that return a scripted
  * sequence of chunk sizes / errors and verifies:
@@ -26,7 +26,7 @@
 void setUp(void)    {}
 void tearDown(void) {}
 
-/* ── Scripted read_fn stub ───────────────────────────────────────────────── */
+/* -- Scripted read_fn stub ------------------------------------------------- */
 
 /* Hard cap on read calls to prevent any accidental infinite loop. */
 #define MAX_READ_CALLS 20
@@ -45,7 +45,7 @@ static int scripted_read_cb(void *ctx, uint8_t *buf, size_t cap, size_t *rxd)
     scripted_read_ctx_t *c = (scripted_read_ctx_t *)ctx;
 
     if (c->call_count >= MAX_READ_CALLS) {
-        TEST_FAIL_MESSAGE("scripted_read_cb called too many times — drain looping");
+        TEST_FAIL_MESSAGE("scripted_read_cb called too many times -- drain looping");
     }
     if (c->call_count >= c->step_count) {
         TEST_FAIL_MESSAGE("scripted_read_cb called past end of script");
@@ -66,7 +66,7 @@ static int scripted_read_cb(void *ctx, uint8_t *buf, size_t cap, size_t *rxd)
     return 0;
 }
 
-/* ── Helper: drain a ring into a flat buffer ─────────────────────────────── */
+/* -- Helper: drain a ring into a flat buffer ------------------------------- */
 
 static size_t drain_ring(ring_t *r, uint8_t *out, size_t cap)
 {
@@ -92,7 +92,7 @@ static size_t snapshot_ring(ring_t *r, uint8_t *out, size_t cap)
     return drain_ring(r, out, cap);
 }
 
-/* ── Test 1 ──────────────────────────────────────────────────────────────── */
+/* -- Test 1 ---------------------------------------------------------------- */
 
 void test_drain_consumes_until_read_returns_zero(void)
 {
@@ -129,7 +129,7 @@ void test_drain_consumes_until_read_returns_zero(void)
     free(sb);
 }
 
-/* ── Test 2 ──────────────────────────────────────────────────────────────── */
+/* -- Test 2 ---------------------------------------------------------------- */
 
 void test_drain_single_chunk_under_64_bytes(void)
 {
@@ -168,7 +168,7 @@ void test_drain_single_chunk_under_64_bytes(void)
     free(sb);
 }
 
-/* ── Test 3 ──────────────────────────────────────────────────────────────── */
+/* -- Test 3 ---------------------------------------------------------------- */
 
 void test_drain_stops_on_read_error(void)
 {
@@ -210,7 +210,7 @@ void test_drain_stops_on_read_error(void)
     free(sb);
 }
 
-/* ── Test 4 ──────────────────────────────────────────────────────────────── */
+/* -- Test 4 ---------------------------------------------------------------- */
 
 void test_drain_continues_when_ring_full_partial_write(void)
 {
@@ -221,7 +221,7 @@ void test_drain_continues_when_ring_full_partial_write(void)
         .fill_byte_base  = 0x55,
     };
 
-    /* Tiny ring (cap 8) pre-filled with 6 bytes — only 2 bytes of space free. */
+    /* Tiny ring (cap 8) pre-filled with 6 bytes -- only 2 bytes of space free. */
     ring_t *ring = ring_create(8);
     TEST_ASSERT_NOT_NULL(ring);
     uint8_t preload[6] = {1, 2, 3, 4, 5, 6};
@@ -257,7 +257,7 @@ void test_drain_continues_when_ring_full_partial_write(void)
     free(sb);
 }
 
-/* ── Test 5 ──────────────────────────────────────────────────────────────── */
+/* -- Test 5 ---------------------------------------------------------------- */
 
 void test_drain_continues_when_ring_closed(void)
 {
@@ -303,7 +303,7 @@ void test_drain_continues_when_ring_closed(void)
     free(sb);
 }
 
-/* ── Test 6 ──────────────────────────────────────────────────────────────── */
+/* -- Test 6 ---------------------------------------------------------------- */
 
 void test_drain_handles_zero_first_call(void)
 {
@@ -329,7 +329,7 @@ void test_drain_handles_zero_first_call(void)
     size_t ring_len = snapshot_ring(ring, ring_buf, sizeof(ring_buf));
     TEST_ASSERT_EQUAL_size_t(0, ring_len);
 
-    /* Scrollback is empty — no push was performed. */
+    /* Scrollback is empty -- no push was performed. */
     size_t sb_len = 99;
     uint8_t *sb_dump = scrollback_get_lines(sb, 100000, &sb_len);
     TEST_ASSERT_NULL(sb_dump);
@@ -339,7 +339,7 @@ void test_drain_handles_zero_first_call(void)
     free(sb);
 }
 
-/* ── Main ────────────────────────────────────────────────────────────────── */
+/* -- Main ------------------------------------------------------------------ */
 
 int main(void)
 {

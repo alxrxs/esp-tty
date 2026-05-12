@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # test/scripts/test_ota_signer_roundtrip.sh
 #
-# Host signer ↔ on-device verifier roundtrip test.
+# Host signer <-> on-device verifier roundtrip test.
 #
 # Steps:
 #   1. Generate fresh OTA keys in a temp dir (not the project's ota_keys/)
 #   2. Generate a 256-byte deterministic dummy firmware
 #   3. Sign the firmware with scripts/sign_firmware.py
 #   4. Compile roundtrip_verify.c (links lib/ota_verify and stubs) with gcc
-#   5. Run roundtrip_verify against the signed image — expect OTA_VERIFY_OK
-#   6. Re-run with --tamper-byte to flip a ciphertext byte — expect failure
+#   5. Run roundtrip_verify against the signed image -- expect OTA_VERIFY_OK
+#   6. Re-run with --tamper-byte to flip a ciphertext byte -- expect failure
 #
 # Exit: 0 = PASS, 1 = FAIL
 
@@ -26,17 +26,17 @@ FAIL_REASON=""
 
 fail() {
     FAIL_REASON="$1"
-    echo "[signer_roundtrip] FAIL — $FAIL_REASON"
+    echo "[signer_roundtrip] FAIL -- $FAIL_REASON"
     exit 1
 }
 
-echo "[signer_roundtrip] ── Working dir: $WORKDIR"
+echo "[signer_roundtrip] -- Working dir: $WORKDIR"
 rm -rf "$WORKDIR"
 mkdir -p "$WORKDIR/keys"
 
-# ── Step 1: Generate OTA keys in temp dir ─────────────────────────────────
+# -- Step 1: Generate OTA keys in temp dir ---------------------------------
 
-echo "[signer_roundtrip] ── Step 1: Generate OTA keys ─────────────────────"
+echo "[signer_roundtrip] -- Step 1: Generate OTA keys ---------------------"
 
 # gen_ota_key.sh generates into $PROJECT_DIR/ota_keys by default via relative path.
 # We invoke openssl directly to generate keys in our temp dir.
@@ -46,16 +46,16 @@ openssl rand 32 > "$WORKDIR/keys/aes.key"
 
 echo "[signer_roundtrip] Keys generated in $WORKDIR/keys/"
 
-# ── Step 2: Generate deterministic 256-byte dummy firmware ───────────────
+# -- Step 2: Generate deterministic 256-byte dummy firmware ---------------
 
-echo "[signer_roundtrip] ── Step 2: Generate dummy firmware ────────────────"
+echo "[signer_roundtrip] -- Step 2: Generate dummy firmware ----------------"
 python3 -c "import sys; sys.stdout.buffer.write(bytes(range(256)))" > "$WORKDIR/dummy.bin"
 DUMMY_SIZE=$(wc -c < "$WORKDIR/dummy.bin")
 echo "[signer_roundtrip] Dummy firmware: $DUMMY_SIZE bytes"
 
-# ── Step 3: Sign the firmware ────────────────────────────────────────────
+# -- Step 3: Sign the firmware --------------------------------------------
 
-echo "[signer_roundtrip] ── Step 3: Sign firmware ────────────────────────"
+echo "[signer_roundtrip] -- Step 3: Sign firmware ------------------------"
 python3 "$PROJECT_DIR/scripts/sign_firmware.py" \
     "$WORKDIR/dummy.bin" \
     --out "$WORKDIR/dummy.bin.ota" \
@@ -65,9 +65,9 @@ python3 "$PROJECT_DIR/scripts/sign_firmware.py" \
 OTA_SIZE=$(wc -c < "$WORKDIR/dummy.bin.ota")
 echo "[signer_roundtrip] Signed image: $OTA_SIZE bytes"
 
-# ── Step 4: Compile roundtrip_verify ─────────────────────────────────────
+# -- Step 4: Compile roundtrip_verify -------------------------------------
 
-echo "[signer_roundtrip] ── Step 4: Compile roundtrip_verify ───────────────"
+echo "[signer_roundtrip] -- Step 4: Compile roundtrip_verify ---------------"
 
 BINARY="$WORKDIR/roundtrip_verify"
 
@@ -83,9 +83,9 @@ gcc -O0 -g \
 
 echo "[signer_roundtrip] Compiled: $BINARY"
 
-# ── Step 5: Run roundtrip_verify — expect success ────────────────────────
+# -- Step 5: Run roundtrip_verify -- expect success ------------------------
 
-echo "[signer_roundtrip] ── Step 5: Verify signed image (expect OK) ─────────"
+echo "[signer_roundtrip] -- Step 5: Verify signed image (expect OK) ---------"
 
 if ! "$BINARY" \
         "$WORKDIR/dummy.bin.ota" \
@@ -96,12 +96,12 @@ fi
 
 echo "[signer_roundtrip] Verification OK (pass case)"
 
-# ── Step 6: Tamper one ciphertext byte — expect failure ──────────────────
+# -- Step 6: Tamper one ciphertext byte -- expect failure ------------------
 
-echo "[signer_roundtrip] ── Step 6: Tamper image (expect FAIL) ──────────────"
+echo "[signer_roundtrip] -- Step 6: Tamper image (expect FAIL) --------------"
 
 # The ciphertext starts at offset 44 (after the 44-byte header).
-# Flip byte 50 (within ciphertext) — this should break the ECDSA signature.
+# Flip byte 50 (within ciphertext) -- this should break the ECDSA signature.
 TAMPER_OFFSET=50
 
 if "$BINARY" \
@@ -114,9 +114,9 @@ fi
 
 echo "[signer_roundtrip] Tamper-fail case: PASS (verifier correctly rejected tampered image)"
 
-# ── Step 7: 0-byte firmware — signer must succeed, verifier must reject ───
+# -- Step 7: 0-byte firmware -- signer must succeed, verifier must reject ---
 
-echo "[signer_roundtrip] ── Step 7: 0-byte firmware (expect OTA_VERIFY_ERR_EMPTY_IMAGE) ─"
+echo "[signer_roundtrip] -- Step 7: 0-byte firmware (expect OTA_VERIFY_ERR_EMPTY_IMAGE) -"
 
 # Generate an empty firmware file
 python3 -c "import sys; sys.stdout.buffer.write(b'')" > "$WORKDIR/empty.bin"
@@ -144,9 +144,9 @@ if "$BINARY" \
 fi
 echo "[signer_roundtrip] Empty firmware correctly rejected by verifier: PASS"
 
-# ── Step 8: 1 MB firmware roundtrip ──────────────────────────────────────
+# -- Step 8: 1 MB firmware roundtrip --------------------------------------
 
-echo "[signer_roundtrip] ── Step 8: 1 MB firmware roundtrip ─────────────────"
+echo "[signer_roundtrip] -- Step 8: 1 MB firmware roundtrip -----------------"
 
 python3 -c "
 import sys, os
@@ -178,8 +178,8 @@ if ! "$BINARY" \
 fi
 echo "[signer_roundtrip] 1 MB firmware verified OK: PASS"
 
-# ── Done ─────────────────────────────────────────────────────────────────
+# -- Done -----------------------------------------------------------------
 
 echo ""
-echo "[signer_roundtrip] ══ PASS ══"
+echo "[signer_roundtrip] == PASS =="
 exit 0

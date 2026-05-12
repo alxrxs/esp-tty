@@ -1,5 +1,5 @@
 /*
- * ota_stream.c — implementation of ota_stream_read_all.
+ * ota_stream.c -- implementation of ota_stream_read_all.
  *
  * See ota_stream.h for the contract.  No ESP-IDF / wolfSSH dependencies;
  * this file is dual-buildable for the ESP32-S3 firmware and the native
@@ -21,7 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Initial buffer size — small enough to keep RAM pressure low on the
+/* Initial buffer size -- small enough to keep RAM pressure low on the
  * empty-stream path, large enough to absorb the first few SSH chunks
  * without an immediate realloc. */
 #define OTA_STREAM_INITIAL_CAP  (4u * 1024u)
@@ -65,7 +65,7 @@ ota_stream_result_t ota_stream_read_all(
             if (new_cap > max_bytes) new_cap = max_bytes;
             if (new_cap <= cap) {
                 /* No room to grow but we still need at least 1 byte to
-                 * probe TOOBIG.  Allocate exactly max_bytes + 1?  No —
+                 * probe TOOBIG.  Allocate exactly max_bytes + 1?  No --
                  * we never want to exceed the cap.  Instead, ask for
                  * 1 byte against current cap and rely on the TOOBIG
                  * check below.  But there's no buffer headroom, so:
@@ -86,7 +86,7 @@ ota_stream_result_t ota_stream_read_all(
                     zero_run++;
                     continue;
                 }
-                /* n < 0 → clean EOF at exactly max_bytes — accept. */
+                /* n < 0 -> clean EOF at exactly max_bytes -- accept. */
                 break;
             }
 

@@ -1,4 +1,4 @@
-# lib/usb_cdc_drain — TinyUSB CDC RX FIFO drain loop
+# lib/usb_cdc_drain -- TinyUSB CDC RX FIFO drain loop
 
 This module provides `usb_cdc_drain()`, a platform-agnostic helper that reads
 a CDC ACM receive source to exhaustion. The function takes a caller-supplied
@@ -6,16 +6,16 @@ a CDC ACM receive source to exhaustion. The function takes a caller-supplied
 on it, 64 bytes at a time, until the read function reports no more data
 (`rxd == 0`) or returns an error. Each chunk is forwarded to a scrollback buffer
 (best-effort, for terminal replay) and then attempted into a ring via
-`ring_try_send` (non-blocking — bytes that do not fit are dropped silently). The
+`ring_try_send` (non-blocking -- bytes that do not fit are dropped silently). The
 indirection through `read_fn` keeps TinyUSB out of the compilation unit, so the
 loop can be exercised by native host tests without any ESP-IDF or TinyUSB
 headers present.
 
-## Why this exists — the agetty wedge bug
+## Why this exists -- the agetty wedge bug
 
 `cdc_rx_callback` originally called `tinyusb_cdcacm_read` once per invocation
 and returned. The TinyUSB CDC RX FIFO is 512 bytes (`CONFIG_TINYUSB_CDC_RX_BUFSIZE`),
-but each call to `tinyusb_cdcacm_read` returns at most one USB packet — 64 bytes.
+but each call to `tinyusb_cdcacm_read` returns at most one USB packet -- 64 bytes.
 When the host wrote a burst larger than 64 bytes (agetty writing `/etc/issue` is
 roughly 301 bytes), the callback drained only the first chunk and exited; the
 remainder sat in the FIFO. With the FIFO full, TinyUSB began NAKing new CDC OUT
@@ -39,7 +39,7 @@ Return-value convention: on clean termination (`read_fn` returned success with
 `rxd == 0`) the function returns the total number of bytes drained from the
 source (>= 0). On a `read_fn` error it returns -1; any chunks successfully
 read before the error are still forwarded to scrollback and the ring. The count
-reflects bytes consumed from the source, not bytes accepted by the ring — the
+reflects bytes consumed from the source, not bytes accepted by the ring -- the
 ring may drop silently when full or closed, but that does not affect the return
 value. Both `ring` and `scrollback` may be NULL.
 

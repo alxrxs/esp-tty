@@ -1,10 +1,10 @@
-# lib/rollback_decision — OTA rollback decision logic
+# lib/rollback_decision -- OTA rollback decision logic
 
 This module contains a single pure function, `rollback_decide(state)`, that maps
 an `esp_ota_img_states_t` value to one of two outcomes: `ROLLBACK_DECISION_MARK_VALID`
 or `ROLLBACK_DECISION_NOOP`. The function returns `ROLLBACK_DECISION_MARK_VALID` only
 when `state == ESP_OTA_IMG_PENDING_VERIFY` and `ROLLBACK_DECISION_NOOP` for every
-other state — `ESP_OTA_IMG_VALID`, `ESP_OTA_IMG_NEW`, `ESP_OTA_IMG_INVALID`,
+other state -- `ESP_OTA_IMG_VALID`, `ESP_OTA_IMG_NEW`, `ESP_OTA_IMG_INVALID`,
 `ESP_OTA_IMG_ABORTED`, and `ESP_OTA_IMG_UNDEFINED`. It has no side effects and
 touches no globals.
 
@@ -25,13 +25,13 @@ without touching the OTA state.
 
 ## Files and native testability
 
-- **rollback_decision.h** — declares `rollback_decision_t` and the
+- **rollback_decision.h** -- declares `rollback_decision_t` and the
   `rollback_decide()` signature. On-device builds include the real
   `esp_ota_ops.h` for the `esp_ota_img_states_t` enum. When
   `ROLLBACK_DECISION_NATIVE_TEST` is defined the header instead supplies a
   minimal inline enum with the same numeric values as ESP-IDF, eliminating any
   dependency on the SDK headers.
-- **rollback_decision.c** — implementation (one `if` statement; no platform
+- **rollback_decision.c** -- implementation (one `if` statement; no platform
   calls).
 
 The library was extracted from `main.c` specifically to make the decision

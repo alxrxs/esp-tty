@@ -1,5 +1,5 @@
 /*
- * rollback_decision.c — pure rollback decision logic
+ * rollback_decision.c -- pure rollback decision logic
  */
 
 #include "rollback_decision.h"

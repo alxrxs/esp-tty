@@ -1,11 +1,11 @@
 /*
- * term_resize.h — pure formatter for the xterm "set window size" CSI sequence
+ * term_resize.h -- pure formatter for the xterm "set window size" CSI sequence
  *
  * Extracted from ssh_server.c's term_resize_cb so the formatting (i.e. the
  * sole non-trivial piece of logic in that callback) can be unit-tested on the
  * native host without ESP-IDF / wolfSSH present.
  *
- * No I/O, no platform dependencies — just snprintf into a caller-supplied
+ * No I/O, no platform dependencies -- just snprintf into a caller-supplied
  * buffer.
  */
 

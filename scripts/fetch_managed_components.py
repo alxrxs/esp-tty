@@ -1,5 +1,5 @@
 """
-fetch_managed_components.py — PlatformIO extra_script (pre:)
+fetch_managed_components.py -- PlatformIO extra_script (pre:)
 
 Ensures managed_components/ are present before cmake runs.
 
@@ -23,7 +23,7 @@ import subprocess
 import sys
 import tempfile
 
-Import("env")  # noqa: F821 — PlatformIO SCons environment
+Import("env")  # noqa: F821 -- PlatformIO SCons environment
 
 PROJECT_DIR = env.subst("$PROJECT_DIR")
 MC_DIR = os.path.join(PROJECT_DIR, "managed_components")
@@ -58,7 +58,7 @@ lock_path   = sys.argv[2] if len(sys.argv) > 2 else None
 from idf_component_manager.core import ComponentManager
 
 # Prepare a temporary managed_components list file and local_components list.
-# We don't need accurate values — we just want the component manager to
+# We don't need accurate values -- we just want the component manager to
 # download the remote dependencies listed in main/idf_component.yml.
 with tempfile.NamedTemporaryFile(suffix='.cmake', mode='w', delete=False) as mc_list:
     mc_list_path = mc_list.name
@@ -79,9 +79,9 @@ try:
     )
     print("[fetch_managed_components] ComponentManager.prepare_dep_dirs() OK")
 except SystemExit as e:
-    # exit(10) means "re-run needed due to missing kconfig" — acceptable
+    # exit(10) means "re-run needed due to missing kconfig" -- acceptable
     if e.code == 10:
-        print("[fetch_managed_components] prepare_dep_dirs exited with 10 (kconfig re-run signal) — OK")
+        print("[fetch_managed_components] prepare_dep_dirs exited with 10 (kconfig re-run signal) -- OK")
     else:
         raise
 finally:
@@ -110,8 +110,8 @@ def fetch_components():
     lock_path = os.path.join(PROJECT_DIR, "dependencies.lock")
 
     print(
-        "[fetch_managed_components] managed_components absent — "
-        "fetching via idf_component_manager …"
+        "[fetch_managed_components] managed_components absent -- "
+        "fetching via idf_component_manager ..."
     )
 
     # Write the helper script to a temp file and run it with the IDF venv Python.
@@ -145,7 +145,7 @@ def fetch_components():
         elif not os.path.isdir(SENTINEL):
             print(
                 "[fetch_managed_components] WARNING: fetch ran but "
-                f"{SENTINEL} still missing — cmake may fail",
+                f"{SENTINEL} still missing -- cmake may fail",
                 file=sys.stderr,
             )
         else:

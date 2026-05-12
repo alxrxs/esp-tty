@@ -1,4 +1,4 @@
-# lib/term_resize — xterm "set window size" CSI formatter
+# lib/term_resize -- xterm "set window size" CSI formatter
 
 This module contains the single function `term_resize_format()`, which formats
 the xterm `\033[8;<rows>;<cols>t` CSI sequence into a caller-supplied buffer.
@@ -7,16 +7,16 @@ When wolfSSH receives a `SSH_MSG_CHANNEL_REQUEST` with request type
 injects the resulting byte sequence directly into the USB-bound ring buffer.  The
 Linux (or macOS) terminal driver on the host side interprets the sequence and
 updates its internal geometry, keeping the remote shell in sync with the client
-window.  The function has no dependencies on ESP-IDF, wolfSSH, or FreeRTOS — only
-`<stdio.h>` and `<stdint.h>` — so it builds identically on device and on the
+window.  The function has no dependencies on ESP-IDF, wolfSSH, or FreeRTOS -- only
+`<stdio.h>` and `<stdint.h>` -- so it builds identically on device and on the
 native test host.
 
 The formatting logic was extracted from `term_resize_cb` precisely because it is
 the only non-trivial piece in that callback: everything else is type-casting and
 a single `ring_send` call.  Keeping the formatter in its own translation unit
-makes the correctness guarantee drift-proof — the unit tests cover the exact byte
+makes the correctness guarantee drift-proof -- the unit tests cover the exact byte
 strings emitted, boundary conditions (zero cols or rows, NULL buffer, undersized
-buffer, exact-fit buffer), and the full `uint32_t` range — without requiring any
+buffer, exact-fit buffer), and the full `uint32_t` range -- without requiring any
 mock for wolfSSH or FreeRTOS.  Any future change to the escape sequence is caught
 by the test suite before reaching hardware.
 

@@ -1,5 +1,5 @@
 """
-apply_managed_patches.py — PlatformIO extra_script (pre:)
+apply_managed_patches.py -- PlatformIO extra_script (pre:)
 
 Re-applies patches from patches/<component>/*.patch to managed_components/<component>/
 after each dependency fetch. Idempotent: skips already-applied patches using
@@ -14,7 +14,7 @@ import os
 import subprocess
 import glob
 
-Import("env")  # noqa: F821 — PlatformIO SCons environment
+Import("env")  # noqa: F821 -- PlatformIO SCons environment
 
 PROJECT_DIR = env.subst("$PROJECT_DIR")
 PATCHES_DIR = os.path.join(PROJECT_DIR, "patches")
@@ -48,7 +48,7 @@ def apply_patches():
 
         component_path = os.path.join(MC_DIR, component_dir)
         if not os.path.isdir(component_path):
-            # Component not yet fetched — skip silently, will apply next time.
+            # Component not yet fetched -- skip silently, will apply next time.
             print(f"[patches] managed_components/{component_dir} not present, skipping patches")
             continue
 
@@ -63,7 +63,7 @@ def apply_patches():
                 check=False,
             )
             if check_result.returncode == 0:
-                # Reverse succeeds → patch is already applied, skip.
+                # Reverse succeeds -> patch is already applied, skip.
                 print(f"[patches] Already applied: {patch_name}")
                 continue
 

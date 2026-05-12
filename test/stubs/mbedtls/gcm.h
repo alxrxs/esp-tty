@@ -1,5 +1,5 @@
 /*
- * test stub: mbedtls/gcm.h — backed by OpenSSL EVP AES-GCM for native tests
+ * test stub: mbedtls/gcm.h -- backed by OpenSSL EVP AES-GCM for native tests
  *
  * Implements the mbedtls streaming GCM API used by ota_verify.c.
  *
@@ -116,7 +116,7 @@ static inline int mbedtls_gcm_update(mbedtls_gcm_context *ctx,
 }
 
 /*
- * mbedtls_gcm_finish — finalise GCM.
+ * mbedtls_gcm_finish -- finalise GCM.
  *
  * For DECRYPT: sets the expected tag (if provided via mbedtls_gcm_set_expected_tag),
  *   calls EVP_DecryptFinal_ex, and copies the expected tag into 'tag' so that
@@ -143,15 +143,15 @@ static inline int mbedtls_gcm_finish(mbedtls_gcm_context *ctx,
             ret = EVP_DecryptFinal_ex(ctx->_ctx,
                                        output ? output : (uint8_t[]){0}, &outl);
             if (ret == 1) {
-                /* Tag matched — copy the expected tag into 'tag' so ota_verify.c
+                /* Tag matched -- copy the expected tag into 'tag' so ota_verify.c
                    constant-time compare against ctx->tag will trivially pass. */
                 memcpy(tag, ctx->_expected_tag, tag_len);
             } else {
-                /* Tag mismatch — zero 'tag' so ota_verify.c compare fails. */
+                /* Tag mismatch -- zero 'tag' so ota_verify.c compare fails. */
                 memset(tag, 0, tag_len);
             }
         } else {
-            /* No expected tag set — just finalise and return zeros */
+            /* No expected tag set -- just finalise and return zeros */
             EVP_DecryptFinal_ex(ctx->_ctx,
                                  output ? output : (uint8_t[]){0}, &outl);
             memset(tag, 0, tag_len);

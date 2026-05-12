@@ -1,4 +1,4 @@
-# lib/ — Platform-Agnostic Component Libraries
+# lib/ -- Platform-Agnostic Component Libraries
 
 This directory holds the nine C libraries that are shared between the ESP32-S3
 firmware and the native host test suite.  Each library is a single `.c`/`.h`
@@ -19,15 +19,15 @@ On the native host the same source files are recompiled with a small set of
 preprocessor flags and stub headers supplied from `test/stubs/`.  The flags
 and stubs are declared in the `[env:native]` section of `platformio.ini`:
 
-- `RING_NATIVE=1` — selects the POSIX `pthread_mutex_t` / `pthread_cond_t`
+- `RING_NATIVE=1` -- selects the POSIX `pthread_mutex_t` / `pthread_cond_t`
   backend in `lib/ring/ring.c` and the `pthread_mutex_t`-backed path in
   `lib/scrollback/scrollback.c`.
-- `UNIT_TEST` — selects the native circular-buffer struct layout in
+- `UNIT_TEST` -- selects the native circular-buffer struct layout in
   `lib/scrollback/scrollback.c`.
-- `OTA_VERIFY_NATIVE_TEST` — replaces the ESP-IDF OTA flash calls in
+- `OTA_VERIFY_NATIVE_TEST` -- replaces the ESP-IDF OTA flash calls in
   `lib/ota_verify/ota_verify.c` with no-ops and switches the crypto backend
   from PSA to mbedtls.
-- `ROLLBACK_DECISION_NATIVE_TEST` — inlines a minimal `esp_ota_img_states_t`
+- `ROLLBACK_DECISION_NATIVE_TEST` -- inlines a minimal `esp_ota_img_states_t`
   enum stub so `lib/rollback_decision/rollback_decision.c` builds without any
   ESP-IDF header.
 
@@ -35,8 +35,8 @@ Crypto stubs live in `test/stubs/wolfssl/wolfcrypt/sha256.h` (wolfCrypt SHA-256
 backed by OpenSSL 3 EVP) and `test/stubs/mbedtls/` (mbedtls 4.x AES-GCM and
 ECDSA-P256 backed by OpenSSL 3 EVP).  The native build links against OpenSSL
 via `test/scripts/native_link_openssl.py`.  Libraries that have no platform
-dependencies — `bridge`, `term_resize`, `ota_stream`, and `rollback_decision`
-— compile on the host without any stubs at all.
+dependencies -- `bridge`, `term_resize`, `ota_stream`, and `rollback_decision`
+-- compile on the host without any stubs at all.
 
 ## Libraries
 

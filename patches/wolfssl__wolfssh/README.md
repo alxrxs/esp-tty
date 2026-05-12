@@ -8,15 +8,15 @@ In wolfSSH up to at least 1.4.22, three functions related to terminal resize
 handling are compiled inside a single `#if defined(WOLFSSH_TERM) &&
 !defined(NO_FILESYSTEM)` guard: `wolfSSH_ChangeTerminalSize`,
 `wolfSSH_SetTerminalResizeCb`, and `wolfSSH_SetTerminalResizeCtx`. This
-project defines `NO_FILESYSTEM` in `user_settings.h` — a hard requirement
+project defines `NO_FILESYSTEM` in `user_settings.h` -- a hard requirement
 because wolfSSL cannot use POSIX filesystem APIs on the bare-metal ESP32-S3
 environment. With `NO_FILESYSTEM` defined the entire block is compiled out,
 yet `wolfssh/ssh.h` declares the two setter functions unconditionally,
 producing an undefined-reference linker error.
 
 The patch splits the closing `#endif` of `wolfSSH_ChangeTerminalSize` so that
-only that function — which sends resize requests through the SSH wire protocol
-and has a genuine filesystem dependency in the upstream implementation — stays
+only that function -- which sends resize requests through the SSH wire protocol
+and has a genuine filesystem dependency in the upstream implementation -- stays
 inside the `WOLFSSH_TERM && !NO_FILESYSTEM` guard. The two callback setters,
 `wolfSSH_SetTerminalResizeCb` and `wolfSSH_SetTerminalResizeCtx`, move into a
 plain `#if defined(WOLFSSH_TERM)` block immediately after. Their bodies do

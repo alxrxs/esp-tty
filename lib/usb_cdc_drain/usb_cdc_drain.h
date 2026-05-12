@@ -1,5 +1,5 @@
 /*
- * usb_cdc_drain.h — host-testable USB CDC RX FIFO drain loop
+ * usb_cdc_drain.h -- host-testable USB CDC RX FIFO drain loop
  *
  * Extracted from the TinyUSB CDC RX callback so the loop can be unit-tested
  * on the native host without ESP-IDF / TinyUSB present.
@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 /*
- * Read function type — abstracts tinyusb_cdcacm_read for testability.
+ * Read function type -- abstracts tinyusb_cdcacm_read for testability.
  * Returns 0 on success (writing rxd bytes to buf); negative on error.
  * Writing rxd == 0 with success means "no more data" (terminates the drain).
  */
@@ -35,7 +35,7 @@ typedef int (*usb_cdc_drain_read_fn)(void *ctx, uint8_t *buf, size_t cap,
  * Drain the read source until it reports empty (rxd == 0) or an error.
  *
  * Each successfully-read chunk is first pushed to scrollback (best-effort),
- * then attempted into the ring via ring_try_send (non-blocking — bytes that
+ * then attempted into the ring via ring_try_send (non-blocking -- bytes that
  * don't fit are dropped).
  *
  * Return-value convention:
@@ -45,7 +45,7 @@ typedef int (*usb_cdc_drain_read_fn)(void *ctx, uint8_t *buf, size_t cap,
  *     error are still pushed to scrollback/ring; only the error is reported.
  *
  * The reported count is "bytes drained from the source", not "bytes pushed
- * into the ring" — the ring may drop bytes silently when full, but the
+ * into the ring" -- the ring may drop bytes silently when full, but the
  * scrollback (best-effort) and the source itself are always advanced.
  *
  * scrollback may be NULL (no scrollback capture).  ring may be NULL too.

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-test/scripts/test_apply_patches.py — Tests for scripts/apply_managed_patches_cmake.py
+test/scripts/test_apply_patches.py -- Tests for scripts/apply_managed_patches_cmake.py
 
 Tests:
   1. Happy path: patch applies cleanly to a synthetic component
   2. Idempotency: patch already applied (reverse dry-run detects it, skips)
-  3. Failure: malformed patch file → RuntimeError and sys.exit(1) from __main__
-  4. Missing patches/ directory → apply_patches() is a no-op (no error)
+  3. Failure: malformed patch file -> RuntimeError and sys.exit(1) from __main__
+  4. Missing patches/ directory -> apply_patches() is a no-op (no error)
 
 Exit: 0 = PASS, 1 = FAIL
 """
@@ -26,7 +26,7 @@ PATCH_SCRIPT = os.path.join(PROJECT_DIR, "scripts", "apply_managed_patches_cmake
 sys.path.insert(0, os.path.join(PROJECT_DIR, "scripts"))
 from apply_managed_patches_cmake import apply_patches
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# -- Helpers ------------------------------------------------------------------
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
@@ -90,7 +90,7 @@ def make_fake_component(base_dir, component_name, original_content, patched_cont
     return patch_file, mc_path, target
 
 
-# ── Test 1: Happy path — patch applies cleanly ───────────────────────────────
+# -- Test 1: Happy path -- patch applies cleanly -------------------------------
 
 def test_happy_path():
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -111,7 +111,7 @@ def test_happy_path():
             fail(f"Happy path: expected 'line2-patched' in file, got: {result!r}")
 
 
-# ── Test 2: Idempotency — already-applied patch is skipped ───────────────────
+# -- Test 2: Idempotency -- already-applied patch is skipped -------------------
 
 def test_idempotency():
     import io
@@ -147,7 +147,7 @@ def test_idempotency():
             fail(f"Idempotency: expected 'bbb-new' in file after second apply, got: {result!r}")
 
 
-# ── Test 3: Malformed patch file → RuntimeError ───────────────────────────────
+# -- Test 3: Malformed patch file -> RuntimeError -------------------------------
 
 def test_malformed_patch():
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -174,14 +174,14 @@ def test_malformed_patch():
         [sys.executable, PATCH_SCRIPT, "/nonexistent/path/that/does/not/exist"],
         capture_output=True, text=True
     )
-    # No patches/ dir → no-op (exit 0), not an error
+    # No patches/ dir -> no-op (exit 0), not an error
     if result.returncode == 0:
         ok("Malformed test via __main__ with nonexistent dir: exit 0 (no patches dir = no-op)")
     else:
         fail(f"Expected exit 0 for missing project dir, got {result.returncode}")
 
 
-# ── Test 4: Missing patches/ directory → no-op ───────────────────────────────
+# -- Test 4: Missing patches/ directory -> no-op -------------------------------
 
 def test_missing_patches_dir():
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -193,27 +193,27 @@ def test_missing_patches_dir():
             fail(f"Missing patches/: unexpected exception: {e}")
 
 
-# ── Run all tests ─────────────────────────────────────────────────────────────
+# -- Run all tests -------------------------------------------------------------
 
 if __name__ == "__main__":
-    print("[test_apply_patches] ── Test 1: Happy path ─────────────────────")
+    print("[test_apply_patches] -- Test 1: Happy path ---------------------")
     test_happy_path()
 
-    print("[test_apply_patches] ── Test 2: Idempotency ────────────────────")
+    print("[test_apply_patches] -- Test 2: Idempotency --------------------")
     test_idempotency()
 
-    print("[test_apply_patches] ── Test 3: Malformed patch → RuntimeError ─")
+    print("[test_apply_patches] -- Test 3: Malformed patch -> RuntimeError -")
     test_malformed_patch()
 
-    print("[test_apply_patches] ── Test 4: Missing patches/ dir → no-op ───")
+    print("[test_apply_patches] -- Test 4: Missing patches/ dir -> no-op ---")
     test_missing_patches_dir()
 
     print()
     total = PASS_COUNT + FAIL_COUNT
     print(f"[test_apply_patches] {PASS_COUNT}/{total} passed")
     if FAIL_COUNT > 0:
-        print("[test_apply_patches] ══ FAIL ══")
+        print("[test_apply_patches] == FAIL ==")
         sys.exit(1)
     else:
-        print("[test_apply_patches] ══ PASS ══")
+        print("[test_apply_patches] == PASS ==")
         sys.exit(0)

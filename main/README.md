@@ -1,4 +1,4 @@
-# main/ — Firmware Entry Point and ESP32-S3-Specific Code
+# main/ -- Firmware Entry Point and ESP32-S3-Specific Code
 
 This directory is the ESP-IDF application component and the top-level firmware
 entry point. PlatformIO treats it as the `src_dir` (see `platformio.ini`). All
@@ -71,11 +71,11 @@ capacity, TCP keepalive parameters, and the OTA rollback delay. Enterprise Wi-Fi
 flowchart TB
     start(["app_main()"])
     nvs["1. NVS flash init (AES-XTS-256)<br/>nvs_flash_read_security_cfg<br/>nvs_flash_generate_keys on first boot<br/>nvs_flash_secure_init_partition(&quot;nvs&quot;)"]
-    rings["2. Ring buffers + scrollback (PSRAM)<br/>ring_create(RING_BUFFER_BYTES) × 2<br/>scrollback_create(SCROLLBACK_BUFFER_BYTES)"]
+    rings["2. Ring buffers + scrollback (PSRAM)<br/>ring_create(RING_BUFFER_BYTES) x 2<br/>scrollback_create(SCROLLBACK_BUFFER_BYTES)"]
     usb["3. USB CDC ACM<br/>usb_cdc_init(...)<br/>usb_tx_task FreeRTOS task<br/><i>skipped when BRIDGE_LOOPBACK is defined</i>"]
     wifi["4. Wi-Fi STA<br/>wifi_init_sta()"]
-    ssh["5. SSH server<br/>ssh_server_start(...)<br/>→ host_key_load_or_generate()<br/>→ ssh_server_task listens TCP/22"]
-    rollback["6. Rollback self-test timer<br/>xTimerCreate one-shot<br/>OTA_ROLLBACK_DELAY_MS<br/>→ rollback_decide() + mark_app_valid"]
+    ssh["5. SSH server<br/>ssh_server_start(...)<br/>-> host_key_load_or_generate()<br/>-> ssh_server_task listens TCP/22"]
+    rollback["6. Rollback self-test timer<br/>xTimerCreate one-shot<br/>OTA_ROLLBACK_DELAY_MS<br/>-> rollback_decide() + mark_app_valid"]
     done(["app_main returns;<br/>tasks keep running"])
 
     start --> nvs --> rings --> usb --> wifi --> ssh --> rollback --> done

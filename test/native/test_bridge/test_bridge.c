@@ -1,5 +1,5 @@
 /*
- * test_bridge.c — unit tests for bridge_pump (native)
+ * test_bridge.c -- unit tests for bridge_pump (native)
  *
  * Wires two bridge_pump instances back-to-back through in-memory pipes
  * and verifies: losslessness, ordering, stop-flag termination.
@@ -55,7 +55,7 @@ static void *pump_thread(void *arg)
 /*
  * Topology:
  *
- *   writer_thr → [a_to_b] → pump_thr → [b_to_a] → reader (main)
+ *   writer_thr -> [a_to_b] -> pump_thr -> [b_to_a] -> reader (main)
  *
  * Writer and pump in background threads; reader verifies in main.
  * Writer and reader must be concurrent to prevent deadlock when rings
@@ -135,7 +135,7 @@ void test_bridge_stop_flag_terminates(void)
     parg.stop = true;
     ring_close(a_to_b);
 
-    /* join must complete — pump must not spin forever */
+    /* join must complete -- pump must not spin forever */
     pthread_join(pump_thr, NULL);
 
     ring_free(a_to_b);
@@ -147,7 +147,7 @@ void test_bridge_stop_flag_terminates(void)
 /*
  * Full-duplex loopback: two pumps, producer faster than consumer.
  *
- *   A writes → [ab_ring] → pump_ab → [ba_ring] → A reads
+ *   A writes -> [ab_ring] -> pump_ab -> [ba_ring] -> A reads
  *
  * Producer thread sends at full speed; consumer reads and verifies.
  */
@@ -226,7 +226,7 @@ static int counted_read_cb(void *ctx, uint8_t *buf, size_t cap)
     counted_read_ctx_t *c = (counted_read_ctx_t *)ctx;
     c->call_count++;
     if (c->call_count > MAX_READ_CALLS) {
-        TEST_FAIL_MESSAGE("read_fn called too many times — bridge_pump likely looping");
+        TEST_FAIL_MESSAGE("read_fn called too many times -- bridge_pump likely looping");
     }
     int n = c->bytes_per_call;
     if ((size_t)n > cap) n = (int)cap;
@@ -298,8 +298,8 @@ void test_bridge_stop_observed_before_next_read(void)
                 &stop);
 
     /* The loop checks *stop at the top (bridge.c:15 `while (!*stop)`).
-     * Iteration 1: read (1), write (1) — stop still false
-     * Iteration 2: read (2), write (2) — write sets stop=true, returns ok
+     * Iteration 1: read (1), write (1) -- stop still false
+     * Iteration 2: read (2), write (2) -- write sets stop=true, returns ok
      * Top of loop: *stop is true, loop exits before a 3rd read.
      * Tight bound: exactly 2 reads, exactly 2 writes.
      */

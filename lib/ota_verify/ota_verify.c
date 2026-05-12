@@ -1,11 +1,11 @@
 /*
- * ota_verify.c — streaming OTA image verifier/decryptor for esp-tty
+ * ota_verify.c -- streaming OTA image verifier/decryptor for esp-tty
  *
  * Crypto backend (ESP-IDF 6.0 / mbedtls 4.x):
  *   Uses PSA Crypto API (psa/crypto.h).
- *   - SHA-256 (for sig)    : psa_hash_*()         → HW SHA on S3
- *   - AES-256-GCM decrypt  : psa_aead_*()          → HW AES + SW GHASH on S3
- *   - ECDSA-P256 verify    : psa_verify_hash()     → SW SP_256 on S3
+ *   - SHA-256 (for sig)    : psa_hash_*()         -> HW SHA on S3
+ *   - AES-256-GCM decrypt  : psa_aead_*()          -> HW AES + SW GHASH on S3
+ *   - ECDSA-P256 verify    : psa_verify_hash()     -> SW SP_256 on S3
  *
  * Native test build (OTA_VERIFY_NATIVE_TEST):
  *   Uses OpenSSL-backed mbedtls shims from test/stubs/mbedtls/.
@@ -17,7 +17,7 @@
  * Image format:
  *   [magic 8B] [version 4B LE] [plaintext_len 4B LE] [iv 12B] [tag 16B]
  *   [ciphertext NB] [sig 64B raw r||s]
- *   Signed region: magic..end-of-ciphertext (SHA-256 → ECDSA-P256)
+ *   Signed region: magic..end-of-ciphertext (SHA-256 -> ECDSA-P256)
  */
 
 #include "ota_verify.h"
@@ -28,10 +28,10 @@
 #include <stdbool.h>
 #include <inttypes.h>
 
-/* ── Platform selection ──────────────────────────────────────────────────── */
+/* -- Platform selection ---------------------------------------------------- */
 #ifndef OTA_VERIFY_NATIVE_TEST
 
-/* ── Embedded: PSA Crypto ────────────────────────────────────────────────── */
+/* -- Embedded: PSA Crypto -------------------------------------------------- */
 #include "psa/crypto.h"
 #include "esp_ota_ops.h"
 #include "esp_log.h"
@@ -43,7 +43,7 @@
 
 #else /* OTA_VERIFY_NATIVE_TEST */
 
-/* ── Native: OpenSSL-backed mbedtls stubs ────────────────────────────────── */
+/* -- Native: OpenSSL-backed mbedtls stubs ---------------------------------- */
 #include "mbedtls/ecdsa.h"
 #include "mbedtls/ecp.h"
 #include "mbedtls/gcm.h"
@@ -74,7 +74,7 @@ static inline int esp_ota_set_boot_partition(const esp_partition_t *p)         {
 
 static const char *TAG = "ota_verify";
 
-/* ── Image format offsets ────────────────────────────────────────────────── */
+/* -- Image format offsets -------------------------------------------------- */
 #define HDR_VERSION_OFF   8
 #define HDR_PTLEN_OFF    12
 #define HDR_IV_OFF       16
@@ -87,7 +87,7 @@ static const char *TAG = "ota_verify";
  * Chunk all hash + decrypt calls to this size to stay within the heap budget. */
 #define OTA_CRYPTO_CHUNK  4096
 
-/* ── Context struct ──────────────────────────────────────────────────────── */
+/* -- Context struct -------------------------------------------------------- */
 struct ota_verify_ctx {
     /* Header accumulation */
     uint8_t  hdr[OTA_HEADER_SIZE];
@@ -128,18 +128,18 @@ struct ota_verify_ctx {
     bool     aborted;
 };
 
-/* ── Helpers ─────────────────────────────────────────────────────────────── */
+/* -- Helpers --------------------------------------------------------------- */
 
 static inline uint32_t le32(const uint8_t *p) {
     return (uint32_t)p[0] | ((uint32_t)p[1]<<8)
          | ((uint32_t)p[2]<<16) | ((uint32_t)p[3]<<24);
 }
 
-/* ── PSA public key import from PEM ──────────────────────────────────────── */
+/* -- PSA public key import from PEM ---------------------------------------- */
 #ifdef OTA_USE_PSA
 
 /*
- * Minimal PEM → DER base64 decoder (no external dependency).
+ * Minimal PEM -> DER base64 decoder (no external dependency).
  * Handles standard base64 alphabet; ignores whitespace.
  */
 static int b64_decode(const char *src, size_t slen, uint8_t *dst, size_t dsize, size_t *olen)
@@ -238,7 +238,7 @@ static int pem_extract_ec_point(const uint8_t *pem, size_t pem_len,
 
 #endif /* OTA_USE_PSA */
 
-/* ── Context lifecycle ───────────────────────────────────────────────────── */
+/* -- Context lifecycle ----------------------------------------------------- */
 
 static void ctx_free_crypto(ota_verify_ctx_t *ctx)
 {
@@ -341,7 +341,7 @@ fail_native:
 #endif
 }
 
-/* ── Decrypt chunk + flash write ─────────────────────────────────────────── */
+/* -- Decrypt chunk + flash write ------------------------------------------- */
 
 static ota_verify_err_t decrypt_write(ota_verify_ctx_t *ctx,
                                        const uint8_t *ct, size_t ct_len)
@@ -389,7 +389,7 @@ static ota_verify_err_t decrypt_write(ota_verify_ctx_t *ctx,
     return OTA_VERIFY_OK;
 }
 
-/* ── Feed ────────────────────────────────────────────────────────────────── */
+/* -- Feed ------------------------------------------------------------------ */
 
 ota_verify_err_t ota_verify_feed(ota_verify_ctx_t *ctx,
                                   const uint8_t    *data,
@@ -538,7 +538,7 @@ ota_verify_err_t ota_verify_feed(ota_verify_ctx_t *ctx,
     return OTA_VERIFY_OK;
 }
 
-/* ── End / finalise ──────────────────────────────────────────────────────── */
+/* -- End / finalise -------------------------------------------------------- */
 
 ota_verify_err_t ota_verify_end(ota_verify_ctx_t *ctx)
 {
@@ -568,7 +568,7 @@ ota_verify_err_t ota_verify_end(ota_verify_ctx_t *ctx)
 
 #ifdef OTA_USE_PSA
 
-    /* ── Gate 1: ECDSA-P256 signature verify ────────────────────────────── */
+    /* -- Gate 1: ECDSA-P256 signature verify ------------------------------ */
     uint8_t digest[32];
     size_t  digest_len = 0;
     psa_status_t s = psa_hash_finish(&ctx->hash_op, digest, sizeof(digest), &digest_len);
@@ -589,7 +589,7 @@ ota_verify_err_t ota_verify_end(ota_verify_ctx_t *ctx)
     }
     OTA_LOGI(TAG, "ECDSA-P256 signature OK");
 
-    /* ── Gate 2: AES-GCM tag verify (via psa_aead_verify) ───────────────── */
+    /* -- Gate 2: AES-GCM tag verify (via psa_aead_verify) ----------------- */
     /* psa_aead_verify finalises decryption and checks the GCM tag atomically */
     uint8_t final_pt[16] = {0};
     size_t  final_pt_len = 0;
@@ -620,7 +620,7 @@ ota_verify_err_t ota_verify_end(ota_verify_ctx_t *ctx)
         ctx->gcm_partial_len = 0;
     }
 
-    /* Finalise GCM — set expected tag so OpenSSL stub can verify atomically */
+    /* Finalise GCM -- set expected tag so OpenSSL stub can verify atomically */
     mbedtls_gcm_set_expected_tag(&ctx->gcm, ctx->tag, OTA_TAG_LEN);
     uint8_t computed_tag[OTA_TAG_LEN];
     size_t  tag_out_len = OTA_TAG_LEN;
@@ -680,7 +680,7 @@ ota_verify_err_t ota_verify_end(ota_verify_ctx_t *ctx)
     if (esp_ota_set_boot_partition(ctx->ota_part) != ESP_OK) {
         result = OTA_VERIFY_ERR_FLASH; goto fail;
     }
-    OTA_LOGI(TAG, "OTA image accepted — reboot pending");
+    OTA_LOGI(TAG, "OTA image accepted -- reboot pending");
 
     ctx_free_crypto(ctx);
     free(ctx);

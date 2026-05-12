@@ -1,13 +1,13 @@
-# partitions.csv — 16 MB flash layout for esp-tty (OTA-enabled)
+# partitions.csv -- 16 MB flash layout for esp-tty (OTA-enabled)
 #
 # Offset map (all sizes in hex):
-#   0x0000–0x8FFF   2nd-stage bootloader (ESP-IDF managed)
-#   0x9000–0xEFFF   nvs       (24 KB)
-#   0xF000–0xFFFF   nvs_keys  ( 4 KB, AES-XTS-256 key at first boot)
-#   0x10000–0x11FFF otadata   ( 8 KB, two sectors — OTA selection record)
-#   0x20000–0x41FFFF ota_0   ( 4 MB, active firmware partition)
-#   0x420000–0x81FFFF ota_1  ( 4 MB, inactive OTA target partition)
-#   0x820000–0xFFFFFF         (~7.9 MB, reserved for future use)
+#   0x0000-0x8FFF   2nd-stage bootloader (ESP-IDF managed)
+#   0x9000-0xEFFF   nvs       (24 KB)
+#   0xF000-0xFFFF   nvs_keys  ( 4 KB, AES-XTS-256 key at first boot)
+#   0x10000-0x11FFF otadata   ( 8 KB, two sectors -- OTA selection record)
+#   0x20000-0x41FFFF ota_0   ( 4 MB, active firmware partition)
+#   0x420000-0x81FFFF ota_1  ( 4 MB, inactive OTA target partition)
+#   0x820000-0xFFFFFF         (~7.9 MB, reserved for future use)
 #
 # Name,     Type, SubType,   Offset,    Size,    Flags
 nvs,         data, nvs,       0x9000,   0x6000,

@@ -1,4 +1,4 @@
-# ring — Blocking Byte Queue
+# ring -- Blocking Byte Queue
 
 A blocking, single-producer / single-reader byte queue used as the data
 conduit between the USB CDC and SSH tasks. Two instances carry all traffic

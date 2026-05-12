@@ -1,8 +1,8 @@
 /*
- * usb_cdc.c — TinyUSB CDC ACM driver
+ * usb_cdc.c -- TinyUSB CDC ACM driver
  *
- * RX path: TinyUSB callback → ring_send(usb_to_ssh)
- * TX path: FreeRTOS task pulls from ssh_to_usb ring → CDC TX
+ * RX path: TinyUSB callback -> ring_send(usb_to_ssh)
+ * TX path: FreeRTOS task pulls from ssh_to_usb ring -> CDC TX
  *
  * When BRIDGE_LOOPBACK is defined (Wokwi simulation) TinyUSB is absent;
  * the whole file becomes no-ops since the bridge never calls usb_cdc_*.
@@ -89,7 +89,7 @@ static void cdc_rx_callback(int itf, cdcacm_event_t *event)
     /* Drain the TinyUSB CDC RX FIFO completely.  The FIFO is
      * CONFIG_TINYUSB_CDC_RX_BUFSIZE (512 B); if we read only one 64 B chunk
      * per callback, larger host writes get stuck in the FIFO and the device
-     * NAKs subsequent OUT transfers — blocking host-side writes (agetty,
+     * NAKs subsequent OUT transfers -- blocking host-side writes (agetty,
      * shells, anything writing more than 64 B at once).
      *
      * The drain loop lives in lib/usb_cdc_drain/ so it can be exercised by
@@ -112,7 +112,7 @@ static void cdc_line_state_callback(int itf, cdcacm_event_t *event)
 }
 
 /* ------------------------------------------------------------------ */
-/* TX pump task: ssh_to_usb ring → CDC TX                             */
+/* TX pump task: ssh_to_usb ring -> CDC TX                             */
 
 static void usb_tx_task(void *arg)
 {
@@ -121,7 +121,7 @@ static void usb_tx_task(void *arg)
     while (1) {
         int n = ring_recv(s_ssh_to_usb, buf, sizeof(buf));
         if (n <= 0) {
-            /* Ring closed between sessions — wait for it to reopen. */
+            /* Ring closed between sessions -- wait for it to reopen. */
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
@@ -170,7 +170,7 @@ esp_err_t usb_cdc_start_task(void)
     return ESP_OK;
 }
 
-#else /* BRIDGE_LOOPBACK — stubs, never called */
+#else /* BRIDGE_LOOPBACK -- stubs, never called */
 
 esp_err_t usb_cdc_init(ring_t *usb_to_ssh, ring_t *ssh_to_usb,
                        scrollback_t *scrollback)

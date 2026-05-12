@@ -1,5 +1,5 @@
 /*
- * test stub: mbedtls/sha256.h — backed by OpenSSL EVP for native tests
+ * test stub: mbedtls/sha256.h -- backed by OpenSSL EVP for native tests
  *
  * Matches the mbedtls 3.x API used by ota_verify.c.
  */

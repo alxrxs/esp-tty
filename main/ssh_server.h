@@ -1,5 +1,5 @@
 /*
- * ssh_server.h — wolfSSH server session lifecycle for esp-tty
+ * ssh_server.h -- wolfSSH server session lifecycle for esp-tty
  *
  * Listens on TCP/SSH_PORT.  Accepts one session at a time; a new connection
  * cleanly tears down the active session and takes over (single-session
@@ -8,8 +8,8 @@
  * When a session is established, the server bridges data between the SSH
  * channel and two ring buffers:
  *
- *   SSH channel RX → ssh_to_usb ring  (SSH client → Linux host)
- *   usb_to_ssh ring → SSH channel TX  (Linux host → SSH client)
+ *   SSH channel RX -> ssh_to_usb ring  (SSH client -> Linux host)
+ *   usb_to_ssh ring -> SSH channel TX  (Linux host -> SSH client)
  */
 
 #pragma once

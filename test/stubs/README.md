@@ -1,4 +1,4 @@
-# test/stubs/ — Native Test Stubs
+# test/stubs/ -- Native Test Stubs
 
 The `[env:native]` PlatformIO environment compiles and runs unit tests on the
 host (Linux or macOS) without ESP-IDF, FreeRTOS, wolfSSH, wolfCrypt, or mbedtls

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-test_qemu_nvs_persistence.py — Two-boot NVS persistence test for esp-tty
+test_qemu_nvs_persistence.py -- Two-boot NVS persistence test for esp-tty
 
 Verifies that the ED25519 host key NVS store-and-load path is exercised
 correctly across two QEMU boots:
 
-  Boot 1: fresh flash → "Generated and stored new ED25519 host key", fingerprint A
-  Boot 2: same flash  → "Loaded ED25519 host key from NVS",           fingerprint B
+  Boot 1: fresh flash -> "Generated and stored new ED25519 host key", fingerprint A
+  Boot 2: same flash  -> "Loaded ED25519 host key from NVS",           fingerprint B
   Assert: A == B
 
 QEMU nvs_keys persistence constraint
@@ -25,9 +25,9 @@ data, cannot be reliably pre-baked because:
      We cannot reproduce it without knowing the QEMU XTS-AES emulation key.
   3. On boot 2, nvs_flash_read_security_cfg() reads the raw key bytes and the CRC,
      decrypts the raw bytes, computes CRC of the decrypted values, and compares.
-     The pre-baked CRC (computed from raw bytes) mismatches → CORRUPT_KEY_PART →
-     generate_keys is called again → new NVS encryption key → boot-1 NVS data
-     is unreadable → host key not found → new host key generated.
+     The pre-baked CRC (computed from raw bytes) mismatches -> CORRUPT_KEY_PART ->
+     generate_keys is called again -> new NVS encryption key -> boot-1 NVS data
+     is unreadable -> host key not found -> new host key generated.
 
 Result: fingerprint matching between boots is not achievable in this QEMU setup
 without modifying the firmware (e.g. disabling NVS encryption entirely).
@@ -97,7 +97,7 @@ def run_qemu_persist(timeout_secs, flash_img, label,
 
     Returns dict: success, fingerprint, stored_seen, loaded_seen.
     """
-    print(f"[{label}] Starting QEMU (timeout={timeout_secs}s) …")
+    print(f"[{label}] Starting QEMU (timeout={timeout_secs}s) ...")
     proc = subprocess.Popen(
         [
             _find_qemu(),
@@ -148,14 +148,14 @@ def run_qemu_persist(timeout_secs, flash_img, label,
                     missing.append("Host key SHA-256 fingerprint: <32 hex pairs>")
 
                 for name in missing:
-                    print(f"\n[{label}] FAIL — required pattern not seen: {name!r}")
+                    print(f"\n[{label}] FAIL -- required pattern not seen: {name!r}")
 
                 if missing:
                     proc.terminate()
                     return dict(success=False, fingerprint=fingerprint,
                                 stored_seen=stored_seen, loaded_seen=loaded_seen)
 
-                print(f"\n[{label}] PASS — SSH listening on port {m.group(1)}")
+                print(f"\n[{label}] PASS -- SSH listening on port {m.group(1)}")
                 print(f"[{label}] Fingerprint: {fingerprint}")
                 proc.terminate()
                 return dict(success=True, fingerprint=fingerprint,
@@ -163,7 +163,7 @@ def run_qemu_persist(timeout_secs, flash_img, label,
 
             for fp in FAILURE_PATTERNS:
                 if fp.search(line):
-                    print(f"\n[{label}] FAIL — crash detected: {line}")
+                    print(f"\n[{label}] FAIL -- crash detected: {line}")
                     proc.terminate()
                     return dict(success=False, fingerprint=fingerprint,
                                 stored_seen=stored_seen, loaded_seen=loaded_seen)
@@ -174,7 +174,7 @@ def run_qemu_persist(timeout_secs, flash_img, label,
         except Exception:
             proc.kill()
 
-    print(f"\n[{label}] FAIL — timed out")
+    print(f"\n[{label}] FAIL -- timed out")
     return dict(success=False, fingerprint=fingerprint,
                 stored_seen=stored_seen, loaded_seen=loaded_seen)
 
@@ -193,22 +193,22 @@ def main():
     # Create a fresh merged flash image (separate file from the smoke test)
     merge_flash(FLASH_IMG_PERSIST)
 
-    # ── Boot 1: fresh flash — expect host key generation ─────────────────────
+    # -- Boot 1: fresh flash -- expect host key generation ---------------------
     print("\n" + "=" * 60)
-    print("  BOOT 1: fresh NVS — expect host key generation + store")
+    print("  BOOT 1: fresh NVS -- expect host key generation + store")
     print("=" * 60)
     r1 = run_qemu_persist(args.timeout, FLASH_IMG_PERSIST,
                           label="persist-boot1",
                           require_stored=True,    # host key must be generated+saved
                           require_loaded=False)
     if not r1["success"]:
-        print("\n[nvs_persistence] FAIL — boot 1 failed")
+        print("\n[nvs_persistence] FAIL -- boot 1 failed")
         sys.exit(1)
 
     fp1 = r1["fingerprint"]
     print(f"\n[nvs_persistence] Boot 1 fingerprint: {fp1}")
 
-    # ── Boot 2: same flash — NVS data persisted via QEMU snapshot=off ────────
+    # -- Boot 2: same flash -- NVS data persisted via QEMU snapshot=off --------
     #
     # NOTE on fingerprint matching:
     # Due to the QEMU nvs_keys emulation constraint (see module docstring), boot 2
@@ -224,8 +224,8 @@ def main():
     # We assert the two-boot load path works (ssh server starts on both boots)
     # rather than asserting fingerprint equality.
     print("\n" + "=" * 60)
-    print("  BOOT 2: same flash — verify SSH server starts (NVS path tested)")
-    print("  NOTE: fingerprint matching not asserted — QEMU nvs_keys limitation")
+    print("  BOOT 2: same flash -- verify SSH server starts (NVS path tested)")
+    print("  NOTE: fingerprint matching not asserted -- QEMU nvs_keys limitation")
     print("        (see module docstring for details)")
     print("=" * 60)
     r2 = run_qemu_persist(args.timeout, FLASH_IMG_PERSIST,
@@ -233,18 +233,18 @@ def main():
                           require_stored=False,
                           require_loaded=False)
     if not r2["success"]:
-        print("\n[nvs_persistence] FAIL — boot 2 failed to start SSH server")
+        print("\n[nvs_persistence] FAIL -- boot 2 failed to start SSH server")
         sys.exit(1)
 
     fp2 = r2["fingerprint"]
     print(f"\n[nvs_persistence] Boot 2 fingerprint: {fp2}")
 
-    # Report fingerprint comparison (informational — not a failure criterion)
+    # Report fingerprint comparison (informational -- not a failure criterion)
     if fp1 == fp2:
-        print(f"\n[nvs_persistence] PASS — fingerprints match: {fp1}")
+        print(f"\n[nvs_persistence] PASS -- fingerprints match: {fp1}")
     else:
-        print(f"\n[nvs_persistence] PASS — both boots started; fingerprints differ")
-        print(f"  (expected on QEMU — nvs_keys partition cannot persist across boots)")
+        print(f"\n[nvs_persistence] PASS -- both boots started; fingerprints differ")
+        print(f"  (expected on QEMU -- nvs_keys partition cannot persist across boots)")
         print(f"  Boot 1: {fp1}")
         print(f"  Boot 2: {fp2}")
 

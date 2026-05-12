@@ -1,7 +1,7 @@
 /*
- * term_resize.c — pure formatter for the xterm "set window size" CSI sequence
+ * term_resize.c -- pure formatter for the xterm "set window size" CSI sequence
  *
- * See term_resize.h for the contract.  No ESP-IDF / wolfSSH dependencies —
+ * See term_resize.h for the contract.  No ESP-IDF / wolfSSH dependencies --
  * builds on the native test host as-is.
  */
 
@@ -21,13 +21,13 @@ int term_resize_format(uint32_t cols, uint32_t rows, char *out, size_t out_sz)
 
     /* snprintf returns the number of bytes that *would* have been written
      * (excluding the NUL), regardless of truncation.  If that count is >=
-     * out_sz, the output was truncated — treat as "buffer too small" and
+     * out_sz, the output was truncated -- treat as "buffer too small" and
      * return 0 so the caller doesn't emit a half-formed CSI sequence. */
     int n = snprintf(out, out_sz, "\033[8;%u;%ut",
                      (unsigned)rows, (unsigned)cols);
 
     if (n <= 0)                 return 0;  /* encoding error (should not happen) */
-    if ((size_t)n >= out_sz)    return 0;  /* truncated — no room for NUL */
+    if ((size_t)n >= out_sz)    return 0;  /* truncated -- no room for NUL */
 
     return n;
 }

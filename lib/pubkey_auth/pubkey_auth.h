@@ -1,5 +1,5 @@
 /*
- * pubkey_auth.h — OpenSSH public key parsing and hash-based auth
+ * pubkey_auth.h -- OpenSSH public key parsing and hash-based auth
  *
  * Extracted from ssh_server.c so the logic can be unit-tested natively
  * without wolfSSH or a live TCP connection.
@@ -36,11 +36,11 @@ bool pubkey_compute_hash(const char *openssh_line,
                          uint8_t hash_out[PUBKEY_HASH_SIZE]);
 
 /* ------------------------------------------------------------------ */
-/* Auth check helper — extracted so it can be unit-tested natively    */
+/* Auth check helper -- extracted so it can be unit-tested natively    */
 /* ------------------------------------------------------------------ */
 
 /*
- * pubkey_auth_result_t — return type for pubkey_auth_check().
+ * pubkey_auth_result_t -- return type for pubkey_auth_check().
  */
 typedef enum {
     PUBKEY_AUTH_OK,       /* presented key matches expected_hash */
@@ -59,20 +59,20 @@ pubkey_auth_result_t pubkey_auth_check(
     const uint8_t  expected_hash[PUBKEY_HASH_SIZE]);
 
 /* ------------------------------------------------------------------ */
-/* Username classification — routes auth to the correct key hash     */
+/* Username classification -- routes auth to the correct key hash     */
 /* ------------------------------------------------------------------ */
 
 /*
- * pubkey_user_class_t — result of classifying an SSH username.
+ * pubkey_user_class_t -- result of classifying an SSH username.
  */
 typedef enum {
     PUBKEY_USER_TTY,      /* normal session: username "tty", use TTY key set  */
     PUBKEY_USER_OTA,      /* OTA session: username "ota", use OTA key          */
-    PUBKEY_USER_REJECTED, /* unknown username — reject before checking key     */
+    PUBKEY_USER_REJECTED, /* unknown username -- reject before checking key     */
 } pubkey_user_class_t;
 
 /*
- * pubkey_classify_user — classify an SSH username string.
+ * pubkey_classify_user -- classify an SSH username string.
  *
  * username     : pointer to the username bytes (may be NULL)
  * username_sz  : byte length of the username (NOT including NUL)

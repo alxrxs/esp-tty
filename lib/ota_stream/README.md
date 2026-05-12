@@ -1,4 +1,4 @@
-# ota_stream — Streaming Read Accumulator for OTA Image Transfer
+# ota_stream -- Streaming Read Accumulator for OTA Image Transfer
 
 `ota_stream_read_all` reads an unknown-length byte stream into a single
 contiguous buffer that grows geometrically until the stream closes.  The
@@ -30,8 +30,8 @@ it with the matching `free_fn`.
 
 The allocator hooks (`alloc_fn`, `realloc_fn`, `free_fn`) decouple buffer
 placement from the accumulator logic.  Production code passes `psram_alloc`,
-`psram_realloc`, and `psram_free` — thin wrappers around `heap_caps_malloc`,
-`heap_caps_realloc`, and `heap_caps_free` with `MALLOC_CAP_SPIRAM` — so the
+`psram_realloc`, and `psram_free` -- thin wrappers around `heap_caps_malloc`,
+`heap_caps_realloc`, and `heap_caps_free` with `MALLOC_CAP_SPIRAM` -- so the
 multi-megabyte OTA image lands in the ESP32-S3's 8 MB PSRAM rather than
 internal SRAM.  Native unit tests inject counter-based mock hooks to force OOM
 on the Nth allocator call and assert that the partial buffer is released
@@ -47,9 +47,9 @@ ota_stream_result_t ota_stream_read_all(
     void                 *ctx,           /* forwarded to read_fn */
     size_t                max_bytes,     /* hard cap; triggers ERR_TOOBIG */
     unsigned              max_zero_retries,
-    ota_stream_alloc_fn   alloc_fn,      /* NULL → calloc */
-    ota_stream_realloc_fn realloc_fn,    /* NULL → realloc */
-    ota_stream_free_fn    free_fn,       /* NULL → free */
+    ota_stream_alloc_fn   alloc_fn,      /* NULL -> calloc */
+    ota_stream_realloc_fn realloc_fn,    /* NULL -> realloc */
+    ota_stream_free_fn    free_fn,       /* NULL -> free */
     uint8_t             **out_buf,       /* set on OK; NULL on error */
     size_t               *out_len);      /* set on OK; 0 on error */
 ```

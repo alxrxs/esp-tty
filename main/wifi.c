@@ -1,5 +1,5 @@
 /*
- * wifi.c — Wi-Fi STA init + automatic reconnect for esp-tty
+ * wifi.c -- Wi-Fi STA init + automatic reconnect for esp-tty
  *
  * Supports two compile-time auth modes (selected in main/config.h):
  *
@@ -14,29 +14,29 @@
  * IPv4 addressing (selected in config.h):
  *
  *   Default (USE_STATIC_IPV4 not defined):
- *     DHCPv4 — the DHCP watchdog timer keeps the client alive indefinitely.
+ *     DHCPv4 -- the DHCP watchdog timer keeps the client alive indefinitely.
  *
  *   With USE_STATIC_IPV4 defined:
- *     Static IPv4 — DHCP client is stopped before the interface comes up.
+ *     Static IPv4 -- DHCP client is stopped before the interface comes up.
  *     Requires STATIC_IPV4_ADDRESS, STATIC_IPV4_NETMASK, STATIC_IPV4_GATEWAY
  *     (all dotted-decimal strings).  Optional: STATIC_IPV4_DNS_PRIMARY,
  *     STATIC_IPV4_DNS_SECONDARY.  The DHCP watchdog is disabled automatically.
  *
  * IPv6 addressing (selected in config.h via IPV6_MODE):
  *
- *   IPV6_MODE_DISABLED              — no IPv6 at all
- *   IPV6_MODE_SLAAC                 — link-local + SLAAC global (default)
- *   IPV6_MODE_SLAAC_STATELESS_DHCPV6 — SLAAC address + stateless DHCPv6 for
+ *   IPV6_MODE_DISABLED              -- no IPv6 at all
+ *   IPV6_MODE_SLAAC                 -- link-local + SLAAC global (default)
+ *   IPV6_MODE_SLAAC_STATELESS_DHCPV6 -- SLAAC address + stateless DHCPv6 for
  *                                       options (DNS, etc.)
- *   IPV6_MODE_STATEFUL_DHCPV6       — DHCPv6 assigns the address
- *   IPV6_MODE_STATIC                — static global address; requires
+ *   IPV6_MODE_STATEFUL_DHCPV6       -- DHCPv6 assigns the address
+ *   IPV6_MODE_STATIC                -- static global address; requires
  *                                     STATIC_IPV6_ADDRESS, STATIC_IPV6_PREFIX_LEN,
  *                                     STATIC_IPV6_GATEWAY.  Optional:
  *                                     STATIC_IPV6_DNS_PRIMARY,
  *                                     STATIC_IPV6_DNS_SECONDARY.
  *
  * Compile-time credentials come from main/config.h (gitignored).
- * Copy config.h.example → config.h and fill in your values.
+ * Copy config.h.example -> config.h and fill in your values.
  */
 
 #include <string.h>
@@ -108,7 +108,7 @@
 /* DHCP watchdog: if Wi-Fi associates (L2 link is up) but no IP arrives
  * within this many seconds, restart the DHCP client (stop + start).
  * Catches the case where the AP is up but the DHCP server is unresponsive
- * — lwIP gives up DHCP DISCOVER after a handful of retries; this loops
+ * -- lwIP gives up DHCP DISCOVER after a handful of retries; this loops
  * forever.  Set to 0 to disable.
  *
  * When USE_STATIC_IPV4 is defined the watchdog is skipped entirely since
@@ -126,10 +126,10 @@
 #endif
 
 #ifndef WIFI_USE_ENTERPRISE
-/* ── PSK path only ─────────────────────────────────────────────────────── */
+/* -- PSK path only ------------------------------------------------------- */
 
 /* WPA3-SAE mode.  WPA3_SAE_PWE_BOTH tries Hash-to-Element first and falls
- * back to Hunt-and-Peck — safe for mixed WPA2/WPA3 APs. */
+ * back to Hunt-and-Peck -- safe for mixed WPA2/WPA3 APs. */
 # ifndef WIFI_SAE_MODE
 #  define WIFI_SAE_MODE   WPA3_SAE_PWE_BOTH
 # endif
@@ -141,7 +141,7 @@
 # endif
 
 #else /* WIFI_USE_ENTERPRISE */
-/* ── Enterprise path only ──────────────────────────────────────────────── */
+/* -- Enterprise path only ------------------------------------------------ */
 
 /* Accept WPA2-Enterprise APs and anything stronger.
  * Use WIFI_AUTH_WPA3_ENTERPRISE to require WPA3-Enterprise-only APs. */
@@ -230,7 +230,7 @@ static esp_netif_t *s_sta_netif = NULL;
 
 /* DHCP watchdog: armed on STA_CONNECTED, disarmed on STA_GOT_IP.  If it
  * fires before an IP arrives, we kick the DHCP client and re-arm.
- * Never compiled when USE_STATIC_IPV4 is defined — static addressing
+ * Never compiled when USE_STATIC_IPV4 is defined -- static addressing
  * doesn't need a DHCP watchdog. */
 #if DHCP_RETRY_TIMEOUT_SEC > 0 && !defined(USE_STATIC_IPV4)
 static TimerHandle_t s_dhcp_watchdog = NULL;
@@ -239,7 +239,7 @@ static void dhcp_watchdog_cb(TimerHandle_t t)
 {
     (void)t;
     if (!s_sta_netif) return;
-    ESP_LOGW(TAG, "no IP after %d s — restarting DHCP client",
+    ESP_LOGW(TAG, "no IP after %d s -- restarting DHCP client",
              DHCP_RETRY_TIMEOUT_SEC);
     /* dhcpc_stop() may return ESP_ERR_ESP_NETIF_DHCP_ALREADY_STOPPED;
      * either way, dhcpc_start() restarts the discover sequence. */
@@ -420,7 +420,7 @@ static void ipv6_bring_up(void)
         }
 # endif
     } else {
-        ESP_LOGW(TAG, "esp_netif_get_netif_impl returned NULL — DHCPv6 not started");
+        ESP_LOGW(TAG, "esp_netif_get_netif_impl returned NULL -- DHCPv6 not started");
     }
 #endif /* DHCPv6 modes */
 }
@@ -439,8 +439,8 @@ static void wifi_event_handler(void *arg,
     if (event_base == WIFI_EVENT) {
 
         if (event_id == WIFI_EVENT_STA_START) {
-            /* Driver is up — kick off the first connection attempt. */
-            ESP_LOGI(TAG, "STA started, connecting to \"%s\" …", WIFI_SSID);
+            /* Driver is up -- kick off the first connection attempt. */
+            ESP_LOGI(TAG, "STA started, connecting to \"%s\" ...", WIFI_SSID);
             esp_wifi_connect();
 
         } else if (event_id == WIFI_EVENT_STA_CONNECTED) {
@@ -467,7 +467,7 @@ static void wifi_event_handler(void *arg,
             /* Apply static address at L2-connect time so the routing table
              * is populated before we signal success. */
             apply_static_ipv4();
-            /* Log and signal immediately — no IP event will follow. */
+            /* Log and signal immediately -- no IP event will follow. */
             {
                 esp_netif_ip_info_t ip;
                 if (esp_netif_get_ip_info(s_sta_netif, &ip) == ESP_OK) {
@@ -532,7 +532,7 @@ static void wifi_event_handler(void *arg,
             ip_event_got_ip_t *ev = (ip_event_got_ip_t *)event_data;
 
             /* ----------------------------------------------------------------
-             * Print the DHCP-assigned IP to the UART log — the primary
+             * Print the DHCP-assigned IP to the UART log -- the primary
              * discovery mechanism for v1 (no mDNS).  SSH task can start now.
              * ---------------------------------------------------------------- */
             ESP_LOGI(TAG, "IP address : " IPSTR, IP2STR(&ev->ip_info.ip));
@@ -540,7 +540,7 @@ static void wifi_event_handler(void *arg,
             ESP_LOGI(TAG, "Gateway    : " IPSTR, IP2STR(&ev->ip_info.gw));
 
 #if DHCP_RETRY_TIMEOUT_SEC > 0
-            /* DHCP succeeded — disarm the watchdog. */
+            /* DHCP succeeded -- disarm the watchdog. */
             if (s_dhcp_watchdog) xTimerStop(s_dhcp_watchdog, 0);
 #endif
 
@@ -565,7 +565,7 @@ static void wifi_event_handler(void *arg,
 esp_err_t wifi_init_sta(void)
 {
 #ifdef BRIDGE_LOOPBACK
-    /* QEMU/Wokwi: no WiFi radio — init the TCP/IP stack only so LwIP
+    /* QEMU/Wokwi: no WiFi radio -- init the TCP/IP stack only so LwIP
      * sockets work, then return immediately (SSH server binds to 0.0.0.0). */
     ESP_LOGI(TAG, "BRIDGE_LOOPBACK: skipping WiFi, init netif only");
     ESP_ERROR_CHECK(esp_netif_init());
@@ -590,7 +590,7 @@ esp_err_t wifi_init_sta(void)
         NULL,
         dhcp_watchdog_cb);
     if (!s_dhcp_watchdog) {
-        ESP_LOGW(TAG, "Failed to create DHCP watchdog timer — DHCP "
+        ESP_LOGW(TAG, "Failed to create DHCP watchdog timer -- DHCP "
                       "retries will rely on lwIP's default behaviour");
     }
 #endif
@@ -622,12 +622,12 @@ esp_err_t wifi_init_sta(void)
     /* Override the factory-burned MAC.
      *
      * Constraint: ESP-IDF only accepts a locally-administered unicast MAC
-     * unless a custom MAC has also been burned into eFuse — which this
+     * unless a custom MAC has also been burned into eFuse -- which this
      * project never does.  "Locally-administered unicast" means:
      *   - first octet bit 1 = 1  (locally administered)
      *   - first octet bit 0 = 0  (unicast, not multicast)
      * Equivalently: the low nibble of byte 0 is one of 2, 6, A, or E.
-     * Valid first-byte prefixes: 02, 06, 0A, 0E, 12, 16, 1A, 1E, 22, 26, …
+     * Valid first-byte prefixes: 02, 06, 0A, 0E, 12, 16, 1A, 1E, 22, 26, ...
      *
      * We pre-validate here so a wrong MAC produces a clear error instead
      * of the generic ESP_ERR_INVALID_ARG that esp_wifi_set_mac returns. */
@@ -637,7 +637,7 @@ esp_err_t wifi_init_sta(void)
             ESP_LOGE(TAG,
                      "WIFI_MAC_BYTES first byte 0x%02x is not a locally-"
                      "administered unicast MAC. The low nibble of byte 0 "
-                     "must be 2, 6, A, or E (e.g. 02, 06, 0A, 0E, 12, …). "
+                     "must be 2, 6, A, or E (e.g. 02, 06, 0A, 0E, 12, ...). "
                      "Falling back to the factory MAC.",
                      custom_mac[0]);
         } else {
@@ -645,7 +645,7 @@ esp_err_t wifi_init_sta(void)
                                               (uint8_t *)custom_mac);
             if (merr != ESP_OK) {
                 ESP_LOGW(TAG,
-                         "esp_wifi_set_mac failed: %s — falling back to "
+                         "esp_wifi_set_mac failed: %s -- falling back to "
                          "factory MAC", esp_err_to_name(merr));
             }
         }
@@ -663,9 +663,9 @@ esp_err_t wifi_init_sta(void)
     }
 
     /* 4. Register event handlers.
-     *    instance_any_id  → all WIFI_EVENT sub-events (start, disconnect, …)
-     *    instance_got_ip  → IP_EVENT_STA_GOT_IP only
-     *    instance_got_ip6 → IP_EVENT_GOT_IP6 (when IPv6 is enabled) */
+     *    instance_any_id  -> all WIFI_EVENT sub-events (start, disconnect, ...)
+     *    instance_got_ip  -> IP_EVENT_STA_GOT_IP only
+     *    instance_got_ip6 -> IP_EVENT_GOT_IP6 (when IPv6 is enabled) */
     esp_event_handler_instance_t instance_any_id;
     esp_event_handler_instance_t instance_got_ip;
 
@@ -687,16 +687,16 @@ esp_err_t wifi_init_sta(void)
     /* 5. Build the STA config.
      *
      *    Common fields:
-     *      .ssid              — target network name (from config.h)
-     *      .threshold.authmode— lowest auth mode accepted during scan
-     *      .pmf_cfg           — Protected Management Frames
+     *      .ssid              -- target network name (from config.h)
+     *      .threshold.authmode-- lowest auth mode accepted during scan
+     *      .pmf_cfg           -- Protected Management Frames
      *
      *    PSK-only fields (.password, .sae_pwe_h2e) are omitted in enterprise
      *    mode; the EAP credentials are set via esp_eap_client_* below.
      *    See config.h.example for how to switch between the two modes.
      */
 #ifndef WIFI_USE_ENTERPRISE
-    /* ── WPA2/WPA3-Personal (PSK) ──────────────────────────────────────── */
+    /* -- WPA2/WPA3-Personal (PSK) ---------------------------------------- */
     wifi_config_t wifi_config = {
         .sta = {
             .ssid     = WIFI_SSID,
@@ -718,7 +718,7 @@ esp_err_t wifi_init_sta(void)
         },
     };
 #else /* WIFI_USE_ENTERPRISE */
-    /* ── WPA2/WPA3-Enterprise (EAP-TLS) ───────────────────────────────── */
+    /* -- WPA2/WPA3-Enterprise (EAP-TLS) --------------------------------- */
     wifi_config_t wifi_config = {
         .sta = {
             .ssid = WIFI_SSID,
@@ -747,13 +747,13 @@ esp_err_t wifi_init_sta(void)
 #ifdef WIFI_USE_ENTERPRISE
     /* 6b. Configure EAP-TLS credentials.
      *
-     *     Call sequence matters: identity → CA cert → client cert+key →
-     *     enterprise_enable → start.  All calls must precede esp_wifi_start().
+     *     Call sequence matters: identity -> CA cert -> client cert+key ->
+     *     enterprise_enable -> start.  All calls must precede esp_wifi_start().
      *
      *     Identity: outer/phase-1 identity sent before the TLS tunnel is up.
      *     Many RADIUS servers want "anonymous@realm" here for privacy.
      *     Inner identity is derived from the client certificate CN by the
-     *     RADIUS server — no esp_eap_client_set_username() needed for EAP-TLS.
+     *     RADIUS server -- no esp_eap_client_set_username() needed for EAP-TLS.
      *
      *     Sanity-check the embedded blobs before handing them to the EAP
      *     supplicant.  If cert files were empty or truncated at build time the
@@ -770,7 +770,7 @@ esp_err_t wifi_init_sta(void)
         (const unsigned char *)EAP_IDENTITY, strlen(EAP_IDENTITY)));
 
     /* CA certificate: validates the RADIUS server's certificate.
-     * Embedded via EMBED_TXTFILES — buffer is null-terminated PEM.
+     * Embedded via EMBED_TXTFILES -- buffer is null-terminated PEM.
      * Length includes the null terminator (end - start). */
     ESP_ERROR_CHECK(esp_eap_client_set_ca_cert(
         eap_ca_pem_start,
@@ -790,7 +790,7 @@ esp_err_t wifi_init_sta(void)
     /* Skip certificate expiry validation.  Only use this during development
      * when the device lacks SNTP / a real-time clock.  Remove for production
      * and configure SNTP before calling wifi_init_sta() instead. */
-    ESP_LOGW(TAG, "EAP time check DISABLED — not safe for production");
+    ESP_LOGW(TAG, "EAP time check DISABLED -- not safe for production");
     ESP_ERROR_CHECK(esp_eap_client_set_disable_time_check(true));
 #endif
 
@@ -806,7 +806,7 @@ esp_err_t wifi_init_sta(void)
      *    esp_wifi_connect() in the event handler above. */
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    ESP_LOGI(TAG, "wifi_init_sta complete, waiting for IP …");
+    ESP_LOGI(TAG, "wifi_init_sta complete, waiting for IP ...");
 
     /* 8. Block until connected+IP or retry-limit exhausted.
      *    BRIDGE_LOOPBACK uses a 10 s timeout so QEMU/CI doesn't hang forever
@@ -831,7 +831,7 @@ esp_err_t wifi_init_sta(void)
         WIFI_EVENT, ESP_EVENT_ANY_ID, instance_any_id));
 
 #if IPV6_MODE != IPV6_MODE_DISABLED && defined(CONFIG_LWIP_IPV6)
-    /* Note: do NOT unregister instance_got_ip6 — IPv6 addresses may be
+    /* Note: do NOT unregister instance_got_ip6 -- IPv6 addresses may be
      * acquired long after the initial connection (RA solicitation, DHCPv6
      * lease) and we want to log them whenever they arrive.  The event
      * handler is lightweight (just an ESP_LOGI call) so keeping it is safe. */

@@ -35,7 +35,7 @@ list(REMOVE_ITEM WOLFSSL_SRCS
     "${WOLFSSL_MC}/wolfcrypt/src/sp_sm2_c64.c"
     "${WOLFSSL_MC}/wolfcrypt/src/sp_sm2_cortexm.c"
     "${WOLFSSL_MC}/wolfcrypt/src/sp_sm2_x86_64.c"
-    # Diagnostic utility — uses linker section symbols as C variables; also uses
+    # Diagnostic utility -- uses linker section symbols as C variables; also uses
     # `thread_local` as an enum value name which conflicts with the C11 keyword.
     "${WOLFSSL_MC}/wolfcrypt/src/port/Espressif/esp_sdk_mem_lib.c"
     # esp32_aes.c and esp32_sha.c ARE included (not excluded here).
@@ -43,7 +43,7 @@ list(REMOVE_ITEM WOLFSSL_SRCS
     # PRIV_REQUIRES esp_hw_support below gives them the clock-gating symbols.
 )
 
-# Remove Xtensa assembly files — not valid for this toolchain invocation
+# Remove Xtensa assembly files -- not valid for this toolchain invocation
 file(GLOB WOLFSSL_ASM "${WOLFSSL_MC}/wolfcrypt/src/*.S")
 if(WOLFSSL_ASM)
     list(REMOVE_ITEM WOLFSSL_SRCS ${WOLFSSL_ASM})

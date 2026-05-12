@@ -1,5 +1,5 @@
 /*
- * test_auth_check.c — unit tests for pubkey_auth_check() (native, no hardware)
+ * test_auth_check.c -- unit tests for pubkey_auth_check() (native, no hardware)
  *
  * pubkey_auth_check() is the pure helper extracted from ssh_server.c's
  * user_auth_callback so the auth logic can be tested without wolfSSH,
@@ -62,7 +62,7 @@ static const uint8_t TEST_BLOB[51] = {
 };
 #define TEST_BLOB_LEN  sizeof(TEST_BLOB)
 
-/* SHA-256( uint32be(51) || TEST_BLOB ) — computed offline */
+/* SHA-256( uint32be(51) || TEST_BLOB ) -- computed offline */
 static const uint8_t EXPECTED_HASH[PUBKEY_HASH_SIZE] = {
     0x60, 0xf7, 0x3d, 0x25, 0xf4, 0x6f, 0xe7, 0x0d,
     0x39, 0x24, 0x2c, 0x95, 0x9d, 0x32, 0x92, 0x4b,
@@ -71,7 +71,7 @@ static const uint8_t EXPECTED_HASH[PUBKEY_HASH_SIZE] = {
 };
 
 /* ------------------------------------------------------------------ */
-/* Accept path: correct key → PUBKEY_AUTH_OK                          */
+/* Accept path: correct key -> PUBKEY_AUTH_OK                          */
 
 void test_auth_check_accept_correct_key(void)
 {
@@ -84,7 +84,7 @@ void test_auth_check_accept_correct_key(void)
 /* ------------------------------------------------------------------ */
 /* Reject paths                                                         */
 
-/* Reject: one byte differs — SHA-256 completely changes */
+/* Reject: one byte differs -- SHA-256 completely changes */
 void test_auth_check_reject_one_byte_changed(void)
 {
     uint8_t bad_blob[TEST_BLOB_LEN];
@@ -100,7 +100,7 @@ void test_auth_check_reject_one_byte_changed(void)
 /* Reject: same bytes but different length (hash includes length prefix) */
 void test_auth_check_reject_different_length(void)
 {
-    /* Truncate by one byte — uint32be(50) ≠ uint32be(51) */
+    /* Truncate by one byte -- uint32be(50) != uint32be(51) */
     pubkey_auth_result_t result =
         pubkey_auth_check(TEST_BLOB, TEST_BLOB_LEN - 1, EXPECTED_HASH);
 
@@ -110,7 +110,7 @@ void test_auth_check_reject_different_length(void)
 /* ------------------------------------------------------------------ */
 /* Edge cases                                                           */
 
-/* Edge: zero-length key → REJECTED without touching hash bytes */
+/* Edge: zero-length key -> REJECTED without touching hash bytes */
 void test_auth_check_edge_zero_length(void)
 {
     pubkey_auth_result_t result =
@@ -119,7 +119,7 @@ void test_auth_check_edge_zero_length(void)
     TEST_ASSERT_EQUAL_INT(PUBKEY_AUTH_REJECTED, result);
 }
 
-/* Edge: NULL key → REJECTED without crash */
+/* Edge: NULL key -> REJECTED without crash */
 void test_auth_check_edge_null_key(void)
 {
     pubkey_auth_result_t result =
@@ -241,7 +241,7 @@ void test_auth_check_loop_no_match(void)
  * never executes, and "match if any" is REJECTED. */
 void test_auth_check_loop_zero_count(void)
 {
-    /* Provide a fully-populated array, but pass count=0 — the loop must
+    /* Provide a fully-populated array, but pass count=0 -- the loop must
      * not iterate even once. */
     uint8_t expected[3][PUBKEY_HASH_SIZE];
     compute_expected_hash(DATA_D,      sizeof DATA_D,      expected[0]);
@@ -258,7 +258,7 @@ void test_auth_check_loop_zero_count(void)
  * LAST byte of the 32-byte hash must still produce REJECTED. This is the
  * behavioural witness that the XOR-accumulator loop in pubkey_auth_check
  * inspects every byte (a memcmp() that short-circuits on byte 0 would
- * still reject — so we test both ends to exercise the full sweep). */
+ * still reject -- so we test both ends to exercise the full sweep). */
 void test_auth_check_constant_time_all_bytes_compared(void)
 {
     uint8_t correct[PUBKEY_HASH_SIZE];
@@ -278,7 +278,7 @@ void test_auth_check_constant_time_all_bytes_compared(void)
     TEST_ASSERT_EQUAL_INT(PUBKEY_AUTH_OK,
         pubkey_auth_check(DATA_D, sizeof DATA_D, correct));
 
-    /* Both single-byte perturbations must be rejected — confirming the
+    /* Both single-byte perturbations must be rejected -- confirming the
      * XOR accumulator covers all 32 bytes, not just an early prefix. */
     TEST_ASSERT_EQUAL_INT(PUBKEY_AUTH_REJECTED,
         pubkey_auth_check(DATA_D, sizeof DATA_D, expected0));

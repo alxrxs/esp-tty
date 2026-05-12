@@ -1,9 +1,9 @@
 /*
- * ssh_server.c — wolfSSH server: accept loop, auth, bidirectional bridge
+ * ssh_server.c -- wolfSSH server: accept loop, auth, bidirectional bridge
  *
  * Architecture:
  *   ssh_server_task (one FreeRTOS task, portMAX_DELAY on accept)
- *     → per-session: two bridge tasks (ssh_to_usb, usb_to_ssh)
+ *     -> per-session: two bridge tasks (ssh_to_usb, usb_to_ssh)
  *
  * Single-session takeover: when a second client connects while one is active,
  * the old session is torn down and the new one takes over.
@@ -167,7 +167,7 @@ static int term_resize_cb(WOLFSSH *ssh, word32 cols, word32 rows,
     if (!ctx || cols == 0 || rows == 0) return WS_SUCCESS;
     ring_t *ring = (ring_t *)ctx;
     /* Inject xterm "set window size" CSI into the USB-bound stream.
-     * \033[8;rows;colst — received by the Linux host's terminal layer. */
+     * \033[8;rows;colst -- received by the Linux host's terminal layer. */
     char seq[32];
     int n = term_resize_format(cols, rows, seq, sizeof seq);
     if (n > 0)
@@ -176,7 +176,7 @@ static int term_resize_cb(WOLFSSH *ssh, word32 cols, word32 rows,
 }
 
 /* ------------------------------------------------------------------ */
-/* Bridge: SSH channel ↔ ring buffers                                  */
+/* Bridge: SSH channel <-> ring buffers                                  */
 /* ------------------------------------------------------------------ */
 
 typedef struct {
@@ -184,7 +184,7 @@ typedef struct {
     ring_t  *ring;
 } pump_arg_t;
 
-/* SSH stream → ring (ssh_to_usb direction) */
+/* SSH stream -> ring (ssh_to_usb direction) */
 static int ssh_read_cb(void *ctx, uint8_t *buf, size_t cap)
 {
     WOLFSSH *ssh = (WOLFSSH *)ctx;
@@ -199,7 +199,7 @@ static int ring_write_cb(void *ctx, const uint8_t *buf, size_t len)
     return ring_send((ring_t *)ctx, buf, len);
 }
 
-/* ring → SSH stream (usb_to_ssh direction) */
+/* ring -> SSH stream (usb_to_ssh direction) */
 static int ring_read_cb(void *ctx, uint8_t *buf, size_t cap)
 {
     return ring_recv((ring_t *)ctx, buf, cap);
@@ -257,7 +257,7 @@ static void teardown_active_session(void)
 
     /* Close the socket first: this makes wolfSSH_stream_read/send in the pump
      * tasks return an error, causing them to exit.  We must NOT call any
-     * wolfSSH_* functions here while the pumps may still be inside wolfSSH —
+     * wolfSSH_* functions here while the pumps may still be inside wolfSSH --
      * wolfSSL is not thread-safe and concurrent access corrupts the heap. */
     if (s_active_fd >= 0) {
         close(s_active_fd);
@@ -278,7 +278,7 @@ static void teardown_active_session(void)
         s_pumps_running = false;
     }
 
-    /* Pumps are gone — now safe to call wolfSSH_free.  We skip wolfSSH_shutdown
+    /* Pumps are gone -- now safe to call wolfSSH_free.  We skip wolfSSH_shutdown
      * because the socket is already closed: there is no way to send the SSH
      * disconnect packet to the peer.  The peer will see the TCP RST/FIN. */
     wolfSSH_free(s_active_ssh);
@@ -352,7 +352,7 @@ static void ssh_server_task(void *arg)
 
         xSemaphoreGive(s_session_mutex);
 
-        /* Bounded timeout for handshake + auth — prevents a slow/malicious
+        /* Bounded timeout for handshake + auth -- prevents a slow/malicious
          * client from holding the session slot indefinitely. */
         struct timeval tv = { .tv_sec = SSH_HANDSHAKE_TIMEOUT_SEC, .tv_usec = 0 };
         setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
@@ -370,7 +370,7 @@ static void ssh_server_task(void *arg)
 
         ESP_LOGI(TAG, "SSH session established");
 
-        /* Remove the handshake timeout — normal I/O has no deadline. */
+        /* Remove the handshake timeout -- normal I/O has no deadline. */
         struct timeval tv_off = { 0 };
         setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv_off, sizeof(tv_off));
 
@@ -388,23 +388,23 @@ static void ssh_server_task(void *arg)
         /* Check if this is an OTA session (username == "ota") */
         const char *uname = wolfSSH_GetUsername(ssh);
         if (pubkey_classify_user(uname, uname ? strlen(uname) : 0) == PUBKEY_USER_OTA) {
-            ESP_LOGI(TAG, "OTA session — routing to ota_session_handler");
+            ESP_LOGI(TAG, "OTA session -- routing to ota_session_handler");
             xSemaphoreGive(s_session_mutex);
             /* ota_session_handler owns the SSH session and may reboot */
             ota_session_handler(ssh);
-            /* If we get here, OTA failed — clean up */
+            /* If we get here, OTA failed -- clean up */
             xSemaphoreTake(s_session_mutex, portMAX_DELAY);
             teardown_active_session();
             xSemaphoreGive(s_session_mutex);
             continue;
         }
 
-        /* Register terminal resize callback — forwards window-change events
+        /* Register terminal resize callback -- forwards window-change events
          * from the SSH client as CSI sequences into the USB-bound ring. */
         wolfSSH_SetTerminalResizeCb(ssh, term_resize_cb);
         wolfSSH_SetTerminalResizeCtx(ssh, s_ssh_to_usb);
 
-        /* Replay scrollback before going live ─────────────────────────
+        /* Replay scrollback before going live -------------------------
          * Send the last SCROLLBACK_REPLAY_LINES lines of USB device
          * output so the user sees e.g. kernel panics or boot logs that
          * arrived while no SSH client was connected. */
@@ -474,7 +474,7 @@ static void ssh_server_task(void *arg)
             struct timeval ptv = { .tv_sec = 0, .tv_usec = 200000 };
             int sel = select(listen_fd + 1, &rfds, NULL, NULL, &ptv);
             if (sel > 0 && FD_ISSET(listen_fd, &rfds)) {
-                ESP_LOGI(TAG, "New connection pending — preempting session");
+                ESP_LOGI(TAG, "New connection pending -- preempting session");
                 s_pump_stop = true;
                 break;
             }
@@ -516,16 +516,16 @@ esp_err_t ssh_server_start(ring_t *usb_to_ssh, ring_t *ssh_to_usb,
     }
     ESP_LOGI(TAG, "%d TTY key(s) loaded", s_authkey_count);
 
-    /* Precompute OTA authorized key hash (optional — OTA disabled if not configured) */
+    /* Precompute OTA authorized key hash (optional -- OTA disabled if not configured) */
 #ifdef OTA_AUTHORIZED_PUBKEY
     if (pubkey_compute_hash(OTA_AUTHORIZED_PUBKEY, s_ota_authkey_hash)) {
         s_ota_authkey_hash_ready = true;
         ESP_LOGI(TAG, "OTA pubkey auth configured");
     } else {
-        ESP_LOGW(TAG, "OTA_AUTHORIZED_PUBKEY in config.h is invalid — OTA disabled");
+        ESP_LOGW(TAG, "OTA_AUTHORIZED_PUBKEY in config.h is invalid -- OTA disabled");
     }
 #else
-    ESP_LOGW(TAG, "OTA_AUTHORIZED_PUBKEY not defined in config.h — OTA disabled");
+    ESP_LOGW(TAG, "OTA_AUTHORIZED_PUBKEY not defined in config.h -- OTA disabled");
 #endif
 
     /* wolfSSH init */
@@ -562,7 +562,7 @@ esp_err_t ssh_server_start(ring_t *usb_to_ssh, ring_t *ssh_to_usb,
         return ESP_ERR_NO_MEM;
     }
 
-    /* 16 KB stack — wolfSSH + wolfCrypt need at least 8–12 KB */
+    /* 16 KB stack -- wolfSSH + wolfCrypt need at least 8-12 KB */
     BaseType_t rc = xTaskCreate(ssh_server_task, "ssh_server",
                                 16384, NULL, 5, NULL);
     if (rc != pdPASS) {

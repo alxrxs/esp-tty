@@ -1,5 +1,5 @@
 /*
- * test stub: mbedtls/pk.h — backed by OpenSSL for native tests
+ * test stub: mbedtls/pk.h -- backed by OpenSSL for native tests
  *
  * Implements only the subset used by ota_verify.c.
  * mbedtls_pk_ec() in the real API returns a pointer to the inner keypair.

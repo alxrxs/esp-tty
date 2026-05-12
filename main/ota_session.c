@@ -1,5 +1,5 @@
 /*
- * ota_session.c — OTA firmware update over SSH channel for esp-tty
+ * ota_session.c -- OTA firmware update over SSH channel for esp-tty
  *
  * Linked from ssh_server.c when username == "ota".
  * Streams the OTA image from the SSH channel into ota_verify, which
@@ -7,9 +7,9 @@
  *
  * Key material:
  *   - ECDSA-P256 public key  : embedded from ota_keys/sign.pub.pem
- *                              via EMBED_TXTFILES → _binary_sign_pub_pem_start
+ *                              via EMBED_TXTFILES -> _binary_sign_pub_pem_start
  *   - AES-256 raw key (32B)  : embedded from ota_keys/aes.key
- *                              via EMBED_FILES → _binary_aes_key_start
+ *                              via EMBED_FILES -> _binary_aes_key_start
  *
  * Security:
  *   - SSH layer provides transport encryption and pubkey authentication.
@@ -38,7 +38,7 @@
 
 static const char *TAG = "ota_session";
 
-/* ── Embedded key material ───────────────────────────────────────────────── */
+/* -- Embedded key material ------------------------------------------------- */
 /* Symbols injected by CMake EMBED_TXTFILES / EMBED_FILES.
  * Only present when ota_keys/sign.pub.pem and ota_keys/aes.key exist at
  * build time.  When absent, OTA_KEYS_EMBEDDED is not defined and
@@ -52,29 +52,29 @@ extern const uint8_t _binary_aes_key_end[];
 
 /* Maximum total OTA image size we will accept.  The flash OTA partitions
  * are ~4 MiB; allow some headroom for the OTA wrapper (44-byte header +
- * 64-byte signature ≈ 108 bytes) but cap below the 8 MiB PSRAM ceiling. */
+ * 64-byte signature ~= 108 bytes) but cap below the 8 MiB PSRAM ceiling. */
 #define MAX_OTA_SIZE             (6u * 1024u * 1024u)
 
 /* How many WS_WANT_READ-induced "transient 0-return" events the
  * ota_stream accumulator should tolerate before giving up.  Each transient
- * triggers a 10 ms vTaskDelay inside wolfssh_read_adapter, so 60000 ≈
- * 10 minutes of total idle before the session is considered dead — well
+ * triggers a 10 ms vTaskDelay inside wolfssh_read_adapter, so 60000 ~=
+ * 10 minutes of total idle before the session is considered dead -- well
  * past the original infinite-retry behaviour for realistic uploads. */
 #define MAX_OTA_ZERO_RETRIES     60000u
 
-/* ── Helper: send a short text reply to the SSH client ──────────────────── */
+/* -- Helper: send a short text reply to the SSH client -------------------- */
 static void ssh_send_reply(WOLFSSH *ssh, const char *msg)
 {
     wolfSSH_stream_send(ssh, (byte *)msg, (word32)strlen(msg));
 }
 
-/* ── ota_stream adapter: wolfSSH_stream_read → ota_stream_read_fn ─────────
+/* -- ota_stream adapter: wolfSSH_stream_read -> ota_stream_read_fn ---------
  *
- *   > 0           → bytes read
- *   WS_WANT_READ  → return 0 (transient); the accumulator's retry budget
+ *   > 0           -> bytes read
+ *   WS_WANT_READ  -> return 0 (transient); the accumulator's retry budget
  *                   plus the vTaskDelay below mimic the original
  *                   "sleep 10 ms and retry" hot loop.
- *   <= 0 other    → return -1 (terminal EOF/error)
+ *   <= 0 other    -> return -1 (terminal EOF/error)
  */
 static int wolfssh_read_adapter(void *ctx, uint8_t *buf, size_t cap)
 {
@@ -88,12 +88,12 @@ static int wolfssh_read_adapter(void *ctx, uint8_t *buf, size_t cap)
     return n;
 }
 
-/* ── PSRAM-backed allocator hooks for ota_stream ─────────────────────────
+/* -- PSRAM-backed allocator hooks for ota_stream -------------------------
  *
  * The OTA image is potentially several MiB so the buffer must live in PSRAM,
  * not internal SRAM.  ota_stream uses alloc + realloc (or just realloc if
  * we pass NULL for alloc and the first realloc(NULL, n) call falls through
- * — but heap_caps_realloc accepts NULL for the old pointer, so we expose
+ * -- but heap_caps_realloc accepts NULL for the old pointer, so we expose
  * realloc-via-NULL as the initial-allocation path and keep alloc_fn NULL... )
  *
  * Cleaner: provide explicit wrappers for both so the caller flow is obvious
@@ -113,15 +113,15 @@ static void  psram_free(void *p)
     heap_caps_free(p);
 }
 
-/* ── OTA session handler ─────────────────────────────────────────────────── */
+/* -- OTA session handler --------------------------------------------------- */
 
 esp_err_t ota_session_handler(WOLFSSH *ssh)
 {
     ESP_LOGI(TAG, "OTA session started");
 
 #ifndef OTA_KEYS_EMBEDDED
-    /* Keys were not embedded at build time — refuse the session gracefully. */
-    ESP_LOGE(TAG, "OTA key material not embedded in firmware — build with ota_keys/sign.pub.pem and ota_keys/aes.key");
+    /* Keys were not embedded at build time -- refuse the session gracefully. */
+    ESP_LOGE(TAG, "OTA key material not embedded in firmware -- build with ota_keys/sign.pub.pem and ota_keys/aes.key");
     ssh_send_reply(ssh, "OTA_ERR: key material not embedded in firmware\n");
     return ESP_ERR_INVALID_STATE;
 #else
@@ -155,11 +155,11 @@ esp_err_t ota_session_handler(WOLFSSH *ssh)
      *
      * The growable-buffer logic lives in lib/ota_stream/ so it is native-
      * unit-tested without wolfSSH or ESP-IDF.  Here we just supply:
-     *   - wolfssh_read_adapter : translate WS_WANT_READ → 0 (transient).
+     *   - wolfssh_read_adapter : translate WS_WANT_READ -> 0 (transient).
      *   - psram_*              : place the buffer in PSRAM, NOT internal SRAM.
      *
      * On S3 with 8 MB PSRAM, MAX_OTA_SIZE (6 MiB) comfortably handles any
-     * realistic firmware image (4 MB partition → max ~4 MB signed image).
+     * realistic firmware image (4 MB partition -> max ~4 MB signed image).
      */
     uint8_t *image_buf = NULL;
     size_t   image_len = 0;
@@ -185,7 +185,7 @@ esp_err_t ota_session_handler(WOLFSSH *ssh)
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "Received %zu bytes — verifying...", image_len);
+    ESP_LOGI(TAG, "Received %zu bytes -- verifying...", image_len);
 
     /* Feed the full image to the verifier */
     ota_verify_err_t e = ota_verify_feed(ctx, image_buf, image_len, image_len);
@@ -209,11 +209,11 @@ esp_err_t ota_session_handler(WOLFSSH *ssh)
         return ESP_FAIL;
     }
 
-    /* Success — confirm to client, then reboot */
+    /* Success -- confirm to client, then reboot */
     ssh_send_reply(ssh, "OTA_OK\n");
     wolfSSH_shutdown(ssh);
 
-    ESP_LOGI(TAG, "OTA image accepted — rebooting in 2 seconds");
+    ESP_LOGI(TAG, "OTA image accepted -- rebooting in 2 seconds");
     vTaskDelay(pdMS_TO_TICKS(2000));
     esp_restart();
 

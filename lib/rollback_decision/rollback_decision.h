@@ -1,5 +1,5 @@
 /*
- * rollback_decision.h — pure rollback decision logic, testable natively.
+ * rollback_decision.h -- pure rollback decision logic, testable natively.
  *
  * Extracted from main.c rollback_timer_cb so it can be unit-tested without
  * an ESP-IDF or FreeRTOS environment.
@@ -31,15 +31,15 @@ typedef enum {
 
 typedef enum {
     ROLLBACK_DECISION_MARK_VALID,  /* call esp_ota_mark_app_valid_cancel_rollback */
-    ROLLBACK_DECISION_NOOP,        /* already valid or factory — nothing to do */
+    ROLLBACK_DECISION_NOOP,        /* already valid or factory -- nothing to do */
 } rollback_decision_t;
 
 /*
- * rollback_decide — pure decision function.
+ * rollback_decide -- pure decision function.
  *
  * Returns ROLLBACK_DECISION_MARK_VALID only when state is
  * ESP_OTA_IMG_PENDING_VERIFY; returns ROLLBACK_DECISION_NOOP otherwise.
- * No side effects — safe to unit test.
+ * No side effects -- safe to unit test.
  */
 rollback_decision_t rollback_decide(esp_ota_img_states_t state);
 

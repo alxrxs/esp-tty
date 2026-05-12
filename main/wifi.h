@@ -1,5 +1,5 @@
 /*
- * wifi.h — Wi-Fi STA init + reconnect for esp-tty
+ * wifi.h -- Wi-Fi STA init + reconnect for esp-tty
  *
  * Initialises the ESP32-S3 in station mode (WPA2/WPA3-Personal).
  * Blocks until the first IP address is obtained or permanent failure
@@ -9,7 +9,7 @@
  * Extension point for WPA2-Enterprise (EAP-TLS):
  *   Search for "EAP-TLS EXTENSION POINT" in wifi.c.
  *   Populate wifi_eap_config_t and call esp_wifi_sta_enterprise_enable()
- *   before esp_wifi_start() — no other changes required.
+ *   before esp_wifi_start() -- no other changes required.
  */
 
 #pragma once

@@ -1,4 +1,4 @@
-# lib/pubkey_auth — OpenSSH public key parsing and SSH auth
+# lib/pubkey_auth -- OpenSSH public key parsing and SSH auth
 
 This module handles every step of public key authentication for the wolfSSH
 server, from reading an OpenSSH `authorized_keys` line at boot to comparing
@@ -8,11 +8,11 @@ a live TCP connection, or a FreeRTOS task.
 
 ## Files
 
-- **pubkey_auth.h** — public interface. Declares `pubkey_parse_b64`,
+- **pubkey_auth.h** -- public interface. Declares `pubkey_parse_b64`,
   `pubkey_compute_hash`, `pubkey_auth_check`, `pubkey_classify_user`, and
   `format_fingerprint`, along with the `PUBKEY_HASH_SIZE` constant (32) and
   the `pubkey_auth_result_t` and `pubkey_user_class_t` enumerations.
-- **pubkey_auth.c** — implementation. Uses wolfCrypt's `Sha256` and
+- **pubkey_auth.c** -- implementation. Uses wolfCrypt's `Sha256` and
   `Base64_Decode` on-device; the native test build supplies OpenSSL 3 EVP
   stubs from `test/stubs/wolfssl/wolfcrypt/sha256.h`.
 
@@ -24,7 +24,7 @@ the first space), records the start and byte-length of the base64 field (up to
 the next space, CR, LF, or NUL), and returns false for any malformed input.
 `pubkey_compute_hash` calls `pubkey_parse_b64`, base64-decodes the blob into a
 512-byte stack buffer (blobs larger than 512 bytes are rejected), then computes
-`SHA-256( uint32be(blob_len) || blob )` — a four-byte big-endian length prefix
+`SHA-256( uint32be(blob_len) || blob )` -- a four-byte big-endian length prefix
 followed by the raw wire blob. This framing ensures that two keys whose blobs
 are byte-for-byte identical except for length produce different digests. The
 resulting 32-byte hash is the canonical identity stored in `s_authkey_hashes[]`
@@ -58,7 +58,7 @@ before any hashing occurs.
 `pubkey_classify_user` maps the SSH username received during handshake to one
 of three values: `PUBKEY_USER_TTY` for the exact string `"tty"`,
 `PUBKEY_USER_OTA` for the exact string `"ota"`, and `PUBKEY_USER_REJECTED` for
-everything else — including NULL, empty strings, case variants such as `"TTY"`,
+everything else -- including NULL, empty strings, case variants such as `"TTY"`,
 and any string with leading or trailing whitespace. The comparison is
 case-sensitive and length-exact; the length is the SSH wire field length, not a
 NUL-terminated strlen, so embedded NUL bytes or claimed lengths that differ from
@@ -85,13 +85,13 @@ The module has no direct dependency on ESP-IDF or FreeRTOS outside the
 `ESP_LOG*` calls, which are stubbed for native builds. Three Unity test suites
 exercise it on the host:
 
-- `test/native/test_pubkey_auth/` — 12 cases covering `pubkey_parse_b64` and
+- `test/native/test_pubkey_auth/` -- 12 cases covering `pubkey_parse_b64` and
   `pubkey_compute_hash`, including a golden-value SHA-256 check, comment-field
   independence, and boundary conditions for the 512-byte internal blob buffer.
-- `test/native/test_auth_check/` — 10 cases covering `pubkey_auth_check`,
+- `test/native/test_auth_check/` -- 10 cases covering `pubkey_auth_check`,
   including accept, single-byte-difference rejection, length-prefix rejection,
   multi-key iteration semantics, and a behavioural witness that the XOR
   accumulator inspects all 32 bytes rather than stopping early.
-- `test/native/test_user_class/` — 23 cases covering `pubkey_classify_user`,
+- `test/native/test_user_class/` -- 23 cases covering `pubkey_classify_user`,
   including exact matches, case variants, whitespace padding, embedded NUL bytes,
   Unicode byte sequences, and very long inputs.

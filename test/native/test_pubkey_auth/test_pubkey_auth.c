@@ -1,5 +1,5 @@
 /*
- * test_pubkey_auth.c — unit tests for pubkey_auth.c (native, no hardware)
+ * test_pubkey_auth.c -- unit tests for pubkey_auth.c (native, no hardware)
  *
  * Tests the OpenSSH pubkey string parsing and SHA-256 hash computation
  * that guards the wolfSSH authentication callback.
@@ -33,7 +33,7 @@ void tearDown(void) {}
     "AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f" \
     " test@host"
 
-/* SHA-256( uint32be(51) || 51-byte-blob ) — computed offline */
+/* SHA-256( uint32be(51) || 51-byte-blob ) -- computed offline */
 static const uint8_t EXPECTED_HASH[32] = {
     0x60, 0xf7, 0x3d, 0x25, 0xf4, 0x6f, 0xe7, 0x0d,
     0x39, 0x24, 0x2c, 0x95, 0x9d, 0x32, 0x92, 0x4b,
@@ -63,7 +63,7 @@ void test_parse_b64_finds_blob(void)
 
 void test_parse_b64_no_comment(void)
 {
-    /* Pubkey without trailing comment — must still work */
+    /* Pubkey without trailing comment -- must still work */
     const char *line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f";
     const char *start = NULL;
     size_t      len   = 0;
@@ -173,7 +173,7 @@ void test_compute_hash_comment_ignored(void)
  */
 /*
  * 513 raw bytes of 0x42, base64-encoded without line breaks (684 chars).
- * Segments are 76 characters each (9 × 76 = 684).
+ * Segments are 76 characters each (9 x 76 = 684).
  * Generated with:
  *   python3 -c "import base64; print(base64.b64encode(b'\\x42'*513).decode())"
  */
@@ -201,7 +201,7 @@ void test_compute_hash_rejects_over_512_byte_blob(void)
 
 /*
  * 512 raw bytes of 0x42, base64-encoded without line breaks (684 chars).
- * Segments are 76 characters each (9 × 76 = 684).
+ * Segments are 76 characters each (9 x 76 = 684).
  * Generated with:
  *   python3 -c "import base64; print(base64.b64encode(b'\\x42'*512).decode())"
  *
@@ -222,7 +222,7 @@ static const char *EXACT_512_PUBKEY =
     "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI="
     " boundary@test";
 
-/* SHA-256( uint32be(512) || 0x42*512 ) — computed offline with Python */
+/* SHA-256( uint32be(512) || 0x42*512 ) -- computed offline with Python */
 static const uint8_t EXPECTED_HASH_512[32] = {
     0x54, 0x40, 0xab, 0x07, 0x15, 0x00, 0x29, 0xdb,
     0x87, 0x55, 0x1f, 0x6d, 0x43, 0x1a, 0x82, 0x21,

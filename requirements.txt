@@ -1,6 +1,6 @@
 # Python dependencies for esp-tty firmware development.
 #
-# Install into a project-local venv (recommended — keeps your system Python
+# Install into a project-local venv (recommended -- keeps your system Python
 # clean and lets the Makefile auto-detect the PIO binary):
 #
 #   python3 -m venv .venv
@@ -13,7 +13,7 @@
 #
 #   pip install -r requirements.txt --break-system-packages
 #
-# Versions: lower-bounds only — newer is fine. The pins below mark the
+# Versions: lower-bounds only -- newer is fine. The pins below mark the
 # minimum API levels actually used.
 
 platformio>=6.1.0      # build orchestrator + ESP-IDF wrapper

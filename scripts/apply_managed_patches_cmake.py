@@ -1,5 +1,5 @@
 """
-apply_managed_patches_cmake.py — invoked by CMakeLists.txt via execute_process
+apply_managed_patches_cmake.py -- invoked by CMakeLists.txt via execute_process
 
 Applies patches from patches/<component>/*.patch to managed_components/<component>/
 after IDF component manager has fetched dependencies (dependency resolution

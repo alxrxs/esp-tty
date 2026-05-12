@@ -1,13 +1,13 @@
 # scripts/gen_eap_certs_asm.py
 #
-# PlatformIO extra_scripts hook — pre-generates the EAP-TLS certificate
+# PlatformIO extra_scripts hook -- pre-generates the EAP-TLS certificate
 # assembly files (.S) that ESP-IDF's EMBED_TXTFILES custom command would
 # normally produce during a ninja build.
 #
 # Root cause of the "run pio run twice" problem:
 #   PlatformIO reads the cmake codemodel, sees ca.pem.S / client.crt.S /
 #   client.key.S marked as isGenerated sources, then tries to assemble them
-#   directly via SCons — but SCons never invokes the cmake custom command
+#   directly via SCons -- but SCons never invokes the cmake custom command
 #   that would generate those .S files (PlatformIO doesn't run ninja; it
 #   replaces the ninja build with its own SCons graph).  The files don't
 #   exist on a clean build, so SCons fails immediately.
@@ -42,7 +42,7 @@ CERT_FILES = [
 ]
 
 # OTA signing keys embedded via EMBED_TXTFILES / EMBED_FILES.
-# sign.pub.pem → TEXT (NUL-appended); aes.key → BINARY (raw bytes).
+# sign.pub.pem -> TEXT (NUL-appended); aes.key -> BINARY (raw bytes).
 OTA_KEY_FILES = [
     ("sign.pub.pem", "sign.pub.pem.S", "TEXT"),
     ("aes.key",      "aes.key.S",      "BINARY"),
@@ -109,5 +109,5 @@ def _generate_cert_asm():
         _generate_asm_for_files(OTA_KEY_FILES, OTA_KEY_DIR)
 
 
-# Run immediately at script-evaluation time — before SCons reads sources.
+# Run immediately at script-evaluation time -- before SCons reads sources.
 _generate_cert_asm()

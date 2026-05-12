@@ -1,4 +1,4 @@
-# patches/ — Managed Component Patches
+# patches/ -- Managed Component Patches
 
 This directory holds `git diff`-style patches for IDF components fetched by the
 ESP-IDF component manager. Each subdirectory is named after the component it
@@ -8,8 +8,8 @@ targets, matching the directory name under `managed_components/` exactly (e.g.,
 ## Why patches live here instead of in managed_components/
 
 The IDF component manager stores fetched components in `managed_components/`,
-which is gitignored. On every clean build — or any `pio run` after the directory
-is deleted — the component manager re-fetches all components from the registry,
+which is gitignored. On every clean build -- or any `pio run` after the directory
+is deleted -- the component manager re-fetches all components from the registry,
 overwriting any local edits. Patches stored here are tracked in version control
 and re-applied automatically at cmake configure time, so the patched state is
 reproduced on every build without manual intervention. A side benefit is that
@@ -46,8 +46,8 @@ See `scripts/README.md` for the full documentation of
 | `wolfssl__wolfssl/` | `0001-rename-thread_local-enum-value-to-avoid-C11-keyword-conflict.patch` | Renames a `thread_local` enum value in wolfcrypt to avoid a C11 keyword conflict under `-std=c11`. |
 | `wolfssl__wolfssh/` | `0001-expose-resize-cb-setters-without-NO_FILESYSTEM.patch` | Moves two terminal-resize callback setters out of a `!NO_FILESYSTEM` guard so they link correctly on the bare-metal ESP32-S3. |
 
-Full context for each patch — including the problem, the fix, upstream status,
-and version compatibility — is in the per-subdirectory `README.md` files.
+Full context for each patch -- including the problem, the fix, upstream status,
+and version compatibility -- is in the per-subdirectory `README.md` files.
 
 ## Adding a new patch
 

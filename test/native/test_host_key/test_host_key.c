@@ -1,10 +1,10 @@
 /*
- * test_host_key.c — Unit tests for format_fingerprint() from pubkey_auth.
+ * test_host_key.c -- Unit tests for format_fingerprint() from pubkey_auth.
  *
  * format_fingerprint() was extracted from host_key.c:log_fingerprint() so it
  * can be tested without wolfCrypt RNG, NVS, or wolfSSH.  The full
  * host_key.c flow (key generation + NVS persistence) is not testable natively
- * — see test/README.md for the known-gaps list.
+ * -- see test/README.md for the known-gaps list.
  */
 
 #include <unity.h>
@@ -19,7 +19,7 @@ void tearDown(void) {}
 
 /* ------------------------------------------------------------------ */
 
-/* All-zeros digest → "00:00:...:00" (32 bytes = 95 chars + NUL) */
+/* All-zeros digest -> "00:00:...:00" (32 bytes = 95 chars + NUL) */
 static void test_all_zeros(void)
 {
     uint8_t digest[PUBKEY_HASH_SIZE] = {0};
@@ -32,7 +32,7 @@ static void test_all_zeros(void)
         out);
 }
 
-/* All-0xff digest → "ff:ff:...:ff" */
+/* All-0xff digest -> "ff:ff:...:ff" */
 static void test_all_ff(void)
 {
     uint8_t digest[PUBKEY_HASH_SIZE];
@@ -50,7 +50,7 @@ static void test_all_ff(void)
 static void test_golden_value(void)
 {
     /* First 8 bytes from the fingerprint seen in QEMU output:
-     * 8b:2e:eb:84:0b:42:82:4e — rest is run-specific, so only check prefix. */
+     * 8b:2e:eb:84:0b:42:82:4e -- rest is run-specific, so only check prefix. */
     uint8_t digest[PUBKEY_HASH_SIZE] = {
         0x8b, 0x2e, 0xeb, 0x84, 0x0b, 0x42, 0x82, 0x4e,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -63,7 +63,7 @@ static void test_golden_value(void)
     TEST_ASSERT_EQUAL_MEMORY("8b:2e:eb:84:0b:42:82:4e", out, 23);
 }
 
-/* No colons on the last byte — string ends cleanly */
+/* No colons on the last byte -- string ends cleanly */
 static void test_no_trailing_colon(void)
 {
     uint8_t digest[PUBKEY_HASH_SIZE] = {0};

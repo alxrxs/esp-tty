@@ -1,5 +1,5 @@
 /*
- * test_ota_verify.c — unit tests for ota_verify.c (native, no hardware)
+ * test_ota_verify.c -- unit tests for ota_verify.c (native, no hardware)
  *
  * Compiled with OTA_VERIFY_NATIVE_TEST which replaces ESP-IDF OTA/flash APIs
  * with no-ops and uses test/stubs/mbedtls/ (OpenSSL-backed) for crypto.
@@ -18,7 +18,7 @@
 void setUp(void)    {}
 void tearDown(void) {}
 
-/* ── Golden test vectors ─────────────────────────────────────────────────── */
+/* -- Golden test vectors --------------------------------------------------- */
 /*
  * Generated with:
  *   python3 -c "
@@ -91,7 +91,7 @@ static const uint8_t TEST_OTA_IMAGE[] = {
 };
 #define TEST_IMAGE_LEN  sizeof(TEST_OTA_IMAGE)
 
-/* ── Helper: feed image in one shot ─────────────────────────────────────── */
+/* -- Helper: feed image in one shot --------------------------------------- */
 
 static ota_verify_err_t run_verify(const uint8_t *img, size_t img_len,
                                     const uint8_t *pub, size_t pub_len,
@@ -123,7 +123,7 @@ static ota_verify_err_t run_verify_chunked(const uint8_t *img, size_t img_len,
     return ota_verify_end(ctx);
 }
 
-/* ── Tests ───────────────────────────────────────────────────────────────── */
+/* -- Tests ----------------------------------------------------------------- */
 
 void test_golden_verifies_ok(void)
 {
@@ -196,16 +196,16 @@ void test_wrong_magic_fails(void)
 
 void test_truncated_header_fails(void)
 {
-    /* Feed only 10 bytes — less than the 44-byte header */
+    /* Feed only 10 bytes -- less than the 44-byte header */
     ota_verify_ctx_t *ctx = ota_verify_begin(
         TEST_PUB_PEM, TEST_PUB_PEM_LEN, TEST_AES_KEY);
     TEST_ASSERT_NOT_NULL(ctx);
 
-    /* Feed partial header — OK so far */
+    /* Feed partial header -- OK so far */
     ota_verify_err_t e = ota_verify_feed(ctx, TEST_OTA_IMAGE, 10, TEST_IMAGE_LEN);
     TEST_ASSERT_EQUAL_INT(OTA_VERIFY_OK, e);
 
-    /* End prematurely — tail buffer has only 10 bytes, not 64 sig bytes */
+    /* End prematurely -- tail buffer has only 10 bytes, not 64 sig bytes */
     e = ota_verify_end(ctx);
     TEST_ASSERT_EQUAL_INT(OTA_VERIFY_ERR_TRUNCATED, e);
 }
@@ -224,7 +224,7 @@ void test_image_too_short_rejected_on_feed(void)
 
 void test_wrong_aes_key_fails_tag(void)
 {
-    /* Wrong AES key — GCM tag will mismatch, but ECDSA also changes because
+    /* Wrong AES key -- GCM tag will mismatch, but ECDSA also changes because
        ciphertext bytes differ... actually ciphertext same, tag in header same,
        ECDSA covers (header||ciphertext) which is identical, so ECDSA passes,
        then GCM tag check fails with wrong key */
@@ -236,7 +236,7 @@ void test_wrong_aes_key_fails_tag(void)
         TEST_OTA_IMAGE, TEST_IMAGE_LEN,
         TEST_PUB_PEM, TEST_PUB_PEM_LEN,
         wrong_key);
-    /* GCM will produce wrong tag → OTA_VERIFY_ERR_TAG */
+    /* GCM will produce wrong tag -> OTA_VERIFY_ERR_TAG */
     TEST_ASSERT_EQUAL_INT(OTA_VERIFY_ERR_TAG, e);
 }
 
@@ -256,14 +256,14 @@ void test_strerror_ok(void)
                              ota_verify_strerror(OTA_VERIFY_ERR_LENGTH_MISMATCH));
 }
 
-/* ── New edge-case tests (Task 5) ────────────────────────────────────────── */
+/* -- New edge-case tests (Task 5) ------------------------------------------ */
 
 void test_wrong_version_fails(void)
 {
-    /* Flip the first byte of the version field (offset 8) so version ≠ 1 */
+    /* Flip the first byte of the version field (offset 8) so version != 1 */
     uint8_t tampered[TEST_IMAGE_LEN];
     memcpy(tampered, TEST_OTA_IMAGE, TEST_IMAGE_LEN);
-    tampered[8] ^= 0xFF;  /* version byte 0: 0x01 → 0xFE — version field invalid */
+    tampered[8] ^= 0xFF;  /* version byte 0: 0x01 -> 0xFE -- version field invalid */
 
     ota_verify_err_t e = run_verify(
         tampered, TEST_IMAGE_LEN,
@@ -306,7 +306,7 @@ void test_abort_before_header_done(void)
         TEST_PUB_PEM, TEST_PUB_PEM_LEN, TEST_AES_KEY);
     TEST_ASSERT_NOT_NULL(ctx);
 
-    /* abort before any feed — header_done is false, so no flash handle to close */
+    /* abort before any feed -- header_done is false, so no flash handle to close */
     ota_verify_abort(ctx);
     /* If we get here without crash, the test passes */
     TEST_PASS();
@@ -338,7 +338,7 @@ void test_null_aes_key_in_begin(void)
     TEST_ASSERT_NULL(ctx);
 }
 
-/* ── Section D new tests ─────────────────────────────────────────────────── */
+/* -- Section D new tests --------------------------------------------------- */
 
 /*
  * Test 1: empty image (plaintext_len == 0) is rejected.
@@ -398,7 +398,7 @@ void test_strerror_empty_image(void)
  * must still verify correctly (not mis-identify the OID byte as the EC point).
  *
  * For P-256, the OID bytes include 0x04 at position 7 of the algorithm params
- * OID (2a 86 48 ce 3d 03 01 07) — "07" is not 0x04, but we test that the
+ * OID (2a 86 48 ce 3d 03 01 07) -- "07" is not 0x04, but we test that the
  * fixed-offset parser is immune to any such issue by verifying the golden test
  * vector still passes (it has the standard DER layout).
  *
@@ -415,14 +415,14 @@ void test_pem_wrong_length_rejected(void)
      * trim one character to make the decoded DER 1 byte shorter. */
 
     /* Copy the PEM, find the base64 region, shorten it by 4 chars (one group = 3 bytes).
-     * That makes it 88 bytes → der_len != 91 → pem_extract_ec_point returns -1
-     * → ota_verify_begin returns NULL. */
+     * That makes it 88 bytes -> der_len != 91 -> pem_extract_ec_point returns -1
+     * -> ota_verify_begin returns NULL. */
 
     /* For simplicity, just verify that a clearly wrong PEM (too short) causes
      * ota_verify_begin to fail cleanly (return NULL). */
     const char *bad_pem =
         "-----BEGIN PUBLIC KEY-----\n"
-        "MFkw\n"   /* only 3 base64 chars — decodes to 2 bytes, far less than 91 */
+        "MFkw\n"   /* only 3 base64 chars -- decodes to 2 bytes, far less than 91 */
         "-----END PUBLIC KEY-----\n";
 
     ota_verify_ctx_t *ctx = ota_verify_begin(
@@ -430,7 +430,7 @@ void test_pem_wrong_length_rejected(void)
     TEST_ASSERT_NULL(ctx);  /* pem_extract_ec_point must reject der_len != 91 */
 }
 
-/* ── Main ────────────────────────────────────────────────────────────────── */
+/* -- Main ------------------------------------------------------------------ */
 
 int main(void)
 {

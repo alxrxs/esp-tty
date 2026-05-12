@@ -1,4 +1,4 @@
-# boards/ — Project-local PlatformIO Board Manifests
+# boards/ -- Project-local PlatformIO Board Manifests
 
 ```
 boards/

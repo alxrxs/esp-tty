@@ -1,5 +1,5 @@
 /*
- * roundtrip_verify.c — standalone host-side OTA verifier for the signer roundtrip test
+ * roundtrip_verify.c -- standalone host-side OTA verifier for the signer roundtrip test
  *
  * Usage:
  *   roundtrip_verify <signed.bin> <pub.pem> <aes.key> [--tamper-byte <offset>]
@@ -8,9 +8,9 @@
  * the given files, then calls ota_verify_begin/feed/end.
  *
  * Exit codes:
- *   0 — OTA_VERIFY_OK
- *   1 — verification failed (prints error)
- *   2 — usage or I/O error
+ *   0 -- OTA_VERIFY_OK
+ *   1 -- verification failed (prints error)
+ *   2 -- usage or I/O error
  *
  * Compiled with -DOTA_VERIFY_NATIVE_TEST so the mbedtls/OpenSSL stubs are used.
  */
@@ -126,7 +126,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    printf("[roundtrip_verify] OTA_VERIFY_OK — image verified successfully\n");
+    printf("[roundtrip_verify] OTA_VERIFY_OK -- image verified successfully\n");
     free(img); free(pem); free(aes_raw);
     return 0;
 }

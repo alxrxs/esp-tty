@@ -1,7 +1,7 @@
-# sdkconfig.defaults — intentional overrides for esp-tty (ESP32-S3-N16R8)
+# sdkconfig.defaults -- intentional overrides for esp-tty (ESP32-S3-N16R8)
 # Committed; the generated sdkconfig.<env> is gitignored.
 
-# ── PSRAM (8 MB Octal) ────────────────────────────────────────────────────
+# -- PSRAM (8 MB Octal) ----------------------------------------------------
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y
@@ -9,22 +9,22 @@ CONFIG_SPIRAM_SPEED_80M=y
 # in many ESP-IDF components. Allocate PSRAM explicitly with heap_caps_malloc instead.
 CONFIG_SPIRAM_FETCH_INSTRUCTIONS=n
 CONFIG_SPIRAM_RODATA=n
-# Do NOT set CONFIG_SPIRAM_USE_MALLOC — we allocate PSRAM explicitly via
+# Do NOT set CONFIG_SPIRAM_USE_MALLOC -- we allocate PSRAM explicitly via
 # xStreamBufferCreateWithCaps / heap_caps_malloc to avoid surprising spills.
 
-# ── Flash (16 MB, QIO) ────────────────────────────────────────────────────
+# -- Flash (16 MB, QIO) ----------------------------------------------------
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
 
-# ── TinyUSB CDC ACM ───────────────────────────────────────────────────────
+# -- TinyUSB CDC ACM -------------------------------------------------------
 CONFIG_TINYUSB_CDC_ENABLED=y
 CONFIG_TINYUSB_CDC_COUNT=1
 CONFIG_TINYUSB_CDC_RX_BUFSIZE=512
 CONFIG_TINYUSB_CDC_TX_BUFSIZE=512
 CONFIG_TINYUSB_CDC_EP_BUFSIZE=512
 
-# USB descriptor strings — "NanoConsole" is what Linux shows in lsusb
+# USB descriptor strings -- "NanoConsole" is what Linux shows in lsusb
 CONFIG_TINYUSB_DESC_USE_ESPRESSIF_VID=y
 CONFIG_TINYUSB_DESC_USE_DEFAULT_PID=y
 CONFIG_TINYUSB_DESC_MANUFACTURER_STRING="Espressif Systems"
@@ -33,10 +33,10 @@ CONFIG_TINYUSB_DESC_SERIAL_STRING="NC-001"
 CONFIG_TINYUSB_DESC_CDC_STRING="NanoConsole CDC"
 CONFIG_TINYUSB_DEBUG_LEVEL=0
 
-# Console must stay on UART — incompatible with TinyUSB CDC
+# Console must stay on UART -- incompatible with TinyUSB CDC
 CONFIG_ESP_CONSOLE_UART_DEFAULT=y
 
-# ── NVS ───────────────────────────────────────────────────────────────────
+# -- NVS -------------------------------------------------------------------
 # AES-XTS-256 NVS encryption is ACTIVE at runtime via nvs_flash_secure_init_
 # partition() in main.c (the v1 NVS security API).  Keys are generated at
 # first boot and stored in the nvs_keys partition.  No eFuses are burned.
@@ -45,14 +45,14 @@ CONFIG_ESP_CONSOLE_UART_DEFAULT=y
 # SECURE_FLASH_ENC_ENABLED || SOC_HMAC_SUPPORTED; on ESP32-S3 HMAC is
 # supported (SOC_HMAC_SUPPORTED=y), so the option is visible, but its default
 # key-protection scheme (NVS_SEC_KEY_PROTECT_USING_HMAC) requires burning an
-# HMAC key into eFuse — which we don't do.  NVS_SEC_KEY_PROTECT_NONE would
+# HMAC key into eFuse -- which we don't do.  NVS_SEC_KEY_PROTECT_NONE would
 # be the right Kconfig choice, but the Kconfig flag only controls the
 # nvs_flash_init() code-path (the "v2 scheme provider" API).  Our runtime
 # code uses the lower-level v1 API directly and does not call nvs_flash_init(),
 # so CONFIG_NVS_ENCRYPTION does not affect us either way.
 #
 # The generated sdkconfig.{esp32s3,wokwi} correctly show
-# "# CONFIG_NVS_ENCRYPTION is not set" — that is consistent with this file.
+# "# CONFIG_NVS_ENCRYPTION is not set" -- that is consistent with this file.
 #
 # To upgrade later (would still require the custom runtime init):
 #   Option A (HMAC, one eFuse key block):
@@ -60,45 +60,45 @@ CONFIG_ESP_CONSOLE_UART_DEFAULT=y
 #   Option B (full flash encryption, burns eFuses):
 #     enable CONFIG_FLASH_ENCRYPTION_ENABLED
 
-# ── C library ────────────────────────────────────────────────────────────
+# -- C library ------------------------------------------------------------
 # wolfSSL/wolfSSH were built against newlib. ESP-IDF 6.0 defaults to picolibc
 # but its compatibility shims don't expose newlib's _mbstate_t and friends.
 # Force newlib so the toolchain stdlib.h works unmodified.
 CONFIG_LIBC_NEWLIB=y
 
-# ── Logging ───────────────────────────────────────────────────────────────
+# -- Logging ---------------------------------------------------------------
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 
-# ── CPU ───────────────────────────────────────────────────────────────────
+# -- CPU -------------------------------------------------------------------
 # ESP32-S3 supports 240 MHz; the IDF default is 160 MHz.  Bumping to 240 is a
 # free 1.5x on every non-HW-accelerated path (wolfSSH framing, pump loops,
-# memcpy, etc.) at the cost of a small power increase — negligible for a
+# memcpy, etc.) at the cost of a small power increase -- negligible for a
 # USB-powered devkit.
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240
 
-# ── Compiler optimization ─────────────────────────────────────────────────
+# -- Compiler optimization -------------------------------------------------
 # Production: -O2 ("performance").  IDF's default is -Og ("debug"), which
 # is 20-40% slower on integer-heavy paths and often produces *larger*
 # binaries because the linker can't dead-strip as aggressively.  We keep
 # full assertions (level 2) since the device is unattended.
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 
-# ── FreeRTOS ──────────────────────────────────────────────────────────────
+# -- FreeRTOS --------------------------------------------------------------
 # Tick rate: 1000 Hz gives 1ms resolution for pdMS_TO_TICKS in pump loops.
 CONFIG_FREERTOS_HZ=1000
 
-# ── Networking (LwIP) ─────────────────────────────────────────────────────
+# -- Networking (LwIP) -----------------------------------------------------
 CONFIG_LWIP_SO_REUSE=y
 CONFIG_LWIP_SO_REUSE_RXTOALL=y
 
-# IPv6 — enabled by default; wifi.c selects the addressing mode at runtime
+# IPv6 -- enabled by default; wifi.c selects the addressing mode at runtime
 # via the IPV6_MODE knob in config.h (default: SLAAC).
 #
-# CONFIG_LWIP_IPV6=y             — enable the IPv6 stack (default y in IDF)
-# CONFIG_LWIP_IPV6_AUTOCONFIG=y  — SLAAC: generate a global address from
+# CONFIG_LWIP_IPV6=y             -- enable the IPv6 stack (default y in IDF)
+# CONFIG_LWIP_IPV6_AUTOCONFIG=y  -- SLAAC: generate a global address from
 #                                  the router's RA prefix (RFC 4862)
-# CONFIG_LWIP_IPV6_DHCP6=y      — stateless DHCPv6 for options (DNS, NTP)
+# CONFIG_LWIP_IPV6_DHCP6=y      -- stateless DHCPv6 for options (DNS, NTP)
 #                                  via RFC 3736; requires AUTOCONFIG=y.
 #                                  The dhcpv6 client is started by wifi.c
 #                                  when IPV6_MODE_SLAAC_STATELESS_DHCPV6 or
@@ -110,8 +110,8 @@ CONFIG_LWIP_IPV6=y
 CONFIG_LWIP_IPV6_AUTOCONFIG=y
 CONFIG_LWIP_IPV6_DHCP6=y
 
-# ── WPA2/WPA3-Enterprise (EAP-TLS) ────────────────────────────────────────
-# CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT defaults to y — no override needed.
+# -- WPA2/WPA3-Enterprise (EAP-TLS) ----------------------------------------
+# CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT defaults to y -- no override needed.
 # Uncomment below only if you need non-default enterprise options.
 #
 # Use MbedTLS for the TLS layer inside EAP (default y; disable for EAP-FAST):
@@ -123,17 +123,17 @@ CONFIG_LWIP_IPV6_DHCP6=y
 # Enable WPA3-Enterprise 192-bit Suite-B (needs SOC_WIFI_GCMP_SUPPORT):
 # CONFIG_ESP_WIFI_SUITE_B_192=n
 
-# ── mbedTLS hardware acceleration (ESP32-S3) ──────────────────────────────
+# -- mbedTLS hardware acceleration (ESP32-S3) ------------------------------
 # AES: HW AES engine on S3. Used for OTA decrypt (AES-256-GCM via mbedtls_gcm_*).
 CONFIG_MBEDTLS_HARDWARE_AES=y
 # SHA: HW SHA engine on S3. Used for OTA signature hash (SHA-256).
 CONFIG_MBEDTLS_HARDWARE_SHA=y
 # MPI: HW RSA accelerator on S3 (big-number multiply). Speeds up ECDSA verify.
 CONFIG_MBEDTLS_HARDWARE_MPI=y
-# NOTE: Do NOT enable MBEDTLS_HARDWARE_GCM — S3 has no dedicated GCM engine.
-# NOTE: Do NOT enable MBEDTLS_HARDWARE_ECC — not present on S3.
+# NOTE: Do NOT enable MBEDTLS_HARDWARE_GCM -- S3 has no dedicated GCM engine.
+# NOTE: Do NOT enable MBEDTLS_HARDWARE_ECC -- not present on S3.
 
-# ── OTA / bootloader ──────────────────────────────────────────────────────
+# -- OTA / bootloader ------------------------------------------------------
 # Rollback enable: new OTA image boots in PENDING_VERIFY state.
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 # Bootloader HW watchdog: fires if firmware never marks itself valid.

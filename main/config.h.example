@@ -1,5 +1,5 @@
 /*
- * config.h.example — compile-time configuration template for esp-tty
+ * config.h.example -- compile-time configuration template for esp-tty
  *
  * Copy this file to config.h, fill in your values, then build.
  * config.h is gitignored and must never be committed.
@@ -8,14 +8,14 @@
 #pragma once
 
 /* --------------------------------------------------------------------------
- * Wi-Fi — choose ONE of the two blocks below.
+ * Wi-Fi -- choose ONE of the two blocks below.
  * -------------------------------------------------------------------------- */
 
-/* ── Option A: WPA2/WPA3-Personal (PSK) ─────────────────────────────────── */
+/* -- Option A: WPA2/WPA3-Personal (PSK) ----------------------------------- */
 #define WIFI_SSID   "your-ssid-here"
 #define WIFI_PASS   "your-password-here"
 
-/* ── Option B: WPA2/WPA3-Enterprise (EAP-TLS) ───────────────────────────── *
+/* -- Option B: WPA2/WPA3-Enterprise (EAP-TLS) ----------------------------- *
  * Uncomment WIFI_USE_ENTERPRISE and fill in the fields below.
  * Then place your real certificates in main/certs/ (see main/certs/README.md).
  * The password field (WIFI_PASS) is ignored when enterprise mode is active.
@@ -35,7 +35,7 @@
 
 #define EAP_DISABLE_TIME_CHECK  1
 
- * ─────────────────────────────────────────────────────────────────────────── */
+ * --------------------------------------------------------------------------- */
 
 /* --------------------------------------------------------------------------
  * SSH server
@@ -56,7 +56,7 @@
     "ssh-ed25519 AAAA...key1 user@host1", \
     "ssh-ed25519 AAAA...key2 user@host2"
 
-/* OTA update authorised public key — used when the SSH username is "ota".
+/* OTA update authorised public key -- used when the SSH username is "ota".
  * Can be the same as one of the AUTHORIZED_PUBKEYS or a separate deployment key.
  * This one is still a single string (not a list).
  * Only ED25519 keys are supported.
@@ -70,16 +70,16 @@
  *
  * All of these values are passed to TinyUSB at runtime (via
  * tinyusb_config_t.descriptor.{device,string}), overriding the Kconfig
- * defaults in sdkconfig.defaults. Edit them here, reflash, done — no
+ * defaults in sdkconfig.defaults. Edit them here, reflash, done -- no
  * `make menuconfig` needed.
  *
- * IMPORTANT — about VID / PID:
+ * IMPORTANT -- about VID / PID:
  *   The defaults are Espressif's VID (0x303a) and the "default TinyUSB CDC"
  *   PID (0x4001). Espressif allows reuse of these on ESP32-S3 chips for
  *   development. They are NOT yours to ship commercially.
  *
  *   For a published open-source project, request a free PID under VID 0x1209
- *   from https://pid.codes — that's the open-hardware-friendly registry. For
+ *   from https://pid.codes -- that's the open-hardware-friendly registry. For
  *   a commercial product, USB-IF assigns vendor IDs for $5,000.
  *
  *   Picking a random VID/PID combo is a USB spec violation and can collide
@@ -102,13 +102,13 @@
  *
  * Sent as the DHCP DISCOVER hostname, so the device shows up by name in the
  * router's lease table (and is reachable as <hostname>.<local-domain> if the
- * router forwards local DNS).  Keep it short, lowercase, no dots — RFC 952
+ * router forwards local DNS).  Keep it short, lowercase, no dots -- RFC 952
  * applies (letters, digits, hyphens; must start with a letter).
  * -------------------------------------------------------------------------- */
 #define DEVICE_HOSTNAME          "esp-tty"
 
 /* --------------------------------------------------------------------------
- * Network addressing — IPv4
+ * Network addressing -- IPv4
  *
  * Default (USE_STATIC_IPV4 not defined): DHCPv4.  The DHCP watchdog keeps
  * the client retrying indefinitely; no action required.
@@ -132,7 +132,7 @@
  * -------------------------------------------------------------------------- */
 
 /* --------------------------------------------------------------------------
- * Network addressing — IPv6
+ * Network addressing -- IPv6
  *
  * sdkconfig.defaults enables CONFIG_LWIP_IPV6=y, CONFIG_LWIP_IPV6_AUTOCONFIG=y,
  * and CONFIG_LWIP_IPV6_DHCP6=y by default.  The mode below selects runtime
@@ -172,19 +172,19 @@
  *
  * To change the mode, uncomment the desired block below.
  *
- * ── Option 1: SLAAC (default — no definition needed, shown for clarity) ──
+ * -- Option 1: SLAAC (default -- no definition needed, shown for clarity) --
  * #define IPV6_MODE  IPV6_MODE_SLAAC
  *
- * ── Option 2: Disable IPv6 entirely ──────────────────────────────────────
+ * -- Option 2: Disable IPv6 entirely --------------------------------------
  * #define IPV6_MODE  IPV6_MODE_DISABLED
  *
- * ── Option 3: SLAAC + stateless DHCPv6 for DNS ───────────────────────────
+ * -- Option 3: SLAAC + stateless DHCPv6 for DNS ---------------------------
  * #define IPV6_MODE  IPV6_MODE_SLAAC_STATELESS_DHCPV6
  *
- * ── Option 4: Stateful DHCPv6 ────────────────────────────────────────────
+ * -- Option 4: Stateful DHCPv6 --------------------------------------------
  * #define IPV6_MODE  IPV6_MODE_STATEFUL_DHCPV6
  *
- * ── Option 5: Static IPv6 ────────────────────────────────────────────────
+ * -- Option 5: Static IPv6 ------------------------------------------------
 
 #define IPV6_MODE               IPV6_MODE_STATIC
 #define STATIC_IPV6_ADDRESS     "2001:db8::dead:beef"
@@ -197,7 +197,7 @@
 
 /* Optional: override the factory-burned WiFi station MAC address.
  *
- * Each ESP32-S3 has a unique MAC burned at the factory — by default the
+ * Each ESP32-S3 has a unique MAC burned at the factory -- by default the
  * firmware uses that.  The active MAC is logged at boot ("WiFi MAC: ...")
  * so you can copy it into a router's static DHCP reservation.
  *
@@ -207,7 +207,7 @@
  *   - clone a known identity for testing
  *   - rotate MACs across deployments for privacy
  *
- * CONSTRAINT — the MAC MUST be locally administered and unicast.
+ * CONSTRAINT -- the MAC MUST be locally administered and unicast.
  *
  * In the first byte:
  *   bit 1 (the "locally administered" bit) MUST be 1
@@ -234,9 +234,9 @@
  *     F2 F6 FA FE
  *
  * INVALID examples that look reasonable but will be REJECTED at boot:
- *   00:11:22:…  (globally-administered range — assigned to an OUI)
- *   01:…        (multicast bit set)
- *   FF:FF:…     (broadcast)
+ *   00:11:22:...  (globally-administered range -- assigned to an OUI)
+ *   01:...        (multicast bit set)
+ *   FF:FF:...     (broadcast)
  *
  * ESP-IDF refuses any first byte outside the table above because this
  * project never burns a custom MAC into eFuse.  Leave the line below
@@ -246,7 +246,7 @@
 /* #define WIFI_MAC_BYTES  { 0x02, 0x12, 0x34, 0x56, 0x78, 0x9A } */
 
 /* --------------------------------------------------------------------------
- * Operational tuning — leave the defaults unless you have a reason
+ * Operational tuning -- leave the defaults unless you have a reason
  * -------------------------------------------------------------------------- */
 
 /* Max consecutive Wi-Fi reconnect attempts before wifi_init_sta() returns
@@ -268,7 +268,7 @@
  * client, and re-arms.  Loops forever until DHCP succeeds.
  *
  * Protects against the case where the AP is up but the DHCP server is
- * stuck — lwIP gives up DHCP DISCOVER after a few retries on its own,
+ * stuck -- lwIP gives up DHCP DISCOVER after a few retries on its own,
  * leaving the device IP-less indefinitely.  Set to 0 to disable. */
 #define DHCP_RETRY_TIMEOUT_SEC      30
 /* #define DHCP_RETRY_TIMEOUT_SEC      0   // disable watchdog */
@@ -281,7 +281,7 @@
  * authentication within this window is dropped, freeing the session slot. */
 #define SSH_HANDSHAKE_TIMEOUT_SEC   30
 
-/* TCP keepalive on the SSH socket (RFC 1122 §4.2.3.6).
+/* TCP keepalive on the SSH socket (RFC 1122 sec 4.2.3.6).
  *   IDLE  = seconds of inactivity before the first probe
  *   INTVL = seconds between subsequent probes
  *   COUNT = unanswered probes before the connection is dropped
@@ -297,7 +297,7 @@
 #define OTA_ROLLBACK_DELAY_MS       30000
 
 /* --------------------------------------------------------------------------
- * Memory sizing (PSRAM-backed) — increase only if you have a concrete need
+ * Memory sizing (PSRAM-backed) -- increase only if you have a concrete need
  * -------------------------------------------------------------------------- */
 
 /* Per-direction ring buffer between SSH and USB CDC.  16 KB handles

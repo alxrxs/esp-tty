@@ -1,5 +1,5 @@
 /*
- * ring.h — thin StreamBuffer wrapper with a host-testable interface
+ * ring.h -- thin StreamBuffer wrapper with a host-testable interface
  *
  * On ESP32 targets, backed by FreeRTOS xStreamBufferCreateWithCaps (PSRAM).
  * On native (test) targets, backed by pthread mutex + condvar.
@@ -61,7 +61,7 @@ void ring_reopen(ring_t *r);
  * Writes as many bytes as currently fit without blocking.
  * Returns the number of bytes successfully written (0 .. len).
  * Returns -1 if the ring is closed.
- * Never blocks — safe to call from interrupt-adjacent contexts (e.g. TinyUSB
+ * Never blocks -- safe to call from interrupt-adjacent contexts (e.g. TinyUSB
  * CDC RX callback).
  */
 int ring_try_send(ring_t *r, const uint8_t *buf, size_t len);

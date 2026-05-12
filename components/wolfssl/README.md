@@ -7,7 +7,7 @@ itself is fetched by the IDF Component Manager and lands in
 `managed_components/wolfssl__wolfssh/`. wolfSSH declares a `REQUIRES wolfssl`
 dependency, but the auto-generated component wrapper that the IDF Component
 Manager places alongside the downloaded source never satisfies that dependency
-in a PlatformIO + ESP-IDF build — the `FIND_WOLFSSL_DIRECTORY` logic in the
+in a PlatformIO + ESP-IDF build -- the `FIND_WOLFSSL_DIRECTORY` logic in the
 upstream CMakeLists.txt fails to locate the sibling managed component at
 configure time. This bridge component fixes that: it registers itself as the
 `wolfssl` IDF component, compiles wolfSSL's sources directly, and exposes the
@@ -22,7 +22,7 @@ that are either disabled by `user_settings.h` (OpenSSL-compat shims such as
 `bio.c`, `conf.c`, `pk.c`, the `x509*` and `ssl_*` split files), unneeded
 algorithm back-ends (all `sp_sm2_*` variants, `ext_kyber.c`, `evp.c`), and
 one Espressif utility (`esp_sdk_mem_lib.c`) that uses `thread_local` as an
-enum identifier — a C11 keyword conflict that breaks the xtensa-esp-elf-gcc
+enum identifier -- a C11 keyword conflict that breaks the xtensa-esp-elf-gcc
 toolchain. Xtensa `.S` assembly files are removed with a second glob pass
 because they are not valid for the toolchain invocation used by PlatformIO.
 The `idf_component_register` call lists wolfSSL's own include trees as
@@ -43,7 +43,7 @@ activate correctly. wolfSSH terminal and shell support is enabled via
 `WOLFSSH_TERM` and `WOLFSSH_SHELL`, and `DEFAULT_WINDOW_SZ` is reduced to
 2000 bytes to stay within the ESP32-S3's DRAM budget. On the cryptography
 side only ED25519 is compiled as a host-key and public-key authentication
-algorithm — RSA is disabled (`NO_RSA`, `WOLFSSH_NO_RSA`) to save
+algorithm -- RSA is disabled (`NO_RSA`, `WOLFSSH_NO_RSA`) to save
 approximately 40 KB of flash. `HAVE_ECC`, `HAVE_CURVE25519`, and
 `HAVE_ED25519` are defined together with `WOLFSSL_ED25519_STREAMING_VERIFY`
 (required by wolfSSH's verify path) and `WOLFSSL_SHA512` (required by the
@@ -57,7 +57,7 @@ be minimised.
 The negotiated cipher suite is intentionally narrow. `HAVE_AESGCM` is the
 only symmetric cipher enabled; AES-CBC is excluded (`WOLFSSH_NO_AES_CBC`) to
 remove the padding-oracle attack surface, and AES-192 is stripped entirely at
-the wolfSSL level via `NO_AES_192` — both because the ESP32-S3 AES peripheral
+the wolfSSL level via `NO_AES_192` -- both because the ESP32-S3 AES peripheral
 only supports 128-bit and 256-bit keys (silicon limitation, wolfSSL issue
 #6375), and to ensure that `aes192-gcm@openssh.com` cannot be selected even
 if a future client attempts to negotiate it. SHA-1 MAC algorithms

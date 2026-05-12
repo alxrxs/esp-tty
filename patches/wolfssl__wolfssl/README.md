@@ -6,7 +6,7 @@
 `managed_components/wolfssl__wolfssl/wolfcrypt/src/port/Espressif/esp_sdk_mem_lib.c`
 
 The file defines a `sdk_memory_segment` enum that includes a value named
-`thread_local`. C11 reserves `thread_local` as a keyword — it is a synonym for
+`thread_local`. C11 reserves `thread_local` as a keyword -- it is a synonym for
 `_Thread_local` introduced by the C11 standard. ESP-IDF compiles all C sources
 with `-std=c11`, so GCC rejects the enum declaration with a syntax error before
 any object code is produced. The patch renames the enum value to

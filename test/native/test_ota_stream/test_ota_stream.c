@@ -1,12 +1,12 @@
 /*
- * test_ota_stream.c — unit tests for lib/ota_stream/ (native, no hardware)
+ * test_ota_stream.c -- unit tests for lib/ota_stream/ (native, no hardware)
  *
  * Exercises the read-all accumulator extracted from main/ota_session.c:
  *   - geometric growth across many reads
  *   - transient (0-return) retry behaviour
- *   - OOM at the 5th allocator call → ERR_OOM with no leak / no buffer
- *   - empty stream (immediate <0 return) → ERR_EMPTY
- *   - oversize stream (exceeds max_bytes) → ERR_TOOBIG
+ *   - OOM at the 5th allocator call -> ERR_OOM with no leak / no buffer
+ *   - empty stream (immediate <0 return) -> ERR_EMPTY
+ *   - oversize stream (exceeds max_bytes) -> ERR_TOOBIG
  *
  * The mocks below use small counter-based ctx structs in the spirit of the
  * existing native suite (see test_ota_verify, test_bridge).
@@ -24,10 +24,10 @@
 void setUp(void)    {}
 void tearDown(void) {}
 
-/* ── Mock read contexts ──────────────────────────────────────────────────── */
+/* -- Mock read contexts ---------------------------------------------------- */
 
 /*
- * fixed_read_ctx — returns `chunk_size` bytes on each call (filled with a
+ * fixed_read_ctx -- returns `chunk_size` bytes on each call (filled with a
  * cycling pattern derived from a running byte counter so test 1 can verify
  * payload integrity), until `total_calls` is reached.  After that, returns
  * -1 (terminal EOF/error).
@@ -50,7 +50,7 @@ static int fixed_read(void *vctx, uint8_t *buf, size_t cap)
 }
 
 /*
- * scripted_read_ctx — returns a hard-coded sequence of (return-value, fill)
+ * scripted_read_ctx -- returns a hard-coded sequence of (return-value, fill)
  * pairs.  Used by the transient-zero test.
  */
 typedef struct {
@@ -71,9 +71,9 @@ static int scripted_read(void *vctx, uint8_t *buf, size_t cap)
     return (int)n;
 }
 
-/* ── OOM-injecting allocator hooks ───────────────────────────────────────── */
+/* -- OOM-injecting allocator hooks ----------------------------------------- */
 /*
- * counted_alloc_ctx — counts every alloc + realloc call against a single
+ * counted_alloc_ctx -- counts every alloc + realloc call against a single
  * counter and returns NULL once `fail_at` is reached.  free_count tracks
  * how many times free was invoked, so tests can assert the partial buffer
  * was released on the error path.
@@ -121,7 +121,7 @@ static void mock_free(void *p)
     free(p);
 }
 
-/* ── Tests ───────────────────────────────────────────────────────────────── */
+/* -- Tests ----------------------------------------------------------------- */
 
 /* Happy path: 10 chunks of 4096 bytes each, then EOF.  Verify payload bytes
  * round-trip exactly (no off-by-one in geometric realloc copies). */
@@ -159,7 +159,7 @@ void test_ota_stream_grows_buffer(void)
 }
 
 /* Transient 0-returns must not be treated as EOF when within the retry
- * budget.  Sequence: 0,0,0,100,EOF → out_len == 100. */
+ * budget.  Sequence: 0,0,0,100,EOF -> out_len == 100. */
 void test_ota_stream_handles_transient_zero_returns(void)
 {
     const int script[] = { 0, 0, 0, 100, -1 };
@@ -199,8 +199,8 @@ void test_ota_stream_oom_partial(void)
         .next_byte   = 0,
     };
 
-    uint8_t *buf = (uint8_t *)0xDEAD;  /* sentinel — must be cleared */
-    size_t   len = 42;                  /* sentinel — must be zeroed  */
+    uint8_t *buf = (uint8_t *)0xDEAD;  /* sentinel -- must be cleared */
+    size_t   len = 42;                  /* sentinel -- must be zeroed  */
     ota_stream_result_t r = ota_stream_read_all(
         fixed_read, &ctx,
         /* max_bytes        */ 1024 * 1024,
@@ -217,7 +217,7 @@ void test_ota_stream_oom_partial(void)
     TEST_ASSERT_EQUAL_UINT(1u, g_alloc.free_calls);
 }
 
-/* Empty input: read_fn returns -1 immediately → ERR_EMPTY (we treat any
+/* Empty input: read_fn returns -1 immediately -> ERR_EMPTY (we treat any
  * "no bytes ever stored" terminal as EMPTY; ERR_EOF is reserved for the
  * future and currently unused).  *out_buf NULL, *out_len 0. */
 void test_ota_stream_empty_input(void)
@@ -244,7 +244,7 @@ void test_ota_stream_empty_input(void)
     TEST_ASSERT_EQUAL_size_t(0u, len);
 }
 
-/* max_bytes cap: first read of 4096 bytes against a 1024-byte cap →
+/* max_bytes cap: first read of 4096 bytes against a 1024-byte cap ->
  * ERR_TOOBIG, no partial buffer. */
 void test_ota_stream_exceeds_max_bytes(void)
 {
@@ -304,7 +304,7 @@ void test_ota_stream_single_small_read(void)
     free(buf);
 }
 
-/* Bonus: zero_retries exhausted with no progress → ERR_EMPTY. */
+/* Bonus: zero_retries exhausted with no progress -> ERR_EMPTY. */
 void test_ota_stream_zero_retries_exhausted(void)
 {
     const int script[] = { 0, 0, 0 };  /* will be followed by implicit -1 */
@@ -329,7 +329,7 @@ void test_ota_stream_zero_retries_exhausted(void)
     TEST_ASSERT_EQUAL_size_t(0u, len);
 }
 
-/* ── Main ────────────────────────────────────────────────────────────────── */
+/* -- Main ------------------------------------------------------------------ */
 
 int main(void)
 {

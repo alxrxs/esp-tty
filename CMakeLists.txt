@@ -6,7 +6,7 @@ cmake_minimum_required(VERSION 3.16)
 set(WOLFSSL_ROOT "${CMAKE_SOURCE_DIR}/managed_components/wolfssl__wolfssl")
 
 # Required by wolfSSL: use user_settings.h instead of autoconfig
-# -mlongcalls: Xtensa call8 has ±512KB range; firmware >1MB requires thunks.
+# -mlongcalls: Xtensa call8 has +/-512KB range; firmware >1MB requires thunks.
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DWOLFSSL_USER_SETTINGS -mlongcalls")
 set(WOLFSSL_USER_SETTINGS ON)
 
@@ -18,7 +18,7 @@ project(esp-tty)
 
 # Apply patches to managed_components/ AFTER idf_build_process (called inside
 # project() above) has run the IDF component manager and fetched all managed
-# components. The script is idempotent — safe to call on every configure cycle.
+# components. The script is idempotent -- safe to call on every configure cycle.
 if(EXISTS "${CMAKE_SOURCE_DIR}/patches")
     find_package(Python3 QUIET COMPONENTS Interpreter)
     if(Python3_FOUND)
@@ -32,6 +32,6 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/patches")
             message(FATAL_ERROR "apply_managed_patches_cmake.py failed (exit ${_patch_result})")
         endif()
     else()
-        message(WARNING "Python3 not found — managed_components patches NOT applied")
+        message(WARNING "Python3 not found -- managed_components patches NOT applied")
     endif()
 endif()

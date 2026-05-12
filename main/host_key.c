@@ -1,5 +1,5 @@
 /*
- * host_key.c — ED25519 host key: generate-or-load from NVS
+ * host_key.c -- ED25519 host key: generate-or-load from NVS
  */
 
 #include "host_key.h"
@@ -139,7 +139,7 @@ esp_err_t host_key_load_or_generate(WOLFSSH_CTX *ctx)
     esp_err_t err = nvs_load_key(der, &sz);
 
     if (err == ESP_ERR_NVS_NOT_FOUND) {
-        ESP_LOGI(TAG, "No host key in NVS — generating …");
+        ESP_LOGI(TAG, "No host key in NVS -- generating ...");
         err = generate_and_save(der, &sz);
         if (err != ESP_OK) return err;
 

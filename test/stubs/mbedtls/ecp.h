@@ -1,5 +1,5 @@
 /*
- * test stub: mbedtls/ecp.h — backed by OpenSSL EC for native tests
+ * test stub: mbedtls/ecp.h -- backed by OpenSSL EC for native tests
  */
 #pragma once
 
@@ -24,7 +24,7 @@ static inline int  mbedtls_mpi_read_binary(mbedtls_mpi *x,
     return x->_bn ? 0 : -1;
 }
 
-/* ECP point — wraps an OpenSSL EC_KEY (public key only for verify) */
+/* ECP point -- wraps an OpenSSL EC_KEY (public key only for verify) */
 typedef struct {
     EC_KEY *_ossl_eckey;   /* set by pk.h stub when parsing public key */
 } mbedtls_ecp_point;
@@ -38,7 +38,7 @@ static inline void mbedtls_ecp_point_free(mbedtls_ecp_point *p) {
     p->_ossl_eckey = NULL;
 }
 
-/* ECP group — not used in native test verify path */
+/* ECP group -- not used in native test verify path */
 typedef struct { int dummy; } mbedtls_ecp_group;
 static inline void mbedtls_ecp_group_init(mbedtls_ecp_group *g) { (void)g; }
 static inline void mbedtls_ecp_group_free(mbedtls_ecp_group *g) { (void)g; }

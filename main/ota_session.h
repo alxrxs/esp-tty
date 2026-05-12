@@ -1,5 +1,5 @@
 /*
- * ota_session.h — OTA firmware update over SSH channel for esp-tty
+ * ota_session.h -- OTA firmware update over SSH channel for esp-tty
  *
  * When a client authenticates as user "ota", the SSH server routes the
  * session here instead of the bridge pump.
@@ -22,7 +22,7 @@ extern "C" {
 #endif
 
 /*
- * ota_session_handler — handle a fully authenticated OTA SSH session.
+ * ota_session_handler -- handle a fully authenticated OTA SSH session.
  *
  * ssh       : accepted wolfSSH session (wolfSSH_accept already returned WS_SUCCESS)
  * image_len : total length of the OTA image in bytes, announced by the client

@@ -1,11 +1,11 @@
-# esp-tty — Nano Console Server
+# esp-tty -- Nano Console Server
 
-Wireless out-of-band serial console — designed for a Linux server you
+Wireless out-of-band serial console -- designed for a Linux server you
 don't want to lose access to.
 
-When the server's primary network goes down — bad netplan, locked-out
+When the server's primary network goes down -- bad netplan, locked-out
 firewall rule, NIC carrier loss, mis-pulled cable, switch failure on
-the management VLAN — you reach it via this device. Plug the
+the management VLAN -- you reach it via this device. Plug the
 ESP32-S3 DevKit into any free USB port on the server. The server
 sees a virtual serial port (`/dev/ttyACM0` from the ESP32-S3's
 TinyUSB CDC ACM endpoint) and runs `agetty` on it just like a
@@ -13,7 +13,7 @@ hardware serial console. SSH into the ESP32-S3 over WiFi: you're
 at the server's login prompt over a network path that has nothing
 to do with the server's main NIC.
 
-Scope: the bridge needs Linux to be up — the USB CDC interface
+Scope: the bridge needs Linux to be up -- the USB CDC interface
 depends on the server's USB stack and `agetty` running. It's for
 "Linux is healthy, network is broken," not for pre-boot, kernel
 panic, or a hung USB subsystem. The ESP32-S3 is the USB device;
@@ -25,9 +25,9 @@ flowchart LR
     target["Linux server<br/>(USB-serial)"] -- "USB-C" --> esp["ESP32-S3"] -- "WiFi" --> ssh["SSH client"]
 ```
 
-Any USB-serial target works — single-board computers, network
+Any USB-serial target works -- single-board computers, network
 switches, microcontroller dev boards, anything exposing a CDC ACM
-device — but the design intent is the always-on out-of-band console
+device -- but the design intent is the always-on out-of-band console
 for an unattended server.
 
 A single SSH session is active at a time; opening a second one
@@ -39,36 +39,36 @@ material is inspected.
 
 ## Features
 
-- **Wireless serial bridge** — TinyUSB CDC ACM ↔ wolfSSH stream over
+- **Wireless serial bridge** -- TinyUSB CDC ACM <-> wolfSSH stream over
   WiFi (TCP 22 by default), two 16 KB PSRAM ring buffers in between.
-- **128 KB scrollback** — captures the target's serial output even when
+- **128 KB scrollback** -- captures the target's serial output even when
   no SSH client is connected; the last 1000 lines are replayed on every
   new SSH session.
-- **Public-key auth** — up to 8 ED25519 keys for `tty@` sessions
+- **Public-key auth** -- up to 8 ED25519 keys for `tty@` sessions
   (`AUTHORIZED_PUBKEYS` array), one separate key for `ota@`.
-- **Hardware-accelerated crypto** — ESP32-S3 SHA and AES peripherals via
+- **Hardware-accelerated crypto** -- ESP32-S3 SHA and AES peripherals via
   the wolfSSL Espressif port; mbedTLS for OTA also HW-accelerated.
   AES-256-GCM is the only cipher offered.
 - **ED25519 host key**, generated on first boot, stored in
   AES-XTS-256-encrypted NVS. Fingerprint printed at every boot.
-- **Signed + encrypted OTA** — ECDSA-P256 signature, AES-256-GCM payload,
+- **Signed + encrypted OTA** -- ECDSA-P256 signature, AES-256-GCM payload,
   A/B partition scheme, automatic rollback if the new image fails its
   30-second self-test.
 - **WPA2/WPA3-Personal** out of the box; **WPA2/WPA3-Enterprise EAP-TLS**
   opt-in via a `#define` (see [`main/certs/README.md`](main/certs/README.md)).
-- **Off-grid networking defaults** — unlimited WiFi reconnect and a DHCP
+- **Off-grid networking defaults** -- unlimited WiFi reconnect and a DHCP
   watchdog that re-kicks the DHCP client if no lease arrives. Survives an
   AP or DHCP server outage without intervention.
-- **Single config file** — `main/config.h` (gitignored) holds every
+- **Single config file** -- `main/config.h` (gitignored) holds every
   per-deployment knob: credentials, keys, USB descriptors, MAC override,
   hostname, retry policy, buffer sizes.
-- **240 MHz CPU, `-O2` build** — production-tuned performance defaults.
-- **155 native unit tests** — `pio test -e native` runs the full suite
+- **240 MHz CPU, `-O2` build** -- production-tuned performance defaults.
+- **155 native unit tests** -- `pio test -e native` runs the full suite
   on the host without any ESP32 hardware or emulator.
 
 ## Hardware
 
-Target: **Espressif ESP32-S3-DevKitC-1 N16R8** — 16 MB QIO flash, 8 MB
+Target: **Espressif ESP32-S3-DevKitC-1 N16R8** -- 16 MB QIO flash, 8 MB
 OPI PSRAM. The PSRAM holds the ring buffers and scrollback; the flash
 holds the A/B OTA partitions.
 
@@ -110,7 +110,7 @@ ssh tty@192.168.1.42
 ```
 
 Verify the fingerprint matches what was printed on first boot. The
-username **must** be `tty` for a console session — any other name is
+username **must** be `tty` for a console session -- any other name is
 rejected.
 
 ### Server-side setup
@@ -141,7 +141,7 @@ option with usage notes; the highlights:
 | USB | `USB_VID`, `USB_PID`, `USB_MANUFACTURER_STRING`, `USB_PRODUCT_STRING`, `USB_SERIAL_STRING`, `USB_CDC_STRING`, `USB_DEVICE_VERSION` | descriptors shown by `lsusb` |
 | Network identity | `DEVICE_HOSTNAME`, optional `WIFI_MAC_BYTES` | DHCP hostname, MAC override |
 | IPv4 addressing | `USE_STATIC_IPV4` (define to enable), `STATIC_IPV4_ADDRESS`, `STATIC_IPV4_NETMASK`, `STATIC_IPV4_GATEWAY`, optional `STATIC_IPV4_DNS_PRIMARY` / `STATIC_IPV4_DNS_SECONDARY` | default DHCPv4; define `USE_STATIC_IPV4` for a fixed address |
-| IPv6 addressing | `IPV6_MODE` — one of `IPV6_MODE_DISABLED`, `IPV6_MODE_SLAAC` (default), `IPV6_MODE_SLAAC_STATELESS_DHCPV6`, `IPV6_MODE_STATEFUL_DHCPV6`, `IPV6_MODE_STATIC`; static mode also needs `STATIC_IPV6_ADDRESS`, `STATIC_IPV6_PREFIX_LEN`, `STATIC_IPV6_GATEWAY`, optional DNS | IPv6 addressing mode |
+| IPv6 addressing | `IPV6_MODE` -- one of `IPV6_MODE_DISABLED`, `IPV6_MODE_SLAAC` (default), `IPV6_MODE_SLAAC_STATELESS_DHCPV6`, `IPV6_MODE_STATEFUL_DHCPV6`, `IPV6_MODE_STATIC`; static mode also needs `STATIC_IPV6_ADDRESS`, `STATIC_IPV6_PREFIX_LEN`, `STATIC_IPV6_GATEWAY`, optional DNS | IPv6 addressing mode |
 | Tuning | `WIFI_MAX_RETRY` (0 = infinite), `DHCP_RETRY_TIMEOUT_SEC`, `TCP_KEEPALIVE_*`, `SSH_HANDSHAKE_TIMEOUT_SEC`, `OTA_ROLLBACK_DELAY_MS` | timeouts and retry policy |
 | Buffers | `RING_BUFFER_BYTES`, `SCROLLBACK_BUFFER_BYTES`, `SCROLLBACK_REPLAY_LINES`, `MAX_TTY_KEYS` | memory sizing |
 
@@ -198,7 +198,7 @@ intentionally out of scope.
 ```mermaid
 flowchart LR
     target["Linux server<br/>(USB-serial)"]
-    client["SSH client<br/>(ssh tty@…)"]
+    client["SSH client<br/>(ssh tty@...)"]
 
     subgraph esp["ESP32-S3 firmware"]
         direction TB
@@ -234,7 +234,7 @@ the same rings across sessions.
 |---|---|
 | [`main/`](main/README.md) | Firmware entry point and ESP-IDF-dependent code |
 | [`main/certs/`](main/certs/README.md) | EAP-TLS client certificates (gitignored except `.example`) |
-| [`lib/`](lib/README.md) | Platform-agnostic libraries — also compile on native host for tests |
+| [`lib/`](lib/README.md) | Platform-agnostic libraries -- also compile on native host for tests |
 | [`components/`](components/README.md) | Local ESP-IDF components (currently just the wolfSSL bridge) |
 | [`boards/`](boards/README.md) | Project-local PlatformIO board manifests |
 | [`patches/`](patches/README.md) | Patches applied to `managed_components/` at cmake configure time |
@@ -256,7 +256,7 @@ Three PlatformIO environments are defined in `platformio.ini`:
 
 | Env | Purpose | Build flag |
 |---|---|---|
-| `esp32s3` | real ESP32-S3 hardware | — |
+| `esp32s3` | real ESP32-S3 hardware | -- |
 | `wokwi` | Wokwi simulator + QEMU smoke tests | `-DBRIDGE_LOOPBACK=1` (rings wired back-to-back, TinyUSB bypassed) |
 | `native` | host unit tests | `-DRING_NATIVE=1 -DUNIT_TEST` |
 
@@ -305,18 +305,18 @@ System dependencies (not pip-installable):
 
 ## Scope and limitations
 
-- **Single concurrent SSH session** — by design. The target's serial
+- **Single concurrent SSH session** -- by design. The target's serial
   console is a single shared resource; a second client preempts the
   first rather than multiplexing.
-- **No mDNS / Bonjour** — the device announces itself only via DHCP
+- **No mDNS / Bonjour** -- the device announces itself only via DHCP
   hostname. On routers that forward DHCP names into local DNS, you can
   reach it as `<DEVICE_HOSTNAME>.<local-domain>`.
-- **No GPIO control of the target's reset / boot pins** — the bridge
+- **No GPIO control of the target's reset / boot pins** -- the bridge
   carries serial data only.
 - **WPA2/WPA3-Enterprise EAP-TLS** is compiled in and structurally
   correct but has not been validated against a real RADIUS server end
   to end.
-- **No flash encryption** — keeping eFuses unburned is a hard
+- **No flash encryption** -- keeping eFuses unburned is a hard
   requirement of the design; the device must remain reflashable. The
   trade-off and what it implies is documented under "Security model".
 
@@ -325,8 +325,8 @@ System dependencies (not pip-installable):
 [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0).
 
 If you run a modified version of this firmware on a device that
-interacts with users over a network — e.g. an SSH server reachable
-beyond your own machines — the AGPL requires you to make the
+interacts with users over a network -- e.g. an SSH server reachable
+beyond your own machines -- the AGPL requires you to make the
 corresponding source available to those users. The full license text
 is in [`LICENSE`](LICENSE).
 

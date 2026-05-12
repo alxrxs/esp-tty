@@ -1,5 +1,5 @@
 /*
- * scrollback.c — Circular USB-output scrollback buffer
+ * scrollback.c -- Circular USB-output scrollback buffer
  */
 
 #include "scrollback.h"
@@ -7,7 +7,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-/* ── Shared pure formatters (compiled on both native and ESP32) ─────────── */
+/* -- Shared pure formatters (compiled on both native and ESP32) ----------- */
 
 const char SCROLLBACK_FOOTER[] = "\x1b[2m--- live ---\x1b[0m\r\n";
 
@@ -28,19 +28,19 @@ int scrollback_format_header(int line_count, char *out, size_t out_sz)
 
     /* snprintf returns the number of bytes that *would* have been written
      * (excluding the NUL), regardless of truncation.  If that count is >=
-     * out_sz, the buffer was too small — return 0 so the caller doesn't
+     * out_sz, the buffer was too small -- return 0 so the caller doesn't
      * emit a half-formed escape sequence. */
     int n = snprintf(out, out_sz,
                      "\r\n\x1b[2m--- scrollback: %d lines ---\x1b[0m\r\n",
                      line_count);
 
     if (n <= 0)              return 0;  /* encoding error (should not happen) */
-    if ((size_t)n >= out_sz) return 0;  /* truncated — no room for NUL */
+    if ((size_t)n >= out_sz) return 0;  /* truncated -- no room for NUL */
 
     return n;
 }
 
-/* ── Platform shims ─────────────────────────────────────────────────────── */
+/* -- Platform shims ------------------------------------------------------- */
 
 #ifdef UNIT_TEST
 
@@ -224,7 +224,7 @@ uint8_t *scrollback_get_lines(scrollback_t *sb, int max_lines, size_t *out_len)
 
     /* Snapshot the two mutable fields under lock; everything else is
      * lock-free.  scrollback_push holds the lock only for the duration
-     * of its own memcpy (≤64 B from the CDC callback), so contention
+     * of its own memcpy (<=64 B from the CDC callback), so contention
      * here is microseconds at most. */
     xSemaphoreTake(sb->lock, portMAX_DELAY);
     size_t used = sb->used;

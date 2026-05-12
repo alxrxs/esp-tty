@@ -1,11 +1,11 @@
-# ota_keys/ — OTA firmware signing and encryption keys
+# ota_keys/ -- OTA firmware signing and encryption keys
 
 This directory holds the cryptographic key material used to sign and encrypt
 OTA firmware images for esp-tty. Three files make up a complete key set:
 `sign.key.pem` (ECDSA-P256 private key), `sign.pub.pem` (the matching public
 key), and `aes.key` (a 32-byte AES-256-GCM encryption key). All three are
-gitignored. Two placeholder files — `sign.pub.pem.example` and
-`aes.key.example` — are tracked in version control to document the expected
+gitignored. Two placeholder files -- `sign.pub.pem.example` and
+`aes.key.example` -- are tracked in version control to document the expected
 format and file names without exposing real secrets.
 
 ## How the keys are used
@@ -51,9 +51,9 @@ in an isolated temporary location.
 
 | File | Purpose | Tracked? |
 |------|---------|---------|
-| `sign.key.pem` | ECDSA-P256 private key — used by `scripts/sign_firmware.py` | Gitignored |
-| `sign.pub.pem` | ECDSA-P256 public key — embedded in firmware via `EMBED_TXTFILES` | Gitignored |
-| `aes.key` | 32 raw bytes AES-256-GCM key — embedded in firmware via `EMBED_FILES` | Gitignored |
+| `sign.key.pem` | ECDSA-P256 private key -- used by `scripts/sign_firmware.py` | Gitignored |
+| `sign.pub.pem` | ECDSA-P256 public key -- embedded in firmware via `EMBED_TXTFILES` | Gitignored |
+| `aes.key` | 32 raw bytes AES-256-GCM key -- embedded in firmware via `EMBED_FILES` | Gitignored |
 | `sign.pub.pem.example` | Placeholder showing expected PEM format | Tracked |
 | `aes.key.example` | Placeholder (32 zero bytes) showing expected binary format | Tracked |
 | `README.md` | This file | Tracked |

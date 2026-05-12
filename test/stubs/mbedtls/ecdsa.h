@@ -1,5 +1,5 @@
 /*
- * test stub: mbedtls/ecdsa.h — backed by OpenSSL EC + ECDSA for native tests
+ * test stub: mbedtls/ecdsa.h -- backed by OpenSSL EC + ECDSA for native tests
  *
  * Only the subset used by ota_verify.c is implemented.
  */
@@ -46,7 +46,7 @@ static inline int mbedtls_ecdsa_from_keypair(mbedtls_ecdsa_context *dst,
 }
 
 /*
- * mbedtls_ecdsa_verify — verify raw r,s against digest using OpenSSL.
+ * mbedtls_ecdsa_verify -- verify raw r,s against digest using OpenSSL.
  * The EC_KEY is stored in Q._ossl_eckey (set by from_keypair).
  */
 static inline int mbedtls_ecdsa_verify(mbedtls_ecp_group *grp,

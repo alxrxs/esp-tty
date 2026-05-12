@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-scripts/sign_firmware.py — Sign and encrypt an esp-tty OTA firmware image.
+scripts/sign_firmware.py -- Sign and encrypt an esp-tty OTA firmware image.
 
 Produces a .ota file with the format:
 
@@ -16,7 +16,7 @@ The signature covers everything from the magic header through the last byte of
 ciphertext (i.e., magic + version + plaintext_len + aes_iv + aes_tag + ciphertext).
 The 64-byte signature itself is NOT included in the signed region.
 
-Requires: Python ≥ 3.8, cryptography package (pip install cryptography)
+Requires: Python >= 3.8, cryptography package (pip install cryptography)
   Falls back to subprocess openssl if the cryptography package is missing.
 
 Usage:
@@ -38,7 +38,7 @@ from pathlib import Path
 MAGIC = b"ESPOTA1\x00"   # 8 bytes
 VERSION = 1
 
-# ─── Crypto backend ──────────────────────────────────────────────────────────
+# --- Crypto backend ----------------------------------------------------------
 
 def _load_cryptography():
     """Try to import the 'cryptography' package."""
@@ -123,7 +123,7 @@ def ecdsa_verify_native(pub_pem: bytes, digest: bytes, sig_rs: bytes) -> bool:
         return False
 
 
-# ─── Header construction ──────────────────────────────────────────────────────
+# --- Header construction ------------------------------------------------------
 
 def build_header(plaintext_len: int, iv: bytes, tag: bytes) -> bytes:
     """Return the 44-byte fixed header (magic + version + plaintext_len + iv + tag)."""
@@ -138,7 +138,7 @@ def build_header(plaintext_len: int, iv: bytes, tag: bytes) -> bytes:
 HEADER_SIZE = 8 + 4 + 4 + 12 + 16  # = 44 bytes
 
 
-# ─── Main signing function ────────────────────────────────────────────────────
+# --- Main signing function ----------------------------------------------------
 
 def sign_firmware(firmware_path: Path, key_path: Path, aes_path: Path, out_path: Path):
     plaintext = firmware_path.read_bytes()
@@ -163,7 +163,7 @@ def sign_firmware(firmware_path: Path, key_path: Path, aes_path: Path, out_path:
     header = build_header(len(plaintext), iv, tag)
     assert len(header) == HEADER_SIZE
 
-    # 4. SHA-256 over (header || ciphertext) — this is what we sign
+    # 4. SHA-256 over (header || ciphertext) -- this is what we sign
     signed_region = header + ciphertext
     digest = hashlib.sha256(signed_region).digest()
     print(f"SHA-256(header||ct): {digest.hex()}")
@@ -221,7 +221,7 @@ def _self_test(ota_path: Path, key_path: Path):
     print(f"Self-test PASSED  : magic ok, version={version}, pt_len={pt_len}, sig ok")
 
 
-# ─── CLI ──────────────────────────────────────────────────────────────────────
+# --- CLI ----------------------------------------------------------------------
 
 def main():
     p = argparse.ArgumentParser(description="Sign and encrypt an esp-tty OTA firmware image")

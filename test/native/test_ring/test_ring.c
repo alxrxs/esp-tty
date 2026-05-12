@@ -1,5 +1,5 @@
 /*
- * test_ring.c — unit tests for ring buffer (native, RING_NATIVE=1)
+ * test_ring.c -- unit tests for ring buffer (native, RING_NATIVE=1)
  *
  * Tests: FIFO correctness, blocking semantics, wrap-around, close.
  * Compiled with -DRING_NATIVE=1 by the PlatformIO native environment.
@@ -51,7 +51,7 @@ void test_ring_wrap(void)
     ring_t *r = ring_create(CAP);
     TEST_ASSERT_NOT_NULL(r);
 
-    /* Fill buffer, drain half, fill again — forces wrap-around */
+    /* Fill buffer, drain half, fill again -- forces wrap-around */
     uint8_t ones[8];
     memset(ones, 1, sizeof(ones));
     TEST_ASSERT_EQUAL_INT(8, ring_send(r, ones, 8));
@@ -182,10 +182,10 @@ void test_ring_send_on_closed_ring_returns_error(void)
  * NOTE: The FreeRTOS backend in lib/ring/ring.c returns -1 immediately on
  * ring_close(), dropping any in-flight buffered data. This divergence is
  * intentional and is NOT fixed here because ring_close() is only called during
- * single-session SSH teardown (bridge_pump → ring_close → pump tasks exit),
+ * single-session SSH teardown (bridge_pump -> ring_close -> pump tasks exit),
  * at which point buffered data is already destined to be discarded.  Testing
  * the FreeRTOS side would require target hardware and would require modifying
- * the FreeRTOS backend — both are out of scope per the project hard constraints.
+ * the FreeRTOS backend -- both are out of scope per the project hard constraints.
  */
 void test_ring_recv_drains_buffered_then_returns_eof(void)
 {
@@ -206,14 +206,14 @@ void test_ring_recv_drains_buffered_then_returns_eof(void)
     TEST_ASSERT_EQUAL_INT((int)sizeof(payload), got);
     TEST_ASSERT_EQUAL_MEMORY(payload, buf, sizeof(payload));
 
-    /* Second recv: buffer is empty and ring is closed → EOF */
+    /* Second recv: buffer is empty and ring is closed -> EOF */
     int eof = ring_recv(r, buf, sizeof(buf));
     TEST_ASSERT_EQUAL_INT(-1, eof);
 
     ring_free(r);
 }
 
-/* ── ring_try_send tests ─────────────────────────────────────────────────── */
+/* -- ring_try_send tests --------------------------------------------------- */
 
 /* try_send into an empty ring writes all bytes */
 void test_ring_try_send_when_empty(void)
@@ -238,7 +238,7 @@ void test_ring_try_send_when_empty(void)
     ring_free(r);
 }
 
-/* try_send into a full ring returns 0 — does not block */
+/* try_send into a full ring returns 0 -- does not block */
 void test_ring_try_send_when_full(void)
 {
     const size_t CAP = 8;
@@ -270,12 +270,12 @@ void test_ring_try_send_partial_when_almost_full(void)
     memset(fill, 0x11, sizeof(fill));
     TEST_ASSERT_EQUAL_INT(6, ring_send(r, fill, 6));
 
-    /* try_send 4 bytes; only 2 slots remain → should write exactly 2 */
+    /* try_send 4 bytes; only 2 slots remain -> should write exactly 2 */
     uint8_t data[4] = {0x22, 0x22, 0x22, 0x22};
     int written = ring_try_send(r, data, sizeof(data));
     TEST_ASSERT_GREATER_OR_EQUAL_INT(0, written);
     TEST_ASSERT_LESS_OR_EQUAL_INT(2, written);  /* at most 2 fit */
-    /* The ring must be full or near-full — reading must return something */
+    /* The ring must be full or near-full -- reading must return something */
     uint8_t out[8];
     int got = ring_recv(r, out, sizeof(out));
     TEST_ASSERT_GREATER_THAN_INT(0, got);
@@ -298,7 +298,7 @@ void test_ring_try_send_on_closed_ring(void)
     ring_free(r);
 }
 
-/* ── ring_reopen tests ───────────────────────────────────────────────────── */
+/* -- ring_reopen tests ----------------------------------------------------- */
 
 /* reopen clears the closed flag so send/recv work again */
 void test_ring_reopen_clears_closed_flag(void)
@@ -397,7 +397,7 @@ void test_ring_reopen_then_recv_blocks_for_new_data(void)
     ring_free(r);
 }
 
-/* ── extra ring_try_send tests ───────────────────────────────────────────── */
+/* -- extra ring_try_send tests --------------------------------------------- */
 
 /* try_send returns EXACTLY the remaining space when partial-filled */
 void test_ring_try_send_partial_writes_exactly_remaining_space(void)
@@ -411,7 +411,7 @@ void test_ring_try_send_partial_writes_exactly_remaining_space(void)
     memset(fill, 0x11, sizeof(fill));
     TEST_ASSERT_EQUAL_INT(6, ring_send(r, fill, 6));
 
-    /* try_send 4 bytes; only 2 slots remain → must return exactly 2 */
+    /* try_send 4 bytes; only 2 slots remain -> must return exactly 2 */
     uint8_t data[4] = {0x22, 0x22, 0x22, 0x22};
     int written = ring_try_send(r, data, sizeof(data));
     TEST_ASSERT_EQUAL_INT(2, written);
