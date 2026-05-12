@@ -120,6 +120,8 @@ option with usage notes; the highlights:
 | SSH | `SSH_PORT`, `AUTHORIZED_PUBKEYS`, `OTA_AUTHORIZED_PUBKEY` | port + auth |
 | USB | `USB_VID`, `USB_PID`, `USB_MANUFACTURER_STRING`, `USB_PRODUCT_STRING`, `USB_SERIAL_STRING`, `USB_CDC_STRING`, `USB_DEVICE_VERSION` | descriptors shown by `lsusb` |
 | Network identity | `DEVICE_HOSTNAME`, optional `WIFI_MAC_BYTES` | DHCP hostname, MAC override |
+| IPv4 addressing | `USE_STATIC_IPV4` (define to enable), `STATIC_IPV4_ADDRESS`, `STATIC_IPV4_NETMASK`, `STATIC_IPV4_GATEWAY`, optional `STATIC_IPV4_DNS_PRIMARY` / `STATIC_IPV4_DNS_SECONDARY` | default DHCPv4; define `USE_STATIC_IPV4` for a fixed address |
+| IPv6 addressing | `IPV6_MODE` — one of `IPV6_MODE_DISABLED`, `IPV6_MODE_SLAAC` (default), `IPV6_MODE_SLAAC_STATELESS_DHCPV6`, `IPV6_MODE_STATEFUL_DHCPV6`, `IPV6_MODE_STATIC`; static mode also needs `STATIC_IPV6_ADDRESS`, `STATIC_IPV6_PREFIX_LEN`, `STATIC_IPV6_GATEWAY`, optional DNS | IPv6 addressing mode |
 | Tuning | `WIFI_MAX_RETRY` (0 = infinite), `DHCP_RETRY_TIMEOUT_SEC`, `TCP_KEEPALIVE_*`, `SSH_HANDSHAKE_TIMEOUT_SEC`, `OTA_ROLLBACK_DELAY_MS` | timeouts and retry policy |
 | Buffers | `RING_BUFFER_BYTES`, `SCROLLBACK_BUFFER_BYTES`, `SCROLLBACK_REPLAY_LINES`, `MAX_TTY_KEYS` | memory sizing |
 

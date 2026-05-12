@@ -107,6 +107,94 @@
  * -------------------------------------------------------------------------- */
 #define DEVICE_HOSTNAME          "esp-tty"
 
+/* --------------------------------------------------------------------------
+ * Network addressing — IPv4
+ *
+ * Default (USE_STATIC_IPV4 not defined): DHCPv4.  The DHCP watchdog keeps
+ * the client retrying indefinitely; no action required.
+ *
+ * With USE_STATIC_IPV4 defined: the DHCP client is stopped before the
+ * interface comes up and the address below is applied immediately.  The
+ * DHCP watchdog timer is disabled automatically.
+ *
+ * When USE_STATIC_IPV4 is defined, STATIC_IPV4_ADDRESS, STATIC_IPV4_NETMASK,
+ * and STATIC_IPV4_GATEWAY are REQUIRED.  DNS entries are optional.
+ *
+ * Example:
+
+#define USE_STATIC_IPV4
+#define STATIC_IPV4_ADDRESS      "10.57.16.91"
+#define STATIC_IPV4_NETMASK      "255.255.255.0"
+#define STATIC_IPV4_GATEWAY      "10.57.16.1"
+#define STATIC_IPV4_DNS_PRIMARY  "1.1.1.1"       // optional
+#define STATIC_IPV4_DNS_SECONDARY "1.0.0.1"      // optional
+
+ * -------------------------------------------------------------------------- */
+
+/* --------------------------------------------------------------------------
+ * Network addressing — IPv6
+ *
+ * sdkconfig.defaults enables CONFIG_LWIP_IPV6=y, CONFIG_LWIP_IPV6_AUTOCONFIG=y,
+ * and CONFIG_LWIP_IPV6_DHCP6=y by default.  The mode below selects runtime
+ * behaviour.  To compile out IPv6 entirely, set CONFIG_LWIP_IPV6=n in
+ * sdkconfig.defaults AND define IPV6_MODE_DISABLED here.
+ *
+ * Available modes (use the constant name directly):
+ *
+ *   IPV6_MODE_DISABLED
+ *     No IPv6 at all.  esp_netif_create_ip6_linklocal() is never called.
+ *
+ *   IPV6_MODE_SLAAC  [default when CONFIG_LWIP_IPV6=y]
+ *     Stateless Address Autoconfiguration (RFC 4862).  The device derives
+ *     a link-local address (fe80::) immediately on L2 association, then
+ *     solicits a Router Advertisement to obtain a global /64 prefix.
+ *     Requires CONFIG_LWIP_IPV6_AUTOCONFIG=y in sdkconfig.defaults.
+ *
+ *   IPV6_MODE_SLAAC_STATELESS_DHCPV6
+ *     SLAAC for the address (same as above) + stateless DHCPv6 (RFC 3736)
+ *     for options such as DNS server addresses.  Useful when the router
+ *     doesn't embed DNS in Router Advertisements.
+ *     Requires CONFIG_LWIP_IPV6_DHCP6=y in sdkconfig.defaults.
+ *
+ *   IPV6_MODE_STATEFUL_DHCPV6
+ *     DHCPv6 assigns the address and options (RFC 3315).  The router must
+ *     advertise the Managed Address Configuration (M) flag.  Most home
+ *     routers don't support stateful DHCPv6; primarily useful on enterprise
+ *     networks that hand out /128 addresses via DHCPv6.
+ *     Requires CONFIG_LWIP_IPV6_DHCP6=y in sdkconfig.defaults.
+ *     Note: lwIP's stateful DHCPv6 support is experimental; address
+ *     assignment works for basic cases.
+ *
+ *   IPV6_MODE_STATIC
+ *     A fixed global IPv6 address is added immediately on L2 association.
+ *     Requires STATIC_IPV6_ADDRESS, STATIC_IPV6_PREFIX_LEN, and
+ *     STATIC_IPV6_GATEWAY.  DNS entries are optional.
+ *
+ * To change the mode, uncomment the desired block below.
+ *
+ * ── Option 1: SLAAC (default — no definition needed, shown for clarity) ──
+ * #define IPV6_MODE  IPV6_MODE_SLAAC
+ *
+ * ── Option 2: Disable IPv6 entirely ──────────────────────────────────────
+ * #define IPV6_MODE  IPV6_MODE_DISABLED
+ *
+ * ── Option 3: SLAAC + stateless DHCPv6 for DNS ───────────────────────────
+ * #define IPV6_MODE  IPV6_MODE_SLAAC_STATELESS_DHCPV6
+ *
+ * ── Option 4: Stateful DHCPv6 ────────────────────────────────────────────
+ * #define IPV6_MODE  IPV6_MODE_STATEFUL_DHCPV6
+ *
+ * ── Option 5: Static IPv6 ────────────────────────────────────────────────
+
+#define IPV6_MODE               IPV6_MODE_STATIC
+#define STATIC_IPV6_ADDRESS     "2001:db8::dead:beef"
+#define STATIC_IPV6_PREFIX_LEN  64
+#define STATIC_IPV6_GATEWAY     "fe80::1"
+#define STATIC_IPV6_DNS_PRIMARY   "2606:4700:4700::1111"   // optional (Cloudflare)
+#define STATIC_IPV6_DNS_SECONDARY "2001:4860:4860::8888"   // optional (Google)
+
+ * -------------------------------------------------------------------------- */
+
 /* Optional: override the factory-burned WiFi station MAC address.
  *
  * Each ESP32-S3 has a unique MAC burned at the factory — by default the

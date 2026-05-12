@@ -55,7 +55,7 @@ capacity, TCP keepalive parameters, and the OTA rollback delay. Enterprise Wi-Fi
 | File | Role |
 |---|---|
 | `main.c` | `app_main`: NVS AES-XTS-256 init, ring + scrollback allocation in PSRAM, subsystem start sequence, OTA rollback timer |
-| `wifi.c` | Wi-Fi STA setup (WPA2/WPA3-Personal or EAP-TLS), event-driven reconnect, DHCP watchdog timer, optional MAC address override |
+| `wifi.c` | Wi-Fi STA setup (WPA2/WPA3-Personal or EAP-TLS), event-driven reconnect, DHCP watchdog timer, static IPv4, IPv6 SLAAC/DHCPv6/static, optional MAC address override |
 | `usb_cdc.c` | TinyUSB CDC ACM driver, custom USB device descriptors, `usb_tx_task`, RX callback into ring |
 | `ssh_server.c` | wolfSSH accept loop, single-session takeover with semaphore synchronisation, pubkey auth dispatch, bridge pump tasks |
 | `ota_session.c` | OTA SSH channel handler: streaming receive, `ota_verify_feed` loop, ECDSA+AES-GCM verification, partition switch and reboot |
@@ -104,8 +104,14 @@ cp main/config.h.example main/config.h
 | `USB_MANUFACTURER_STRING` / `USB_PRODUCT_STRING` | USB string descriptors |
 | `DEVICE_HOSTNAME` | DHCP hostname (shows in router lease table) |
 | `WIFI_MAC_BYTES` | Optional locally-administered MAC override |
+| `USE_STATIC_IPV4` | Define to use a fixed IPv4 address instead of DHCP |
+| `STATIC_IPV4_ADDRESS` / `STATIC_IPV4_NETMASK` / `STATIC_IPV4_GATEWAY` | Required when `USE_STATIC_IPV4` is defined |
+| `STATIC_IPV4_DNS_PRIMARY` / `STATIC_IPV4_DNS_SECONDARY` | Optional static DNS servers (IPv4) |
+| `IPV6_MODE` | IPv6 mode: `IPV6_MODE_DISABLED`, `IPV6_MODE_SLAAC` (default), `IPV6_MODE_SLAAC_STATELESS_DHCPV6`, `IPV6_MODE_STATEFUL_DHCPV6`, `IPV6_MODE_STATIC` |
+| `STATIC_IPV6_ADDRESS` / `STATIC_IPV6_PREFIX_LEN` / `STATIC_IPV6_GATEWAY` | Required when `IPV6_MODE` is `IPV6_MODE_STATIC` |
+| `STATIC_IPV6_DNS_PRIMARY` / `STATIC_IPV6_DNS_SECONDARY` | Optional static DNS servers (IPv6) |
 | `WIFI_MAX_RETRY` | Reconnect attempt limit (0 = unlimited) |
-| `DHCP_RETRY_TIMEOUT_SEC` | DHCP watchdog timeout in seconds |
+| `DHCP_RETRY_TIMEOUT_SEC` | DHCP watchdog timeout in seconds (disabled automatically when `USE_STATIC_IPV4` is defined) |
 | `SSH_HANDSHAKE_TIMEOUT_SEC` | Drop clients that do not complete auth within this window |
 | `TCP_KEEPALIVE_IDLE_SEC` / `TCP_KEEPALIVE_INTVL_SEC` / `TCP_KEEPALIVE_COUNT` | TCP keepalive parameters |
 | `OTA_ROLLBACK_DELAY_MS` | Milliseconds after boot before the new image is marked valid |

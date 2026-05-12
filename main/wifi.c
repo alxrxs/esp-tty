@@ -11,6 +11,30 @@
  *     config.h, and place ca.pem / client.crt / client.key in main/certs/.
  *     See main/certs/README.md for certificate generation instructions.
  *
+ * IPv4 addressing (selected in config.h):
+ *
+ *   Default (USE_STATIC_IPV4 not defined):
+ *     DHCPv4 — the DHCP watchdog timer keeps the client alive indefinitely.
+ *
+ *   With USE_STATIC_IPV4 defined:
+ *     Static IPv4 — DHCP client is stopped before the interface comes up.
+ *     Requires STATIC_IPV4_ADDRESS, STATIC_IPV4_NETMASK, STATIC_IPV4_GATEWAY
+ *     (all dotted-decimal strings).  Optional: STATIC_IPV4_DNS_PRIMARY,
+ *     STATIC_IPV4_DNS_SECONDARY.  The DHCP watchdog is disabled automatically.
+ *
+ * IPv6 addressing (selected in config.h via IPV6_MODE):
+ *
+ *   IPV6_MODE_DISABLED              — no IPv6 at all
+ *   IPV6_MODE_SLAAC                 — link-local + SLAAC global (default)
+ *   IPV6_MODE_SLAAC_STATELESS_DHCPV6 — SLAAC address + stateless DHCPv6 for
+ *                                       options (DNS, etc.)
+ *   IPV6_MODE_STATEFUL_DHCPV6       — DHCPv6 assigns the address
+ *   IPV6_MODE_STATIC                — static global address; requires
+ *                                     STATIC_IPV6_ADDRESS, STATIC_IPV6_PREFIX_LEN,
+ *                                     STATIC_IPV6_GATEWAY.  Optional:
+ *                                     STATIC_IPV6_DNS_PRIMARY,
+ *                                     STATIC_IPV6_DNS_SECONDARY.
+ *
  * Compile-time credentials come from main/config.h (gitignored).
  * Copy config.h.example → config.h and fill in your values.
  */
@@ -24,6 +48,7 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_netif_net_stack.h"
 #include "esp_wifi.h"
 
 /* config.h must come before the WIFI_USE_ENTERPRISE guard below because
@@ -42,6 +67,25 @@
 #ifdef WIFI_USE_ENTERPRISE
 #include "esp_eap_client.h"
 #endif
+
+/* DHCPv6 requires the raw lwIP netif handle, obtained via
+ * esp_netif_get_netif_impl().  Pull in dhcp6.h only when needed. */
+#if defined(CONFIG_LWIP_IPV6) && defined(CONFIG_LWIP_IPV6_DHCP6)
+#include "lwip/dhcp6.h"
+#include "lwip/netif.h"
+#endif
+
+/* --------------------------------------------------------------------------
+ * IPv6 mode constants
+ *
+ * Define these before including config.h defaults so they are available
+ * regardless of whether the user has defined them.
+ * -------------------------------------------------------------------------- */
+#define IPV6_MODE_DISABLED                 0
+#define IPV6_MODE_SLAAC                    1
+#define IPV6_MODE_SLAAC_STATELESS_DHCPV6   2
+#define IPV6_MODE_STATEFUL_DHCPV6          3
+#define IPV6_MODE_STATIC                   4
 
 /* --------------------------------------------------------------------------
  * Build-time knobs
@@ -65,7 +109,10 @@
  * within this many seconds, restart the DHCP client (stop + start).
  * Catches the case where the AP is up but the DHCP server is unresponsive
  * — lwIP gives up DHCP DISCOVER after a handful of retries; this loops
- * forever.  Set to 0 to disable. */
+ * forever.  Set to 0 to disable.
+ *
+ * When USE_STATIC_IPV4 is defined the watchdog is skipped entirely since
+ * we never run the DHCP client. */
 #ifndef DHCP_RETRY_TIMEOUT_SEC
 #define DHCP_RETRY_TIMEOUT_SEC  30
 #endif
@@ -122,6 +169,48 @@ extern const uint8_t eap_client_key_end[]   asm("_binary_client_key_end");
 #endif /* WIFI_USE_ENTERPRISE */
 
 /* --------------------------------------------------------------------------
+ * IPv6 mode defaults
+ *
+ * When CONFIG_LWIP_IPV6 is enabled (the default), fall back to SLAAC if the
+ * user hasn't chosen a mode.  When the IPv6 stack is disabled in sdkconfig,
+ * default to DISABLED so no IPv6 code is compiled in.
+ * -------------------------------------------------------------------------- */
+#ifndef IPV6_MODE
+# ifdef CONFIG_LWIP_IPV6
+#  define IPV6_MODE  IPV6_MODE_SLAAC
+# else
+#  define IPV6_MODE  IPV6_MODE_DISABLED
+# endif
+#endif
+
+/* --------------------------------------------------------------------------
+ * Compile-time sanity checks for static addressing modes
+ * -------------------------------------------------------------------------- */
+#ifdef USE_STATIC_IPV4
+# ifndef STATIC_IPV4_ADDRESS
+#  error "USE_STATIC_IPV4 requires STATIC_IPV4_ADDRESS to be defined in config.h"
+# endif
+# ifndef STATIC_IPV4_NETMASK
+#  error "USE_STATIC_IPV4 requires STATIC_IPV4_NETMASK to be defined in config.h"
+# endif
+# ifndef STATIC_IPV4_GATEWAY
+#  error "USE_STATIC_IPV4 requires STATIC_IPV4_GATEWAY to be defined in config.h"
+# endif
+#endif /* USE_STATIC_IPV4 */
+
+#if IPV6_MODE == IPV6_MODE_STATIC
+# ifndef STATIC_IPV6_ADDRESS
+#  error "IPV6_MODE_STATIC requires STATIC_IPV6_ADDRESS to be defined in config.h"
+# endif
+# ifndef STATIC_IPV6_PREFIX_LEN
+#  error "IPV6_MODE_STATIC requires STATIC_IPV6_PREFIX_LEN to be defined in config.h"
+# endif
+# ifndef STATIC_IPV6_GATEWAY
+#  error "IPV6_MODE_STATIC requires STATIC_IPV6_GATEWAY to be defined in config.h"
+# endif
+#endif /* IPV6_MODE_STATIC */
+
+/* --------------------------------------------------------------------------
  * EventGroup bit definitions
  * -------------------------------------------------------------------------- */
 #define WIFI_CONNECTED_BIT  BIT0   /* IP obtained              */
@@ -140,8 +229,10 @@ static int                s_retry_num = 0;
 static esp_netif_t *s_sta_netif = NULL;
 
 /* DHCP watchdog: armed on STA_CONNECTED, disarmed on STA_GOT_IP.  If it
- * fires before an IP arrives, we kick the DHCP client and re-arm. */
-#if DHCP_RETRY_TIMEOUT_SEC > 0
+ * fires before an IP arrives, we kick the DHCP client and re-arm.
+ * Never compiled when USE_STATIC_IPV4 is defined — static addressing
+ * doesn't need a DHCP watchdog. */
+#if DHCP_RETRY_TIMEOUT_SEC > 0 && !defined(USE_STATIC_IPV4)
 static TimerHandle_t s_dhcp_watchdog = NULL;
 
 static void dhcp_watchdog_cb(TimerHandle_t t)
@@ -158,6 +249,182 @@ static void dhcp_watchdog_cb(TimerHandle_t t)
     xTimerStart(s_dhcp_watchdog, 0);
 }
 #endif
+
+/* --------------------------------------------------------------------------
+ * Static IPv4 configuration helper
+ *
+ * Called once after esp_netif_create_default_wifi_sta() but before
+ * esp_wifi_start(), so the DHCP client is stopped before it ever sends
+ * a DISCOVER.
+ * -------------------------------------------------------------------------- */
+#ifdef USE_STATIC_IPV4
+static void apply_static_ipv4(void)
+{
+    esp_netif_ip_info_t ip_info = {};
+
+    if (esp_netif_str_to_ip4(STATIC_IPV4_ADDRESS, &ip_info.ip) != ESP_OK) {
+        ESP_LOGE(TAG, "Invalid STATIC_IPV4_ADDRESS: \"%s\"", STATIC_IPV4_ADDRESS);
+        return;
+    }
+    if (esp_netif_str_to_ip4(STATIC_IPV4_NETMASK, &ip_info.netmask) != ESP_OK) {
+        ESP_LOGE(TAG, "Invalid STATIC_IPV4_NETMASK: \"%s\"", STATIC_IPV4_NETMASK);
+        return;
+    }
+    if (esp_netif_str_to_ip4(STATIC_IPV4_GATEWAY, &ip_info.gw) != ESP_OK) {
+        ESP_LOGE(TAG, "Invalid STATIC_IPV4_GATEWAY: \"%s\"", STATIC_IPV4_GATEWAY);
+        return;
+    }
+
+    /* Stop the DHCP client before setting a static address.  It may not be
+     * running yet (INIT state), but the call is harmless in that case. */
+    esp_err_t err = esp_netif_dhcpc_stop(s_sta_netif);
+    if (err != ESP_OK && err != ESP_ERR_ESP_NETIF_DHCP_ALREADY_STOPPED) {
+        ESP_LOGW(TAG, "esp_netif_dhcpc_stop: %s", esp_err_to_name(err));
+    }
+
+    ESP_ERROR_CHECK(esp_netif_set_ip_info(s_sta_netif, &ip_info));
+
+    ESP_LOGI(TAG, "Static IPv4: " IPSTR " / " IPSTR " gw " IPSTR,
+             IP2STR(&ip_info.ip),
+             IP2STR(&ip_info.netmask),
+             IP2STR(&ip_info.gw));
+
+    /* Optional static DNS servers. */
+#ifdef STATIC_IPV4_DNS_PRIMARY
+    {
+        esp_netif_dns_info_t dns = {};
+        dns.ip.type = ESP_IPADDR_TYPE_V4;
+        if (esp_netif_str_to_ip4(STATIC_IPV4_DNS_PRIMARY,
+                                 &dns.ip.u_addr.ip4) == ESP_OK) {
+            esp_netif_set_dns_info(s_sta_netif, ESP_NETIF_DNS_MAIN, &dns);
+            ESP_LOGI(TAG, "Static DNS primary: %s", STATIC_IPV4_DNS_PRIMARY);
+        } else {
+            ESP_LOGW(TAG, "Invalid STATIC_IPV4_DNS_PRIMARY: \"%s\"",
+                     STATIC_IPV4_DNS_PRIMARY);
+        }
+    }
+#endif /* STATIC_IPV4_DNS_PRIMARY */
+
+#ifdef STATIC_IPV4_DNS_SECONDARY
+    {
+        esp_netif_dns_info_t dns = {};
+        dns.ip.type = ESP_IPADDR_TYPE_V4;
+        if (esp_netif_str_to_ip4(STATIC_IPV4_DNS_SECONDARY,
+                                 &dns.ip.u_addr.ip4) == ESP_OK) {
+            esp_netif_set_dns_info(s_sta_netif, ESP_NETIF_DNS_BACKUP, &dns);
+            ESP_LOGI(TAG, "Static DNS secondary: %s", STATIC_IPV4_DNS_SECONDARY);
+        } else {
+            ESP_LOGW(TAG, "Invalid STATIC_IPV4_DNS_SECONDARY: \"%s\"",
+                     STATIC_IPV4_DNS_SECONDARY);
+        }
+    }
+#endif /* STATIC_IPV4_DNS_SECONDARY */
+}
+#endif /* USE_STATIC_IPV4 */
+
+/* --------------------------------------------------------------------------
+ * IPv6 bring-up helper
+ *
+ * Called from the event handler when WIFI_EVENT_STA_CONNECTED fires (L2 up).
+ * For SLAAC modes this triggers link-local address creation.  For static
+ * mode it additionally adds the configured global address.
+ * -------------------------------------------------------------------------- */
+#if IPV6_MODE != IPV6_MODE_DISABLED && defined(CONFIG_LWIP_IPV6)
+static void ipv6_bring_up(void)
+{
+#if IPV6_MODE == IPV6_MODE_SLAAC              || \
+    IPV6_MODE == IPV6_MODE_SLAAC_STATELESS_DHCPV6 || \
+    IPV6_MODE == IPV6_MODE_STATEFUL_DHCPV6    || \
+    IPV6_MODE == IPV6_MODE_STATIC
+    /* Create a link-local address (fe80::) for all IPv6 modes.  This is
+     * mandatory before any other IPv6 addresses can be assigned. */
+    esp_err_t err = esp_netif_create_ip6_linklocal(s_sta_netif);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_netif_create_ip6_linklocal: %s",
+                 esp_err_to_name(err));
+    }
+#endif
+
+#if IPV6_MODE == IPV6_MODE_STATIC
+    /* Add the statically configured global unicast address. */
+    esp_ip6_addr_t addr6 = {};
+    if (esp_netif_str_to_ip6(STATIC_IPV6_ADDRESS, &addr6) != ESP_OK) {
+        ESP_LOGE(TAG, "Invalid STATIC_IPV6_ADDRESS: \"%s\"",
+                 STATIC_IPV6_ADDRESS);
+        return;
+    }
+    esp_err_t aerr = esp_netif_add_ip6_address(s_sta_netif, addr6, true);
+    if (aerr != ESP_OK) {
+        ESP_LOGW(TAG, "esp_netif_add_ip6_address: %s", esp_err_to_name(aerr));
+    } else {
+        ESP_LOGI(TAG, "Static IPv6: " IPV6STR "/%d",
+                 IPV62STR(addr6), (int)STATIC_IPV6_PREFIX_LEN);
+    }
+
+    /* Optional static IPv6 DNS. */
+#ifdef STATIC_IPV6_DNS_PRIMARY
+    {
+        esp_netif_dns_info_t dns = {};
+        dns.ip.type = ESP_IPADDR_TYPE_V6;
+        if (esp_netif_str_to_ip6(STATIC_IPV6_DNS_PRIMARY,
+                                 &dns.ip.u_addr.ip6) == ESP_OK) {
+            esp_netif_set_dns_info(s_sta_netif, ESP_NETIF_DNS_MAIN, &dns);
+            ESP_LOGI(TAG, "Static IPv6 DNS primary: %s",
+                     STATIC_IPV6_DNS_PRIMARY);
+        } else {
+            ESP_LOGW(TAG, "Invalid STATIC_IPV6_DNS_PRIMARY: \"%s\"",
+                     STATIC_IPV6_DNS_PRIMARY);
+        }
+    }
+#endif /* STATIC_IPV6_DNS_PRIMARY */
+
+#ifdef STATIC_IPV6_DNS_SECONDARY
+    {
+        esp_netif_dns_info_t dns = {};
+        dns.ip.type = ESP_IPADDR_TYPE_V6;
+        if (esp_netif_str_to_ip6(STATIC_IPV6_DNS_SECONDARY,
+                                 &dns.ip.u_addr.ip6) == ESP_OK) {
+            esp_netif_set_dns_info(s_sta_netif, ESP_NETIF_DNS_BACKUP, &dns);
+            ESP_LOGI(TAG, "Static IPv6 DNS secondary: %s",
+                     STATIC_IPV6_DNS_SECONDARY);
+        } else {
+            ESP_LOGW(TAG, "Invalid STATIC_IPV6_DNS_SECONDARY: \"%s\"",
+                     STATIC_IPV6_DNS_SECONDARY);
+        }
+    }
+#endif /* STATIC_IPV6_DNS_SECONDARY */
+#endif /* IPV6_MODE_STATIC */
+
+#if (IPV6_MODE == IPV6_MODE_SLAAC_STATELESS_DHCPV6 || \
+     IPV6_MODE == IPV6_MODE_STATEFUL_DHCPV6) && \
+    defined(CONFIG_LWIP_IPV6_DHCP6)
+    /* Enable DHCPv6.  dhcp6_enable_stateless/stateful operate on the raw
+     * lwIP netif pointer, not the esp_netif handle.  We obtain it via
+     * esp_netif_get_netif_impl() which returns a (struct netif *). */
+    struct netif *lwip_netif =
+        (struct netif *)esp_netif_get_netif_impl(s_sta_netif);
+    if (lwip_netif) {
+# if IPV6_MODE == IPV6_MODE_SLAAC_STATELESS_DHCPV6
+        err_t derr = dhcp6_enable_stateless(lwip_netif);
+        if (derr != ERR_OK) {
+            ESP_LOGW(TAG, "dhcp6_enable_stateless failed: %d", (int)derr);
+        } else {
+            ESP_LOGI(TAG, "DHCPv6 stateless (options) enabled");
+        }
+# elif IPV6_MODE == IPV6_MODE_STATEFUL_DHCPV6
+        err_t derr = dhcp6_enable_stateful(lwip_netif);
+        if (derr != ERR_OK) {
+            ESP_LOGW(TAG, "dhcp6_enable_stateful failed: %d", (int)derr);
+        } else {
+            ESP_LOGI(TAG, "DHCPv6 stateful enabled");
+        }
+# endif
+    } else {
+        ESP_LOGW(TAG, "esp_netif_get_netif_impl returned NULL — DHCPv6 not started");
+    }
+#endif /* DHCPv6 modes */
+}
+#endif /* IPV6_MODE != IPV6_MODE_DISABLED */
 
 /* --------------------------------------------------------------------------
  * Event handler
@@ -177,16 +444,45 @@ static void wifi_event_handler(void *arg,
             esp_wifi_connect();
 
         } else if (event_id == WIFI_EVENT_STA_CONNECTED) {
-            /* L2 association succeeded; DHCP DISCOVER should follow within
-             * a few seconds.  Arm the watchdog so a stuck DHCP server
-             * doesn't leave us without an IP forever. */
-#if DHCP_RETRY_TIMEOUT_SEC > 0
+            /* L2 association succeeded.
+             *
+             * Static IPv4: stop the DHCP client (which may have auto-started
+             * when the interface came up) and apply the static address NOW so
+             * the netif is fully configured before we signal "connected".
+             * IP_EVENT_STA_GOT_IP will not fire via DHCP; we signal the event
+             * group ourselves below after setting the address.
+             *
+             * DHCPv4: arm the watchdog so a stuck DHCP server doesn't leave
+             * us without an IP forever. */
+#if DHCP_RETRY_TIMEOUT_SEC > 0 && !defined(USE_STATIC_IPV4)
             if (s_dhcp_watchdog) {
                 xTimerChangePeriod(s_dhcp_watchdog,
                                    pdMS_TO_TICKS(DHCP_RETRY_TIMEOUT_SEC * 1000),
                                    0);
                 xTimerStart(s_dhcp_watchdog, 0);
             }
+#endif
+
+#ifdef USE_STATIC_IPV4
+            /* Apply static address at L2-connect time so the routing table
+             * is populated before we signal success. */
+            apply_static_ipv4();
+            /* Log and signal immediately — no IP event will follow. */
+            {
+                esp_netif_ip_info_t ip;
+                if (esp_netif_get_ip_info(s_sta_netif, &ip) == ESP_OK) {
+                    ESP_LOGI(TAG, "IP address : " IPSTR, IP2STR(&ip.ip));
+                    ESP_LOGI(TAG, "Netmask    : " IPSTR, IP2STR(&ip.netmask));
+                    ESP_LOGI(TAG, "Gateway    : " IPSTR, IP2STR(&ip.gw));
+                }
+            }
+            s_retry_num = 0;
+            xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+#endif /* USE_STATIC_IPV4 */
+
+            /* Bring up IPv6 (SLAAC / DHCPv6 / static) now that L2 is up. */
+#if IPV6_MODE != IPV6_MODE_DISABLED && defined(CONFIG_LWIP_IPV6)
+            ipv6_bring_up();
 #endif
 
         } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
@@ -196,7 +492,7 @@ static void wifi_event_handler(void *arg,
             /* Clear the connected bit so callers that poll it see the drop. */
             xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
 
-#if DHCP_RETRY_TIMEOUT_SEC > 0
+#if DHCP_RETRY_TIMEOUT_SEC > 0 && !defined(USE_STATIC_IPV4)
             /* L2 link is down; pause the watchdog until we re-associate. */
             if (s_dhcp_watchdog) xTimerStop(s_dhcp_watchdog, 0);
 #endif
@@ -225,24 +521,40 @@ static void wifi_event_handler(void *arg,
             }
         }
 
-    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        ip_event_got_ip_t *ev = (ip_event_got_ip_t *)event_data;
+    } else if (event_base == IP_EVENT) {
 
-        /* ----------------------------------------------------------------
-         * Print the assigned IP to the UART log — the primary discovery
-         * mechanism for v1 (no mDNS).  The SSH task can start now.
-         * ---------------------------------------------------------------- */
-        ESP_LOGI(TAG, "IP address : " IPSTR, IP2STR(&ev->ip_info.ip));
-        ESP_LOGI(TAG, "Netmask    : " IPSTR, IP2STR(&ev->ip_info.netmask));
-        ESP_LOGI(TAG, "Gateway    : " IPSTR, IP2STR(&ev->ip_info.gw));
+        if (event_id == IP_EVENT_STA_GOT_IP) {
+#ifndef USE_STATIC_IPV4
+            /* DHCPv4 path: print the assigned address and signal ready.
+             * Under static IP this event may still fire (esp-netif raises it
+             * when the netif IP changes), but we already logged and signalled
+             * in the STA_CONNECTED handler, so skip it to avoid duplicates. */
+            ip_event_got_ip_t *ev = (ip_event_got_ip_t *)event_data;
+
+            /* ----------------------------------------------------------------
+             * Print the DHCP-assigned IP to the UART log — the primary
+             * discovery mechanism for v1 (no mDNS).  SSH task can start now.
+             * ---------------------------------------------------------------- */
+            ESP_LOGI(TAG, "IP address : " IPSTR, IP2STR(&ev->ip_info.ip));
+            ESP_LOGI(TAG, "Netmask    : " IPSTR, IP2STR(&ev->ip_info.netmask));
+            ESP_LOGI(TAG, "Gateway    : " IPSTR, IP2STR(&ev->ip_info.gw));
 
 #if DHCP_RETRY_TIMEOUT_SEC > 0
-        /* DHCP succeeded — disarm the watchdog. */
-        if (s_dhcp_watchdog) xTimerStop(s_dhcp_watchdog, 0);
+            /* DHCP succeeded — disarm the watchdog. */
+            if (s_dhcp_watchdog) xTimerStop(s_dhcp_watchdog, 0);
 #endif
 
-        s_retry_num = 0;
-        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+            s_retry_num = 0;
+            xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+#endif /* !USE_STATIC_IPV4 */
+
+#if IPV6_MODE != IPV6_MODE_DISABLED && defined(CONFIG_LWIP_IPV6)
+        } else if (event_id == IP_EVENT_GOT_IP6) {
+            ip_event_got_ip6_t *ev6 = (ip_event_got_ip6_t *)event_data;
+            ESP_LOGI(TAG, "IPv6 address: " IPV6STR,
+                     IPV62STR(ev6->ip6_info.ip));
+#endif /* IPV6_MODE != IPV6_MODE_DISABLED */
+        }
     }
 }
 
@@ -266,7 +578,7 @@ esp_err_t wifi_init_sta(void)
     s_wifi_event_group = xEventGroupCreate();
     configASSERT(s_wifi_event_group);
 
-#if DHCP_RETRY_TIMEOUT_SEC > 0
+#if DHCP_RETRY_TIMEOUT_SEC > 0 && !defined(USE_STATIC_IPV4)
     /* Create the DHCP watchdog as a one-shot timer; the event handler
      * arms it on WIFI_EVENT_STA_CONNECTED, the callback re-arms it after
      * each kick.  Period set here as a safe initial value; actual period
@@ -352,7 +664,8 @@ esp_err_t wifi_init_sta(void)
 
     /* 4. Register event handlers.
      *    instance_any_id  → all WIFI_EVENT sub-events (start, disconnect, …)
-     *    instance_got_ip  → IP_EVENT_STA_GOT_IP only */
+     *    instance_got_ip  → IP_EVENT_STA_GOT_IP only
+     *    instance_got_ip6 → IP_EVENT_GOT_IP6 (when IPv6 is enabled) */
     esp_event_handler_instance_t instance_any_id;
     esp_event_handler_instance_t instance_got_ip;
 
@@ -363,6 +676,13 @@ esp_err_t wifi_init_sta(void)
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
         IP_EVENT, IP_EVENT_STA_GOT_IP,
         &wifi_event_handler, NULL, &instance_got_ip));
+
+#if IPV6_MODE != IPV6_MODE_DISABLED && defined(CONFIG_LWIP_IPV6)
+    esp_event_handler_instance_t instance_got_ip6;
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(
+        IP_EVENT, IP_EVENT_GOT_IP6,
+        &wifi_event_handler, NULL, &instance_got_ip6));
+#endif
 
     /* 5. Build the STA config.
      *
@@ -509,6 +829,14 @@ esp_err_t wifi_init_sta(void)
         IP_EVENT, IP_EVENT_STA_GOT_IP, instance_got_ip));
     ESP_ERROR_CHECK(esp_event_handler_instance_unregister(
         WIFI_EVENT, ESP_EVENT_ANY_ID, instance_any_id));
+
+#if IPV6_MODE != IPV6_MODE_DISABLED && defined(CONFIG_LWIP_IPV6)
+    /* Note: do NOT unregister instance_got_ip6 — IPv6 addresses may be
+     * acquired long after the initial connection (RA solicitation, DHCPv6
+     * lease) and we want to log them whenever they arrive.  The event
+     * handler is lightweight (just an ESP_LOGI call) so keeping it is safe. */
+    (void)instance_got_ip6;
+#endif
 
     if (bits & WIFI_CONNECTED_BIT) {
         ESP_LOGI(TAG, "connected to \"%s\"", WIFI_SSID);

@@ -92,6 +92,24 @@ CONFIG_FREERTOS_HZ=1000
 CONFIG_LWIP_SO_REUSE=y
 CONFIG_LWIP_SO_REUSE_RXTOALL=y
 
+# IPv6 — enabled by default; wifi.c selects the addressing mode at runtime
+# via the IPV6_MODE knob in config.h (default: SLAAC).
+#
+# CONFIG_LWIP_IPV6=y             — enable the IPv6 stack (default y in IDF)
+# CONFIG_LWIP_IPV6_AUTOCONFIG=y  — SLAAC: generate a global address from
+#                                  the router's RA prefix (RFC 4862)
+# CONFIG_LWIP_IPV6_DHCP6=y      — stateless DHCPv6 for options (DNS, NTP)
+#                                  via RFC 3736; requires AUTOCONFIG=y.
+#                                  The dhcpv6 client is started by wifi.c
+#                                  when IPV6_MODE_SLAAC_STATELESS_DHCPV6 or
+#                                  IPV6_MODE_STATEFUL_DHCPV6 is selected.
+#
+# To keep the IPv6 stack completely off, set CONFIG_LWIP_IPV6=n here AND
+# define IPV6_MODE IPV6_MODE_DISABLED in config.h.
+CONFIG_LWIP_IPV6=y
+CONFIG_LWIP_IPV6_AUTOCONFIG=y
+CONFIG_LWIP_IPV6_DHCP6=y
+
 # ── WPA2/WPA3-Enterprise (EAP-TLS) ────────────────────────────────────────
 # CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT defaults to y — no override needed.
 # Uncomment below only if you need non-default enterprise options.
