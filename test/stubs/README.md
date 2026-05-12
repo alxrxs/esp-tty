@@ -1,107 +1,81 @@
 # test/stubs/ — Native Test Stubs
 
-```
-test/stubs/
-  wolfssl/
-    wolfcrypt/
-      coding.h      Base64 encode/decode (OpenSSL BIO-backed)
-      settings.h    Minimal wolfCrypt type aliases (byte, word32)
-      sha256.h      wc_InitSha256 / wc_Sha256Update / wc_Sha256Final (EVP-backed)
-  mbedtls/
-    ecdsa.h         mbedtls_ecdsa_* stubs (OpenSSL EC-backed)
-    ecp.h           mbedtls_ecp_* type stubs
-    error.h         mbedtls_strerror stub
-    gcm.h           mbedtls_gcm_* (OpenSSL EVP AEAD-backed)
-    pk.h            mbedtls_pk_parse_public_key (OpenSSL PEM-backed)
-    sha256.h        mbedtls_sha256_* (OpenSSL EVP-backed)
-  esp_err.h         ESP_OK / ESP_ERR_* constant stubs
-  esp_log.h         ESP_LOGI/W/E → fprintf stubs
-  freertos/         FreeRTOS type stubs (TaskHandle_t, etc.)
-  sdkconfig.h       Empty sdkconfig for native builds
-```
+The `[env:native]` PlatformIO environment compiles and runs unit tests on the
+host (Linux or macOS) without ESP-IDF, FreeRTOS, wolfSSH, wolfCrypt, or mbedtls
+installed as system libraries. The production library code under `lib/` includes
+headers from all of those frameworks, so the native build needs something on the
+include path that satisfies the preprocessor. The stubs in this directory fill
+that role. They are header-only (every function is a `static inline`) so they
+produce no object file of their own and carry no link-time overhead beyond the
+OpenSSL `-lcrypto` already required. They are never compiled into firmware
+builds; the `test/stubs/` path appears only in the `build_flags` of
+`[env:native]` in `platformio.ini`.
 
-## Why stubs are needed
+Two include paths are added in `platformio.ini`'s `[env:native]` section:
+`-I test/stubs` and `-I test/stubs/wolfssl`. The first puts `esp_err.h`,
+`esp_log.h`, and the `freertos/` and `mbedtls/` subdirectories on the standard
+search path, so `#include "esp_err.h"` and `#include "mbedtls/sha256.h"` both
+resolve. The second adds the wolfCrypt stub directory itself to the path, so
+`#include "wolfssl/wolfcrypt/sha256.h"` resolves from the `wolfssl/` subtree
+while also allowing `wolfcrypt/settings.h` to be reached without a prefix from
+within the stub headers that include each other. The `extra_scripts` line in the
+same `[env:native]` section points at `test/scripts/native_link_openssl.py`,
+which appends `-lcrypto` to the link step. That single flag is sufficient because
+every stub that calls an OpenSSL function includes the relevant OpenSSL header
+directly, so the linker can resolve all symbols from the system `libcrypto.so`.
 
-Native tests (the `native` PlatformIO environment) compile and run on the host
-(Linux/macOS) without ESP-IDF, wolfSSL, or mbedtls installed as libraries. The
-libraries under test (`lib/pubkey_auth`, `lib/ota_verify`) call into wolfCrypt
-and mbedtls APIs at the C level. To keep the native test binary self-contained
-and avoid cross-compilation, stub headers implement those APIs using OpenSSL 3
-(`-lcrypto`), which is available on any development machine.
+The wolfCrypt stubs under `wolfssl/wolfcrypt/` serve the code in
+`lib/pubkey_auth/`. The `settings.h` stub defines just two type aliases (`byte`
+for `unsigned char` and `word32` for `unsigned int`) so that the real wolfCrypt
+type system compiles without any platform-detection macros. The `sha256.h` stub
+maps the wolfCrypt streaming SHA-256 API (`wc_InitSha256`, `wc_Sha256Update`,
+`wc_Sha256Final`) to the OpenSSL 3 `EVP_MD_CTX` interface; `pubkey_auth.c` calls
+these when computing the SHA-256 fingerprint of an authorized public key blob.
+The `coding.h` stub provides `Base64_Decode`, backed by OpenSSL's
+`EVP_DecodeUpdate`/`EVP_DecodeFinal` pair, and mirrors wolfCrypt's buffer-overflow
+semantics by returning `BUFFER_E` when the decoded output exceeds the
+caller-supplied capacity.
 
-The stubs are header-only (inline functions in `.h` files). They are not linked
-into firmware builds; the include path for `test/stubs/` is added only in the
-`[env:native]` section of `platformio.ini`.
+The mbedtls stubs under `mbedtls/` serve the code in `lib/ota_verify/`. The
+`sha256.h` stub maps the mbedtls 3.x context-based SHA-256 API to the same
+OpenSSL EVP interface used by the wolfCrypt SHA-256 stub. The `gcm.h` stub wraps
+`EVP_aes_256_gcm()` to implement the mbedtls AES-256-GCM streaming API
+(`mbedtls_gcm_starts`, `mbedtls_gcm_update`, `mbedtls_gcm_finish`); it also
+exposes a non-standard helper `mbedtls_gcm_set_expected_tag` to work around
+OpenSSL 3's restriction on extracting the GCM authentication tag after
+`EVP_DecryptFinal_ex`, enabling `ota_verify.c`'s constant-time tag comparison
+to behave correctly under `OTA_VERIFY_NATIVE_TEST`. The ECDSA stubs span three
+headers: `ecp.h` defines `mbedtls_mpi` (backed by `BIGNUM`) and
+`mbedtls_ecp_point` / `mbedtls_ecp_keypair` (backed by `EC_KEY`); `pk.h`
+implements `mbedtls_pk_parse_public_key` using `PEM_read_bio_PUBKEY` and
+`EVP_PKEY_get1_EC_KEY`; and `ecdsa.h` implements `mbedtls_ecdsa_verify` by
+constructing an `ECDSA_SIG` from the raw `r`/`s` MPIs and calling
+`ECDSA_do_verify`. The `error.h` stub is an empty header; mbedtls error strings
+are not needed in test output. The two ESP-IDF stubs at the root of `test/stubs/`
+are similarly thin: `esp_err.h` defines the numeric `ESP_OK` / `ESP_ERR_*`
+constants and an `ESP_ERROR_CHECK` macro that calls `abort()` on failure, while
+`esp_log.h` maps the five log macros to `fprintf(stdout/stderr, ...)`.
 
-## wolfCrypt stubs (`test/stubs/wolfssl/wolfcrypt/`)
+The FreeRTOS stub is the simplest of all: `freertos/FreeRTOS.h` defines only
+`TickType_t`, `pdMS_TO_TICKS`, and `portMAX_DELAY`. No task, queue, or
+semaphore APIs are stubbed because the libraries under test do not call the
+FreeRTOS scheduler directly; the stub exists only to satisfy transitive
+`#include <freertos/FreeRTOS.h>` directives that appear in headers pulled in by
+library code at compile time.
 
-### settings.h
+## Subdir summary
 
-Defines the minimum wolfCrypt type aliases needed by `pubkey_auth.c`:
-`byte` (uint8_t) and `word32` (uint32_t). No wolfSSL feature flags are set;
-crypto is handled entirely by the EVP stubs below.
-
-### sha256.h
-
-Maps wolfCrypt SHA-256 to OpenSSL 3 EVP:
-
-```
-wc_InitSha256(s)          →  EVP_MD_CTX_new() + EVP_DigestInit_ex(EVP_sha256())
-wc_Sha256Update(s, d, n)  →  EVP_DigestUpdate(...)
-wc_Sha256Final(s, out)    →  EVP_DigestFinal_ex(...)
-```
-
-Used by `pubkey_auth.c` when computing the SHA-256 fingerprint of an authorized
-public key blob.
-
-### coding.h
-
-Provides `Base64_Decode` backed by OpenSSL's `BIO_f_base64`. Used by
-`pubkey_auth.c` when decoding the base64 blob from an OpenSSH public key line.
-
-## mbedtls stubs (`test/stubs/mbedtls/`)
-
-### sha256.h
-
-Maps the mbedtls 3.x SHA-256 context API to OpenSSL 3 EVP:
-
-```
-mbedtls_sha256_init(ctx)          →  EVP_MD_CTX_new()
-mbedtls_sha256_starts(ctx, 0)     →  EVP_DigestInit_ex(EVP_sha256())
-mbedtls_sha256_update(ctx, d, n)  →  EVP_DigestUpdate(...)
-mbedtls_sha256_finish(ctx, out)   →  EVP_DigestFinal_ex(...)
-mbedtls_sha256_free(ctx)          →  EVP_MD_CTX_free(...)
-```
-
-Used by `ota_verify.c` when computing the SHA-256 digest over the signed
-region of an OTA image.
-
-### gcm.h
-
-Maps the mbedtls AES-256-GCM API to OpenSSL `EVP_CIPHER_CTX` with
-`EVP_aes_256_gcm()`. Implements the encrypt (unused in verifier) and decrypt
-paths needed by `ota_verify.c` to authenticate and decrypt ciphertext.
-
-### pk.h / ecdsa.h / ecp.h
-
-Map the mbedtls ECDSA-P256 public key parse and verify APIs to OpenSSL EC
-key parsing and ECDSA verification. Used by `ota_verify.c` when verifying the
-64-byte raw `r||s` ECDSA signature appended to an OTA image.
-
-### error.h
-
-Provides `mbedtls_strerror` as a no-op stub (writes an empty string). Error
-strings are not needed in test output; the numeric error codes are logged
-directly.
-
-## ESP-IDF and FreeRTOS stubs
-
-- `esp_err.h` — defines `ESP_OK`, `ESP_FAIL`, and the common `ESP_ERR_*`
-  constants as integer literals. Allows headers that `#include "esp_err.h"` to
-  compile natively.
-- `esp_log.h` — maps `ESP_LOGI`, `ESP_LOGW`, `ESP_LOGE` to `fprintf` so log
-  calls in library code do not require the ESP-IDF logging subsystem.
-- `freertos/` — minimal type definitions (`TaskHandle_t`, etc.) for any header
-  that transitively includes FreeRTOS types.
-- `sdkconfig.h` — empty file. Prevents `#include "sdkconfig.h"` from failing
-  in native builds.
+| Path | What it stubs | Backed by |
+|---|---|---|
+| `freertos/FreeRTOS.h` | `TickType_t`, `pdMS_TO_TICKS`, `portMAX_DELAY` | Plain C typedefs and macros |
+| `mbedtls/error.h` | mbedtls error-string API | No-op (empty header) |
+| `mbedtls/sha256.h` | `mbedtls_sha256_init/starts/update/finish/free` | OpenSSL `EVP_MD_CTX` + `EVP_sha256()` |
+| `mbedtls/gcm.h` | `mbedtls_gcm_init/setkey/starts/update/finish/free` | OpenSSL `EVP_CIPHER_CTX` + `EVP_aes_256_gcm()` |
+| `mbedtls/ecp.h` | `mbedtls_mpi`, `mbedtls_ecp_point/group/keypair` types and init/free | OpenSSL `BIGNUM` and `EC_KEY` |
+| `mbedtls/pk.h` | `mbedtls_pk_context`, `mbedtls_pk_parse_public_key`, `mbedtls_pk_ec` | OpenSSL `PEM_read_bio_PUBKEY`, `EVP_PKEY_get1_EC_KEY` |
+| `mbedtls/ecdsa.h` | `mbedtls_ecdsa_context`, `mbedtls_ecdsa_from_keypair`, `mbedtls_ecdsa_verify` | OpenSSL `ECDSA_SIG`, `ECDSA_do_verify` |
+| `wolfssl/wolfcrypt/settings.h` | `byte` and `word32` type aliases | Plain C typedefs |
+| `wolfssl/wolfcrypt/sha256.h` | `wc_InitSha256`, `wc_Sha256Update`, `wc_Sha256Final` | OpenSSL `EVP_MD_CTX` + `EVP_sha256()` |
+| `wolfssl/wolfcrypt/coding.h` | `Base64_Decode`, `BAD_FUNC_ARG`, `BUFFER_E` | OpenSSL `EVP_DecodeUpdate`/`EVP_DecodeFinal` |
+| `esp_err.h` | `esp_err_t`, `ESP_OK`, `ESP_ERR_*`, `ESP_ERROR_CHECK` | Integer constants + abort macro |
+| `esp_log.h` | `ESP_LOGI`, `ESP_LOGW`, `ESP_LOGE`, `ESP_LOGD`, `ESP_LOGV` | `fprintf` to stdout/stderr |

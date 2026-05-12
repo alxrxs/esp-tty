@@ -1,100 +1,69 @@
 # patches/ — Managed Component Patches
 
-```
-patches/
-  wolfssl__wolfssl/
-    0001-rename-thread_local-enum-value-to-avoid-C11-keyword-conflict.patch
-  wolfssl__wolfssh/
-    0001-expose-resize-cb-setters-without-NO_FILESYSTEM.patch
-```
+This directory holds `git diff`-style patches for IDF components fetched by the
+ESP-IDF component manager. Each subdirectory is named after the component it
+targets, matching the directory name under `managed_components/` exactly (e.g.,
+`wolfssl__wolfssh` for the `wolfssl/wolfssl` IDF component).
 
-## Why patches are stored here instead of in managed_components/
+## Why patches live here instead of in managed_components/
 
 The IDF component manager stores fetched components in `managed_components/`,
-which is **gitignored**. On every clean build (or `pio run` after deleting the
-directory) the component manager re-fetches all components from the registry,
-overwriting any local edits.
-
-Storing patches separately and re-applying them at cmake configure time means:
-- The patches are tracked in git.
-- Clean builds reproduce the patched state automatically without manual steps.
-- Upstream version bumps are detected (the patch will fail to apply if the
-  target file has changed, prompting a review of the patch against the new
-  version).
+which is gitignored. On every clean build — or any `pio run` after the directory
+is deleted — the component manager re-fetches all components from the registry,
+overwriting any local edits. Patches stored here are tracked in version control
+and re-applied automatically at cmake configure time, so the patched state is
+reproduced on every build without manual intervention. A side benefit is that
+version bumps are caught early: if an upstream component changes the patched
+file, `patch` will refuse to apply and cmake configure fails with an explicit
+error, prompting a review of the patch against the new upstream source.
 
 ## How patches are applied
 
-The root `CMakeLists.txt` calls `scripts/apply_managed_patches_cmake.py` via
-`execute_process` as part of the cmake configure step. The script:
+`CMakeLists.txt` invokes `scripts/apply_managed_patches_cmake.py` via
+`execute_process` during the cmake configure step, after the component manager
+has resolved and fetched dependencies. The script:
 
-1. Scans `patches/<component>/*.patch` in lexicographic order.
-2. For each patch, runs `patch --dry-run -R` against the target directory. If
-   the patch reverses cleanly, it is already applied and is skipped.
-3. If not already applied, runs `patch -p1` in the component directory.
-4. Raises a `RuntimeError` (and cmake configure fails) if a patch cannot be
-   applied.
+1. Scans `patches/<component>/*.patch` in lexicographic order for each
+   component subdirectory.
+2. Runs `patch --dry-run -R -p1` against the target component directory. If the
+   reverse dry-run succeeds, the patch is already applied and is skipped.
+3. Runs a forward dry-run (`patch --dry-run -p1`) to verify the patch can be
+   applied cleanly. If that fails, cmake configure aborts with a descriptive
+   error (the patch context no longer matches, likely due to an upstream change).
+4. Applies the patch with `patch -p1`.
 
-The idempotency check means subsequent `pio run` invocations after the initial
-fetch do not error or double-apply.
+The idempotency check means repeated `pio run` invocations after the initial
+fetch do not double-apply patches or produce errors.
 
 See `scripts/README.md` for the full documentation of
-`apply_managed_patches_cmake.py`, and `test/scripts/README.md` for the
-`test_apply_patches.py` test that covers the patching logic.
+`apply_managed_patches_cmake.py`, and `test/scripts/README.md` for
+`test_apply_patches.py`, which covers the patching logic end-to-end.
 
 ## Current patches
 
-### wolfssl__wolfssl/0001-rename-thread_local-enum-value-to-avoid-C11-keyword-conflict.patch
+| Subdirectory | Patch file | Description |
+|---|---|---|
+| `wolfssl__wolfssl/` | `0001-rename-thread_local-enum-value-to-avoid-C11-keyword-conflict.patch` | Renames a `thread_local` enum value in wolfcrypt to avoid a C11 keyword conflict under `-std=c11`. |
+| `wolfssl__wolfssh/` | `0001-expose-resize-cb-setters-without-NO_FILESYSTEM.patch` | Moves two terminal-resize callback setters out of a `!NO_FILESYSTEM` guard so they link correctly on the bare-metal ESP32-S3. |
 
-**File patched:**
-`managed_components/wolfssl__wolfssl/wolfcrypt/src/port/Espressif/esp_sdk_mem_lib.c`
+Full context for each patch — including the problem, the fix, upstream status,
+and version compatibility — is in the per-subdirectory `README.md` files.
 
-**Problem:** The file uses `thread_local` as an enum value name:
-```c
-enum sdk_memory_segment {
-    mem_map_io = 0,
-    thread_local,       /* <-- conflicts with C11 keyword */
-    data,
-    ...
-};
-```
+## Adding a new patch
 
-C11 (which ESP-IDF uses) reserves `thread_local` as a keyword (synonym for
-`_Thread_local`). GCC with `-std=c11` rejects this enum declaration with a
-syntax error.
-
-**Fix:** Rename the enum value to `thread_local_seg` in both the enum
-declaration and the one call site that references it.
-
-**Upstream status:** The `esp_sdk_mem_lib.c` file is a diagnostic utility;
-the bridge component in `components/wolfssl/` already excludes it from
-compilation (it uses linker section symbols as C variables, which is
-incompatible with the PlatformIO build). The patch is applied anyway to avoid
-confusion if the file is ever included in a future build configuration.
-
-### wolfssl__wolfssh/0001-expose-resize-cb-setters-without-NO_FILESYSTEM.patch
-
-**File patched:**
-`managed_components/wolfssl__wolfssh/src/ssh.c`
-
-**Problem:** `wolfSSH_SetTerminalResizeCb` and `wolfSSH_SetTerminalResizeCtx`
-are compiled inside `#if defined(WOLFSSH_TERM) && !defined(NO_FILESYSTEM)`.
-Our embedded build defines `NO_FILESYSTEM` (a hard constraint — wolfSSL cannot
-use filesystem APIs on the ESP32), so both symbols are compiled out despite
-`WOLFSSH_TERM` being defined. The header `wolfssh/ssh.h` declares them
-unconditionally, causing an undefined-reference linker error.
-
-**Fix:** Split the closing `#endif` so that `wolfSSH_ChangeTerminalSize`
-(which genuinely needs filesystem support to send resize requests) stays inside
-the combined guard, while the two callback-setter functions — which only write
-into `WOLFSSH` struct fields and have no filesystem dependency — move into a
-plain `#if defined(WOLFSSH_TERM)` block.
-
-**Upstream status:** The `!defined(NO_FILESYSTEM)` guard on the setter
-functions appears to be an oversight — there is no filesystem operation in
-their bodies. A fix has not been merged upstream as of 1.4.22.
-
-**Adding new patches:** Place `.patch` files under
-`patches/<idf_component_name>/`, where `<idf_component_name>` matches the
-directory name under `managed_components/` (e.g., `wolfssl__wolfssl` for the
-`wolfssl/wolfssl` IDF component). Number them sequentially
-(`0001-`, `0002-`, ...) so they apply in order.
+1. Make the desired edit directly in `managed_components/<component>/`.
+2. Generate the patch from the project root:
+   ```
+   diff -u managed_components/<component>/path/to/original \
+            managed_components/<component>/path/to/modified \
+        > patches/<component>/0001-short-description.patch
+   ```
+   Or use `git diff` if you have staged the change inside the component
+   directory. Number files sequentially (`0001-`, `0002-`, ...) so they apply
+   in the correct order.
+3. Place the `.patch` file under `patches/<idf_component_name>/`, creating the
+   subdirectory if it does not already exist.
+4. Add a `README.md` in the same subdirectory documenting the problem, the fix,
+   upstream status, and the component version the patch was developed against.
+5. Delete `managed_components/<component>/` (or run `pio run --target clean`),
+   then rebuild to confirm the patch applies cleanly from scratch.

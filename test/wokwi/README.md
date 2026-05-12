@@ -1,64 +1,7 @@
-# test/wokwi/ — Wokwi Simulator Configuration
+# Wokwi Simulator Configuration
 
-```
-test/wokwi/
-  diagram.json    Circuit diagram (single ESP32-S3-DevKitC-1 board, no external parts)
-  wokwi.toml      Simulator manifest pointing to the wokwi build outputs
-```
+Wokwi is a browser-based ESP32 simulator that can execute a real firmware binary without physical hardware. The files in this directory configure the simulator to run the `wokwi` PlatformIO environment defined in `platformio.ini`. That environment compiles with `BRIDGE_LOOPBACK=1`, which bypasses TinyUSB CDC entirely: instead of reading from a USB host, the firmware wires the two ring buffers (USB-side and SSH-side) directly back-to-back. This lets the SSH bridge exercise its full read/write loop — including scrollback replay, window resize, and keepalive — in a simulated network environment where no USB host is present. The `sdkconfig.wokwi` overlay (`-DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.wokwi"`) applies any Kconfig overrides needed for the simulator build on top of the production defaults.
 
-## What wokwi is
+`wokwi.toml` is the simulator manifest. It points Wokwi at the ELF and flat binary produced by `pio run -e wokwi`, both located at `../../.pio/build/wokwi/` relative to this directory. `diagram.json` declares the virtual circuit: a single `board-esp32-s3-devkitc-1` component with 16 MB flash and 8 MB PSRAM, matching the N16R8 module used in production. No external connections or peripherals are wired up because the firmware only requires on-chip resources (Wi-Fi, PSRAM) that the simulator provides natively.
 
-Wokwi is a browser-based ESP32 simulator. It can run the same firmware binary
-as the real hardware for logic and protocol testing, without requiring physical
-components.
-
-The files in this directory configure Wokwi to run the `wokwi` PlatformIO
-environment. That environment compiles the firmware with `BRIDGE_LOOPBACK=1`,
-which bypasses TinyUSB CDC and wires the two ring buffers directly together so
-the SSH bridge works without a USB host. Wi-Fi is also simulated; the device
-connects to Wokwi's virtual network.
-
-## wokwi.toml
-
-```toml
-[wokwi]
-version  = 1
-elf      = "../../.pio/build/wokwi/firmware.elf"
-firmware = "../../.pio/build/wokwi/firmware.bin"
-```
-
-Points the simulator at the ELF and binary built by `pio run -e wokwi`. The
-paths are relative to this file and resolve to the PlatformIO build output
-directory.
-
-## diagram.json
-
-Defines a single board component: `board-esp32-s3-devkitc-1` with 16 MB flash
-and 8 MB PSRAM, matching the N16R8 module used in production. No external
-connections or components are wired up; the firmware needs only the on-chip
-peripherals (Wi-Fi, PSRAM) that the simulator provides.
-
-## Building the wokwi firmware
-
-```
-pio run -e wokwi
-```
-
-The output appears in `.pio/build/wokwi/`. The Wokwi browser extension or
-Wokwi CLI will pick up `firmware.elf` and `firmware.bin` from there when pointed
-at this directory.
-
-## Relationship to the QEMU smoke test
-
-The QEMU smoke test (`test/scripts/test_qemu_boot.py`) also uses the `wokwi`
-PlatformIO environment to build the firmware (the `BRIDGE_LOOPBACK=1` flag is
-what makes it compatible with both simulators). QEMU and Wokwi consume the same
-binary; their simulator fidelity and available peripheral emulation differ.
-
-Wokwi provides a visual interface and supports interactive testing. QEMU
-(`qemu-system-xtensa`, Espressif fork) provides a command-line interface
-suitable for automated script-based testing, which is what the test scripts use.
-
-Note: `qemu-system-xtensa` for ESP32-S3 does not emulate a network interface
-that the firmware can drive over TCP, so a live SSH connection into QEMU is not
-feasible. A real SSH session requires physical ESP32-S3 hardware.
+To run the simulation, first build the firmware with `pio run -e wokwi`, then open the simulation in one of two ways: open `test/wokwi/diagram.json` in VS Code with the Wokwi extension installed (it picks up `wokwi.toml` automatically), or upload `diagram.json` to wokwi.com and supply the built `.elf` and `.bin` files. The same `wokwi` environment binary is also used by the QEMU smoke test (`test/scripts/test_qemu_boot.py`), which boots the identical binary under `qemu-system-xtensa` and checks that the SSH server reaches its listen state within 60 seconds. Wokwi and QEMU share the same binary; they differ in peripheral fidelity and interface — Wokwi provides an interactive visual view while QEMU suits automated scripted testing.
