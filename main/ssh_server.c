@@ -16,6 +16,7 @@
 #include "bridge.h"
 #include "term_resize.h"
 #include "ota_session.h"
+#include "ssh_keepalive.h"
 #include "config.h"   /* SSH_PORT, AUTHORIZED_PUBKEYS, OTA_AUTHORIZED_PUBKEY */
 
 #include <stdio.h>
@@ -51,6 +52,12 @@ static WOLFSSH      *s_active_ssh  = NULL;
 static int           s_active_fd   = -1;
 static volatile bool s_pump_stop   = false;
 static bool          s_pumps_running = false;  /* true only while both pump tasks are live */
+
+#if SSH_KEEPALIVE_INTERVAL_SEC > 0
+/* Last tick at which pump_ssh_to_usb received inbound data from the client.
+ * Written by pump_ssh_to_usb; read by the main session loop for keepalive. */
+static volatile TickType_t s_last_ssh_rx_tick = 0;
+#endif
 
 /*
  * Counting semaphore for pump task completion synchronisation.
@@ -90,6 +97,17 @@ static SemaphoreHandle_t s_pump_done_sem = NULL;
 #endif
 #ifndef TCP_KEEPALIVE_COUNT
 #define TCP_KEEPALIVE_COUNT      3
+#endif
+
+/* SSH-protocol-level keepalive (application-layer).
+ * Sends SSH_MSG_GLOBAL_REQUEST ("keepalive@openssh.com", want-reply=1) after
+ * INTERVAL_SEC seconds of idleness; drops the session after COUNT_MAX misses.
+ * Set INTERVAL_SEC to 0 to disable (guarded by #if SSH_KEEPALIVE_INTERVAL_SEC>0). */
+#ifndef SSH_KEEPALIVE_INTERVAL_SEC
+#define SSH_KEEPALIVE_INTERVAL_SEC  30
+#endif
+#ifndef SSH_KEEPALIVE_COUNT_MAX
+#define SSH_KEEPALIVE_COUNT_MAX     3
 #endif
 
 /* Number of lines of scrollback to replay when a new SSH client connects.
@@ -191,6 +209,9 @@ static int ssh_read_cb(void *ctx, uint8_t *buf, size_t cap)
     int n = wolfSSH_stream_read(ssh, buf, (word32)cap);
     if (n == WS_WANT_READ) return 0;  /* no data yet, retry */
     if (n <= 0) return -1;
+#if SSH_KEEPALIVE_INTERVAL_SEC > 0
+    s_last_ssh_rx_tick = xTaskGetTickCount();
+#endif
     return n;
 }
 
@@ -463,6 +484,17 @@ static void ssh_server_task(void *arg)
         xTaskCreate(pump_ssh_to_usb, "pump_a2b", 8192, a2b, 6, NULL);
         xTaskCreate(pump_usb_to_ssh, "pump_b2a", 8192, b2a, 6, NULL);
 
+#if SSH_KEEPALIVE_INTERVAL_SEC > 0
+        /* Initialise keepalive state for this session. */
+        ssh_keepalive_t ka;
+        s_last_ssh_rx_tick = xTaskGetTickCount();
+        ssh_keepalive_init(&ka,
+            (uint32_t)pdMS_TO_TICKS(SSH_KEEPALIVE_INTERVAL_SEC * 1000UL),
+            (uint32_t)SSH_KEEPALIVE_COUNT_MAX,
+            (uint32_t)xTaskGetTickCount());
+        TickType_t prev_rx_tick = s_last_ssh_rx_tick;
+#endif
+
         /* Block until the session ends (pump tasks set s_pump_stop), but
          * also poll the listen socket so an incoming connection preempts the
          * current session. Without this, a new client would queue in the
@@ -478,6 +510,36 @@ static void ssh_server_task(void *arg)
                 s_pump_stop = true;
                 break;
             }
+
+#if SSH_KEEPALIVE_INTERVAL_SEC > 0
+            TickType_t now = xTaskGetTickCount();
+            TickType_t cur_rx_tick = s_last_ssh_rx_tick;
+            bool got_inbound = (cur_rx_tick != prev_rx_tick);
+            prev_rx_tick = cur_rx_tick;
+
+            ssh_ka_action_t act = ssh_keepalive_tick(&ka, (uint32_t)now,
+                                                     got_inbound);
+            if (act == SSH_KA_SEND) {
+                static const char ka_name[] = "keepalive@openssh.com";
+                int kr = wolfSSH_global_request(ssh,
+                             (const unsigned char *)ka_name,
+                             (word32)sizeof(ka_name) - 1, 1);
+                if (kr == WS_SUCCESS) {
+                    ssh_keepalive_sent(&ka, (uint32_t)now);
+                } else {
+                    ESP_LOGW(TAG, "SSH keepalive send failed (%d), dropping", kr);
+                    s_pump_stop = true;
+                    break;
+                }
+            } else if (act == SSH_KA_DROP) {
+                ESP_LOGW(TAG,
+                    "SSH keepalive: peer unresponsive after %lu probes, "
+                    "dropping session",
+                    (unsigned long)ka.unanswered);
+                s_pump_stop = true;
+                break;
+            }
+#endif
         }
 
         ESP_LOGI(TAG, "Session ended, cleaning up");
