@@ -86,6 +86,8 @@ idf_component_register(
         "ota_session.c"
         "${CMAKE_CURRENT_LIST_DIR}/../lib/ota_verify/ota_verify.c"
         "${CMAKE_CURRENT_LIST_DIR}/../lib/ota_stream/ota_stream.c"
+        "${CMAKE_CURRENT_LIST_DIR}/../lib/mdns_dispatch/mdns_dispatch.c"
+        "${CMAKE_CURRENT_LIST_DIR}/../lib/ssh_keepalive/ssh_keepalive.c"
     INCLUDE_DIRS
         "."
         "${CMAKE_CURRENT_LIST_DIR}/../lib/ring"
@@ -95,6 +97,8 @@ idf_component_register(
         "${CMAKE_CURRENT_LIST_DIR}/../lib/pubkey_auth"
         "${CMAKE_CURRENT_LIST_DIR}/../lib/ota_verify"
         "${CMAKE_CURRENT_LIST_DIR}/../lib/ota_stream"
+        "${CMAKE_CURRENT_LIST_DIR}/../lib/mdns_dispatch"
+        "${CMAKE_CURRENT_LIST_DIR}/../lib/ssh_keepalive"
     REQUIRES
         wolfssl
         wolfssl__wolfssh

@@ -70,6 +70,7 @@
 
 #if !defined(BRIDGE_LOOPBACK) && defined(MDNS_ENABLE)
 #include "mdns.h"
+#include "mdns_dispatch.h"
 #endif
 
 #if !defined(BRIDGE_LOOPBACK) && defined(NTP_ENABLE)
@@ -564,8 +565,6 @@ static void ntp_dispatch_start(void)
  * -------------------------------------------------------------------------- */
 #if !defined(BRIDGE_LOOPBACK) && defined(MDNS_ENABLE)
 
-static volatile bool s_mdns_started = false;
-
 static void mdns_start_task(void *pvParameters)
 {
     (void)pvParameters;
@@ -596,17 +595,18 @@ static void mdns_start_task(void *pvParameters)
     vTaskDelete(NULL);
 }
 
-static void mdns_dispatch_start(void)
+static int mdns_xtask_create(void)
 {
-    if (s_mdns_started) return;
-    s_mdns_started = true;
-
     BaseType_t ret = xTaskCreate(mdns_start_task, "mdns_start",
                                  4096, NULL,
                                  tskIDLE_PRIORITY + 1, NULL);
-    if (ret != pdPASS) {
+    return (ret == pdPASS) ? 1 : 0;
+}
+
+static void mdns_dispatch_start(void)
+{
+    if (!mdns_dispatch_once(mdns_xtask_create)) {
         ESP_LOGW(TAG, "xTaskCreate(mdns_start_task) failed -- mDNS not started");
-        s_mdns_started = false;   /* allow a retry on next connect */
     }
 }
 
