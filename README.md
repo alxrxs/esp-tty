@@ -95,9 +95,16 @@ I (1203) wifi: WiFi MAC: 1c:db:d4:74:a1:fc
 I (5026) wifi: IP address : 192.168.1.42
 I (5037) host_key: Host key SHA-256 fingerprint: 88:e0:a6:58:...
 I (5079) ssh_server: Listening on TCP port 22
+I (5082) wifi: mDNS started: hostname=esp-tty.local, advertising _ssh._tcp port 22
 ```
 
-Connect:
+Connect by mDNS name (no need to look up the IP):
+
+```
+ssh tty@esp-tty.local
+```
+
+Or by IP if your resolver doesn't support mDNS:
 
 ```
 ssh tty@192.168.1.42
@@ -325,9 +332,10 @@ System dependencies (not pip-installable):
 - **One SSH session at a time.** The target's serial console is a
   single shared resource. A new connection preempts the active one;
   there's no multiplexing layer.
-- **Network discovery via DHCP hostname.** On routers that forward
-  DHCP-supplied hostnames into local DNS, the device is reachable as
-  `<DEVICE_HOSTNAME>.<local-domain>`.
+- **mDNS / Bonjour.** The device announces itself as
+  `<DEVICE_HOSTNAME>.local` via multicast DNS (RFC 6762) and advertises
+  the SSH service as `_ssh._tcp`.  Works with Avahi (Linux), Bonjour
+  (macOS/Windows), and any mDNS-aware resolver.
 - **Serial-data bridge only.** GPIO control of the target's reset or
   boot pins is out of scope.
 - **eFuses are left unprogrammed by design** so the device stays

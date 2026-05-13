@@ -12,7 +12,10 @@
  * -------------------------------------------------------------------------- */
 
 /* -- Option A: WPA2/WPA3-Personal (PSK) ----------------------------------- */
+/* IEEE 802.11 SSID. Max 32 bytes (stored in wifi_sta_config_t.ssid[32]). */
 #define WIFI_SSID   "your-ssid-here"
+/* WPA passphrase. Range: 8..63 bytes (WPA2/WPA3-PSK spec; IDF stores in
+ * wifi_sta_config_t.password[64], so 63 bytes + NUL). */
 #define WIFI_PASS   "your-password-here"
 
 /* -- Option B: WPA2/WPA3-Enterprise (EAP-TLS) ----------------------------- *
@@ -23,6 +26,7 @@
  * Outer/anonymous identity sent in Phase 1 (before TLS tunnel is up).
  * Many RADIUS servers require this to be  anonymous@<realm>  for privacy.
  * If your server accepts the cert CN directly, use that instead.
+ * EAP_IDENTITY: Max 127 bytes (esp_eap_client_set_identity limit).
 
 #define WIFI_USE_ENTERPRISE
 #define WIFI_SSID           "your-enterprise-ssid"
@@ -32,6 +36,7 @@
  * Optional: set EAP_DISABLE_TIME_CHECK to 1 if the device has no SNTP/RTC
  * and cert expiry validation is failing at boot.
  * WARNING: this removes a security check; enable SNTP in production instead.
+ * Define to enable; otherwise undefined.
 
 #define EAP_DISABLE_TIME_CHECK  1
 
@@ -40,6 +45,7 @@
 /* --------------------------------------------------------------------------
  * SSH server
  * -------------------------------------------------------------------------- */
+/* TCP port the SSH server listens on. Range: 1..65535 (uint16_t). */
 #define SSH_PORT    22
 
 /* One OR MORE authorised public keys in OpenSSH format, comma-separated.
@@ -51,6 +57,13 @@
  * surrounding braces. Use a line-continuation backslash on each line except
  * the last. Only ED25519 keys are supported (wolfSSH pubkey auth).
  *
+ * Each key string: "ssh-ed25519 <base64> <comment>".  The base64 blob is
+ * decoded into a 512-byte staging buffer (pubkey_compute_hash in
+ * lib/pubkey_auth/pubkey_auth.c), so the base64 field must decode to at
+ * most 512 bytes (~684 base64 chars).  An ED25519 key blob is 51 bytes
+ * (68 base64 chars), well within this limit.  The number of entries is
+ * bounded by MAX_TTY_KEYS (default 8; only that many hashes are stored).
+ *
  * Example with two keys (add or remove entries as needed): */
 #define AUTHORIZED_PUBKEYS \
     "ssh-ed25519 AAAA...key1 user@host1", \
@@ -60,6 +73,9 @@
  * Can be the same as one of the AUTHORIZED_PUBKEYS or a separate deployment key.
  * This one is still a single string (not a list).
  * Only ED25519 keys are supported.
+ *
+ * Same blob limit as AUTHORIZED_PUBKEYS: base64 field must decode to at most
+ * 512 bytes (~684 base64 chars).
  *
  * Usage: ssh -i <ota-key> ota@<device-ip> < firmware.bin.ota
  */
@@ -88,10 +104,17 @@
  *   Linux/macOS pick up CDC ACM devices by class, not by VID/PID, so any
  *   change here only affects lsusb display + Windows driver-matching.
  * -------------------------------------------------------------------------- */
+/* Vendor ID. Range: 0x0000..0xFFFF (uint16_t). */
 #define USB_VID                  0x303a     /* Espressif Systems */
+/* Product ID. Range: 0x0000..0xFFFF (uint16_t). */
 #define USB_PID                  0x4001     /* TinyUSB default CDC */
+/* BCD-encoded device version (e.g. 0x0100 = 1.0.0). Range: 0x0000..0xFFFF (uint16_t BCD). */
 #define USB_DEVICE_VERSION       0x0100     /* bcdDevice = 1.0.0 (BCD encoded) */
 
+/* USB string descriptors.
+ * The esp_tinyusb wrapper converts ASCII to UTF-16LE and caps each string at
+ * MAX_DESC_BUF_SIZE-1 = 31 characters (descriptors_control.c); longer values
+ * are silently truncated.  Max 31 characters each. */
 #define USB_MANUFACTURER_STRING  "Your Company"
 #define USB_PRODUCT_STRING       "Your Product"
 #define USB_SERIAL_STRING        "SN-00000001"
@@ -104,6 +127,8 @@
  * router's lease table (and is reachable as <hostname>.<local-domain> if the
  * router forwards local DNS).  Keep it short, lowercase, no dots -- RFC 952
  * applies (letters, digits, hyphens; must start with a letter).
+ * Max 32 bytes (ESP_NETIF_HOSTNAME_MAX_SIZE in esp_netif_lwip.c; longer values
+ * are rejected by esp_netif_set_hostname with an error log).
  * -------------------------------------------------------------------------- */
 #define DEVICE_HOSTNAME          "esp-tty"
 
@@ -120,14 +145,17 @@
  * When USE_STATIC_IPV4 is defined, STATIC_IPV4_ADDRESS, STATIC_IPV4_NETMASK,
  * and STATIC_IPV4_GATEWAY are REQUIRED.  DNS entries are optional.
  *
+ * USE_STATIC_IPV4: define to enable static IPv4; otherwise undefined (DHCPv4).
+ * All IPv4 address strings: max 15 characters ("255.255.255.255").
+ *
  * Example:
 
 #define USE_STATIC_IPV4
 #define STATIC_IPV4_ADDRESS      "10.57.16.91"
 #define STATIC_IPV4_NETMASK      "255.255.255.0"
 #define STATIC_IPV4_GATEWAY      "10.57.16.1"
-#define STATIC_IPV4_DNS_PRIMARY  "1.1.1.1"       // optional
-#define STATIC_IPV4_DNS_SECONDARY "1.0.0.1"      // optional
+#define STATIC_IPV4_DNS_PRIMARY  "1.1.1.1"       // optional; max 15 characters
+#define STATIC_IPV4_DNS_SECONDARY "1.0.0.1"      // optional; max 15 characters
 
  * -------------------------------------------------------------------------- */
 
@@ -185,6 +213,13 @@
  * #define IPV6_MODE  IPV6_MODE_STATEFUL_DHCPV6
  *
  * -- Option 5: Static IPv6 ------------------------------------------------
+ * IPV6_MODE: one of IPV6_MODE_DISABLED, IPV6_MODE_SLAAC,
+ *   IPV6_MODE_SLAAC_STATELESS_DHCPV6, IPV6_MODE_STATEFUL_DHCPV6,
+ *   IPV6_MODE_STATIC (integer enum values 0..4 defined in wifi.c).
+ * STATIC_IPV6_ADDRESS / STATIC_IPV6_GATEWAY: max 45 characters (IPv4-mapped
+ *   form "0000:0000:0000:0000:0000:ffff:255.255.255.255"; pure IPv6 max 39).
+ * STATIC_IPV6_PREFIX_LEN: Range: 0..128 (used only in the boot log).
+ * DNS strings: same 45-character limit as STATIC_IPV6_ADDRESS.
 
 #define IPV6_MODE               IPV6_MODE_STATIC
 #define STATIC_IPV6_ADDRESS     "2001:db8::dead:beef"
@@ -242,8 +277,20 @@
  * project never burns a custom MAC into eFuse.  Leave the line below
  * commented out to keep the factory MAC; wifi.c will print a clear error
  * naming the constraint if you set an invalid one.
+ *
+ * Exactly 6 bytes (fixed-size initializer list for uint8_t[6]).
  */
 /* #define WIFI_MAC_BYTES  { 0x02, 0x12, 0x34, 0x56, 0x78, 0x9A } */
+
+/* --------------------------------------------------------------------------
+ * mDNS / Bonjour
+ *
+ * mDNS is enabled by default: the device announces itself as
+ * <DEVICE_HOSTNAME>.local on the LAN and advertises the SSH service
+ * on _ssh._tcp.  Adds ~5 KB of flash and a small multicast cost.
+ * Define to disable mDNS; otherwise undefined (mDNS enabled).
+ */
+/* #define MDNS_DISABLE 1 */
 
 /* --------------------------------------------------------------------------
  * Operational tuning -- leave the defaults unless you have a reason
@@ -259,7 +306,8 @@
  *
  * Set to a positive integer if you'd rather have the device proceed
  * without WiFi after a finite number of failures (e.g. for a tabletop
- * dev workflow where you might want to use the USB side without WiFi). */
+ * dev workflow where you might want to use the USB side without WiFi).
+ * Max practical: 32767 (compared against int s_retry_num in wifi.c). */
 #define WIFI_MAX_RETRY              0
 /* #define WIFI_MAX_RETRY              10  // tabletop: give up after 10 tries */
 
@@ -269,16 +317,22 @@
  *
  * Protects against the case where the AP is up but the DHCP server is
  * stuck -- lwIP gives up DHCP DISCOVER after a few retries on its own,
- * leaving the device IP-less indefinitely.  Set to 0 to disable. */
+ * leaving the device IP-less indefinitely.  Set to 0 to disable.
+ * Max practical: 3600 (1 hour); the value is multiplied by 1000 for
+ * pdMS_TO_TICKS, so values above ~4294967 overflow uint32_t. */
 #define DHCP_RETRY_TIMEOUT_SEC      30
 /* #define DHCP_RETRY_TIMEOUT_SEC      0   // disable watchdog */
 
 /* Max number of TTY pubkeys that can appear in AUTHORIZED_PUBKEYS.
- * Bump if you have more than 8 admins. */
+ * Bump if you have more than 8 admins.
+ * Max practical: 64 (each entry uses a 32-byte SHA-256 hash slot in the
+ * static s_authkey_hashes array; larger values grow .bss proportionally). */
 #define MAX_TTY_KEYS                8
 
 /* SSH handshake + auth timeout (seconds).  A client that does not complete
- * authentication within this window is dropped, freeing the session slot. */
+ * authentication within this window is dropped, freeing the session slot.
+ * Stored in struct timeval.tv_sec (long) for SO_RCVTIMEO.
+ * Max practical: 3600. */
 #define SSH_HANDSHAKE_TIMEOUT_SEC   30
 
 /* TCP keepalive on the SSH socket (RFC 1122 sec 4.2.3.6).
@@ -286,14 +340,19 @@
  *   INTVL = seconds between subsequent probes
  *   COUNT = unanswered probes before the connection is dropped
  * Defaults detect a dead peer in about 90 s.  Bump IDLE for cellular
- * (e.g. 600 / 60 / 3); lower for fragile LAN paths. */
+ * (e.g. 600 / 60 / 3); lower for fragile LAN paths.
+ * IDLE and INTVL: stored as 1000*value in lwIP's u32_t (milliseconds);
+ *   max 4294967 seconds before uint32_t overflow.
+ * COUNT: stored as u32_t probe count; max 4294967295 (use small values). */
 #define TCP_KEEPALIVE_IDLE_SEC      60
 #define TCP_KEEPALIVE_INTVL_SEC     10
 #define TCP_KEEPALIVE_COUNT         3
 
 /* How long the new firmware has to prove itself before the bootloader
  * rolls back.  Starts ticking at app_main(); the SSH server marks the
- * image valid this many ms after boot. */
+ * image valid this many ms after boot.
+ * Passed to pdMS_TO_TICKS (TickType_t / uint32_t); max 4294967295 ms
+ * (~49 days) before overflow. Max practical: 300000 (5 minutes). */
 #define OTA_ROLLBACK_DELAY_MS       30000
 
 /* --------------------------------------------------------------------------
@@ -301,14 +360,20 @@
  * -------------------------------------------------------------------------- */
 
 /* Per-direction ring buffer between SSH and USB CDC.  16 KB handles
- * bursty workloads at 115200 baud with room to spare. */
+ * bursty workloads at 115200 baud with room to spare.
+ * Allocated from PSRAM via heap_caps_malloc. Max practical: 4 MB
+ * (two rings are allocated; leave headroom for scrollback and heap). */
 #define RING_BUFFER_BYTES           (16 * 1024)
 
 /* Scrollback capacity: total bytes retained.  At 80 cols this is roughly
  * 1600 lines of plain text; higher with shorter lines, lower with binary
- * output.  Increase if your target produces dense log bursts. */
+ * output.  Increase if your target produces dense log bursts.
+ * Allocated from PSRAM. Max practical: 4 MB (ESP32-S3-N16R8 has 8 MB
+ * PSRAM; leave headroom for ring buffers and heap). */
 #define SCROLLBACK_BUFFER_BYTES     (128 * 1024)
 
 /* Number of lines of scrollback to replay when a new SSH client connects.
- * Lower this if the connect-time scrollback feels noisy. */
+ * Lower this if the connect-time scrollback feels noisy.
+ * Passed as int max_lines to scrollback_get_lines(); max INT_MAX
+ * (2147483647), though practically bounded by SCROLLBACK_BUFFER_BYTES. */
 #define SCROLLBACK_REPLAY_LINES     1000

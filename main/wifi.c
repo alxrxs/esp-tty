@@ -68,6 +68,10 @@
 #include "esp_eap_client.h"
 #endif
 
+#if !defined(BRIDGE_LOOPBACK) && !defined(MDNS_DISABLE)
+#include "mdns.h"
+#endif
+
 /* DHCPv6 requires the raw lwIP netif handle, obtained via
  * esp_netif_get_netif_impl().  Pull in dhcp6.h only when needed. */
 #if defined(CONFIG_LWIP_IPV6) && defined(CONFIG_LWIP_IPV6_DHCP6)
@@ -123,6 +127,13 @@
  * Define DEVICE_HOSTNAME in config.h to override. */
 #ifndef DEVICE_HOSTNAME
 #define DEVICE_HOSTNAME  "esp-tty"
+#endif
+
+/* SSH port -- used by the mDNS service advertisement.  config.h normally
+ * defines this; provide a sane fallback in case it is absent (e.g. unit
+ * builds that include wifi.c but not config.h). */
+#ifndef SSH_PORT
+#define SSH_PORT  22
 #endif
 
 #ifndef WIFI_USE_ENTERPRISE
@@ -427,6 +438,67 @@ static void ipv6_bring_up(void)
 #endif /* IPV6_MODE != IPV6_MODE_DISABLED */
 
 /* --------------------------------------------------------------------------
+ * mDNS -- hostname advertisement and _ssh._tcp service record
+ *
+ * Runs as a short-lived FreeRTOS task so the event handler (which runs in
+ * the system event task with a limited stack) is not burdened with mDNS init.
+ * The task deletes itself on completion or on any fatal error.
+ *
+ * Guarded by !BRIDGE_LOOPBACK && !MDNS_DISABLE -- the Wokwi/QEMU simulation
+ * has no real radio and no use for mDNS; users who want to suppress mDNS can
+ * define MDNS_DISABLE in config.h.
+ * -------------------------------------------------------------------------- */
+#if !defined(BRIDGE_LOOPBACK) && !defined(MDNS_DISABLE)
+
+static volatile bool s_mdns_started = false;
+
+static void mdns_start_task(void *pvParameters)
+{
+    (void)pvParameters;
+
+    esp_err_t err = mdns_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "mdns_init failed: %s", esp_err_to_name(err));
+        vTaskDelete(NULL);
+        return;
+    }
+
+    err = mdns_hostname_set(DEVICE_HOSTNAME);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "mdns_hostname_set(\"%s\") failed: %s",
+                 DEVICE_HOSTNAME, esp_err_to_name(err));
+        /* Non-fatal -- continue so the service record is still published. */
+    }
+
+    err = mdns_service_add(NULL, "_ssh", "_tcp", SSH_PORT, NULL, 0);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "mdns_service_add(_ssh._tcp) failed: %s",
+                 esp_err_to_name(err));
+    }
+
+    ESP_LOGI(TAG, "mDNS started: hostname=%s.local, advertising _ssh._tcp port %d",
+             DEVICE_HOSTNAME, SSH_PORT);
+
+    vTaskDelete(NULL);
+}
+
+static void mdns_dispatch_start(void)
+{
+    if (s_mdns_started) return;
+    s_mdns_started = true;
+
+    BaseType_t ret = xTaskCreate(mdns_start_task, "mdns_start",
+                                 4096, NULL,
+                                 tskIDLE_PRIORITY + 1, NULL);
+    if (ret != pdPASS) {
+        ESP_LOGW(TAG, "xTaskCreate(mdns_start_task) failed -- mDNS not started");
+        s_mdns_started = false;   /* allow a retry on next connect */
+    }
+}
+
+#endif /* !BRIDGE_LOOPBACK && !MDNS_DISABLE */
+
+/* --------------------------------------------------------------------------
  * Event handler
  *
  * Runs in the system event task context (stack ~3 kB).  Keep it lean.
@@ -478,6 +550,9 @@ static void wifi_event_handler(void *arg,
             }
             s_retry_num = 0;
             xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+#if !defined(BRIDGE_LOOPBACK) && !defined(MDNS_DISABLE)
+            mdns_dispatch_start();
+#endif
 #endif /* USE_STATIC_IPV4 */
 
             /* Bring up IPv6 (SLAAC / DHCPv6 / static) now that L2 is up. */
@@ -546,6 +621,9 @@ static void wifi_event_handler(void *arg,
 
             s_retry_num = 0;
             xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+#if !defined(BRIDGE_LOOPBACK) && !defined(MDNS_DISABLE)
+            mdns_dispatch_start();
+#endif
 #endif /* !USE_STATIC_IPV4 */
 
 #if IPV6_MODE != IPV6_MODE_DISABLED && defined(CONFIG_LWIP_IPV6)

@@ -2,3 +2,4 @@ dependencies:
   espressif/esp_tinyusb: "^2.2.0"
   wolfssl/wolfssl: ">=5.7.4"
   wolfssl/wolfssh: ">=1.4.20"
+  espressif/mdns: ">=1.0.0"
