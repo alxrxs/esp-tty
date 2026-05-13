@@ -348,6 +348,26 @@
 #define TCP_KEEPALIVE_INTVL_SEC     10
 #define TCP_KEEPALIVE_COUNT         3
 
+/* SSH-protocol-level keepalive (application-layer, distinct from TCP keepalive).
+ * Sends SSH_MSG_GLOBAL_REQUEST ("keepalive@openssh.com", want-reply=1) after
+ * INTERVAL_SEC seconds of pump-loop idleness; drops the session after
+ * COUNT_MAX unanswered probes.  Mirrors OpenSSH ClientAliveInterval /
+ * ClientAliveCountMax semantics.  Defeats NAT timeouts that drop the TCP
+ * connection between TCP keepalive probes.
+ *
+ * INTERVAL_SEC: seconds of idleness before the first probe.
+ *   Set to 0 to disable SSH-level keepalive entirely (TCP keepalive remains).
+ *   Stored as pdMS_TO_TICKS(SSH_KEEPALIVE_INTERVAL_SEC * 1000) in
+ *   ssh_keepalive_t.interval_ticks (TickType_t / uint32_t); max 4294967
+ *   seconds before overflow. Range: 0..3600.
+ *
+ * COUNT_MAX: unanswered probes before the session is dropped.
+ *   Default 3 gives ~90 s detection time with the default 30 s interval,
+ *   matching OpenSSH defaults.  Stored in ssh_keepalive_t.count_max (uint32_t).
+ *   Range: 1..1000. */
+#define SSH_KEEPALIVE_INTERVAL_SEC  30
+#define SSH_KEEPALIVE_COUNT_MAX     3
+
 /* How long the new firmware has to prove itself before the bootloader
  * rolls back.  Starts ticking at app_main(); the SSH server marks the
  * image valid this many ms after boot.
