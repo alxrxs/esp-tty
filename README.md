@@ -133,6 +133,29 @@ over the bridge, with full TTY behaviour (echo, line editing,
 job control, scrollback). This is the primary use case: a second
 network path to your server's console, independent of its main NIC.
 
+**Recommended for reliability** -- the stock unit has
+`Restart=always` but systemd's default rate-limit
+(`StartLimitBurst=5 / StartLimitIntervalSec=10`) makes it give up
+after a handful of restarts in quick succession. Every time the
+ESP32-S3 reboots (OTA, brief power glitch, USB hub hiccup), the CDC
+node re-enumerates and getty restarts; on a flapping link that's
+easy to exceed. Disable the rate-limit so getty restarts forever:
+
+```
+sudo mkdir -p /etc/systemd/system/serial-getty@ttyACM0.service.d
+sudo tee /etc/systemd/system/serial-getty@ttyACM0.service.d/restart-limits.conf <<'EOF'
+[Service]
+RestartSec=2
+StartLimitIntervalSec=0
+EOF
+sudo systemctl daemon-reload
+sudo systemctl restart serial-getty@ttyACM0.service
+```
+
+With `StartLimitIntervalSec=0` and `RestartSec=2`, getty respawns
+every 2 s indefinitely no matter how often the device re-enumerates.
+This is the right setting for an unattended out-of-band console.
+
 ## Configuration
 
 Every per-deployment knob lives in `main/config.h` (copied from
