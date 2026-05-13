@@ -2,68 +2,64 @@
 
 ## ESP32-S3-DevKitC-1 N16R8 hardware quirks
 
-The devkit exposes two USB endpoints when plugged in, but **which `/dev/ttyACM*`
-device is which depends on what mode the chip is in**.
+The devkit exposes two USB endpoints when plugged in. Which `/dev/ttyACM*`
+device is which depends on what the chip is currently doing.
 
 ### Port layout
 
-| `/dev/ttyACM?` | USB VID:PID | What it is | When it appears |
+| device | USB VID:PID | what it is | when present |
 |---|---|---|---|
-| usually `ttyACM0` | `1a86:55d3` | CH340 USB-UART, wired to ESP32-S3 UART0 (the boot-ROM and `ESP_LOG*` console) | Always, regardless of chip state |
-| usually `ttyACM1` | `303a:1001` (download mode) | ESP32-S3 native USB Serial-JTAG | Only while the bootloader is running or no app has taken over native USB |
-| usually `ttyACM1` | `303a:4001` (running app) | esp-tty's own TinyUSB CDC endpoint (the SSH-bridge data path) | Once `main.c` has called `tinyusb_driver_install` |
+| `ttyACM0` | `1a86:55d3` | CH340 USB-UART wired to ESP32-S3 UART0 (the boot-ROM and `ESP_LOG*` console) | always |
+| `ttyACM1` | `303a:1001` | ESP32-S3 native USB Serial-JTAG (download/bootloader interface) | only while the bootloader is running, or while no app has claimed native USB |
+| `ttyACM1` | `303a:4001` | esp-tty's TinyUSB CDC endpoint (the SSH-bridge data path the Linux host uses) | once `main.c` calls `tinyusb_driver_install` |
 
-The CH340 (`ttyACM0`) is the **only port that carries the ESP-IDF boot log
-across all chip states**. The JTAG port (`ttyACM1` at `303a:1001`)
-disappears the moment TinyUSB takes over native USB and gets replaced by
-the firmware's CDC endpoint (`303a:4001`).
+ttyACM0 (CH340) is the **only port that carries the ESP-IDF boot log
+across all chip states**. ttyACM1 swaps identity between `1001` (JTAG)
+and `4001` (running app) on every reset; don't hard-code which one it
+is at any given moment -- check the VID:PID.
 
-### Reset procedures
+### Auto-reset works -- it is just the standard ESP devkit circuit
 
-**The CH340's RTS/DTR auto-reset wiring on this devkit is unreliable.**
-esptool's default `--before default_reset --after hard_reset` against
-`ttyACM0` will frequently leave the chip in an indeterminate state or
-fail to reboot it. Don't waste time on it.
+The devkit has the usual two-transistor auto-reset wiring: DTR drives a
+transistor that pulls IO0 low, RTS drives another that pulls EN low,
+arranged so a port-open or RTS/DTR pulse from the host can put the
+chip into download mode or hard-reset it. `esptool --before
+default_reset --after hard_reset` against `/dev/ttyACM0` is reliable
+and is what `make flash` uses under the hood.
 
-Use one of the following instead:
+**Side effect:** opening ttyACM0 with default Linux termios asserts
+DTR+RTS, which the auto-reset circuit interprets as a reset pulse, so
+the chip reboots the instant `cat /dev/ttyACM0` runs. This is *by
+design*, not a fault. Tools that want to read the running console
+without resetting must explicitly deassert the lines first:
 
-1. **Physical EN button on the devkit.** Always works.
-2. **`make flash`.** PlatformIO drives the reset through the correct
-   USB path; this is the canonical way to reset and reflash in one step.
-3. **`esptool --port /dev/ttyACM1 --chip esp32s3 --before usb_reset --after no_reset run`**
-   when `ttyACM1` is the JTAG interface (`303a:1001`). `usb_reset` issues
-   a USB control transfer that the JTAG peripheral honours regardless of
-   RTS/DTR wiring. Will NOT work once the running app has remapped
-   `ttyACM1` to its TinyUSB CDC endpoint (`303a:4001`) -- at that point
-   you'd be poking the bridge, not the bootloader.
+- `picocom --noreset -b 115200 /dev/ttyACM0`
+- `pio device monitor` -- safe by default
+- pyserial:
+  ```python
+  import serial
+  uart = serial.Serial('/dev/ttyACM0', 115200, timeout=0.1,
+                       rtscts=False, dsrdtr=False)
+  uart.setRTS(False)
+  uart.setDTR(False)
+  uart.reset_input_buffer()
+  ```
 
-### Capturing the boot log
-
-Opening `/dev/ttyACM0` naively from Python or `cat` can trigger a spurious
-reset and/or fail because the CH340 expects RTS and DTR to be deasserted
-first. The pattern that works:
-
-```python
-import serial
-uart = serial.Serial('/dev/ttyACM0', baudrate=115200, timeout=0.1,
-                     xonxoff=False, rtscts=False, dsrdtr=False)
-uart.setRTS(False)
-uart.setDTR(False)
-uart.reset_input_buffer()
-# then read in a loop
-```
-
-Or simply `pio device monitor` / `make monitor` -- PlatformIO does the
-right termios setup. For a one-shot capture, `picocom -b 115200 --noinit
---noreset /dev/ttyACM0` also works.
+If you want to capture the boot log specifically (i.e. you *want* a
+reset), the simplest pattern is to start a non-resetting reader, then
+trigger the reset through a separate process: `esptool --port
+/dev/ttyACM0 --chip esp32s3 --before default_reset --after hard_reset
+run`, or press the EN button on the devkit. Don't try to read from the
+same port esptool is driving; the kernel-level open conflict will
+truncate the capture.
 
 ### Flash partition addresses
 
 The project uses OTA with two app slots; the partition table is in
-`partitions.csv`. The relevant offsets for a manual `esptool write_flash`
+`partitions.csv`. Relevant offsets for a manual `esptool write_flash`
 (rarely needed -- prefer `make flash`):
 
-| Offset | Contents |
+| offset | contents |
 |---|---|
 | `0x0` | bootloader |
 | `0x8000` | partition table |
@@ -71,6 +67,6 @@ The project uses OTA with two app slots; the partition table is in
 | `0x20000` | `firmware.bin` -- the app, in slot `ota_0` |
 | `0x420000` | slot `ota_1` -- empty until first OTA upload |
 
-Flashing the app to `0x10000` (the address you'd use on a non-OTA layout)
-will corrupt the otadata partition and the bootloader will refuse to
-hand off to either slot.
+Flashing the app to `0x10000` (the offset for a non-OTA layout) will
+corrupt otadata and the bootloader will refuse to hand off to either
+slot.
