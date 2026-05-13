@@ -72,6 +72,12 @@
 #include "mdns.h"
 #endif
 
+#if !defined(BRIDGE_LOOPBACK) && defined(NTP_ENABLE)
+#include "esp_netif_sntp.h"
+#include "esp_sntp.h"
+#include <time.h>
+#endif
+
 /* DHCPv6 requires the raw lwIP netif handle, obtained via
  * esp_netif_get_netif_impl().  Pull in dhcp6.h only when needed. */
 #if defined(CONFIG_LWIP_IPV6) && defined(CONFIG_LWIP_IPV6_DHCP6)
@@ -438,6 +444,114 @@ static void ipv6_bring_up(void)
 #endif /* IPV6_MODE != IPV6_MODE_DISABLED */
 
 /* --------------------------------------------------------------------------
+ * NTP defaults
+ * -------------------------------------------------------------------------- */
+#if !defined(BRIDGE_LOOPBACK) && defined(NTP_ENABLE)
+
+# ifndef NTP_SERVERS
+#  define NTP_SERVERS  "pool.ntp.org"
+# endif
+
+# ifndef NTP_TIMEZONE
+#  define NTP_TIMEZONE  "UTC0"
+# endif
+
+# ifndef NTP_SYNC_TIMEOUT_SEC
+#  define NTP_SYNC_TIMEOUT_SEC  30
+# endif
+
+/* Max TZ string length accepted by setenv (caps before writing to env). */
+# define NTP_TZ_MAX_LEN  64
+
+static volatile bool s_ntp_started = false;
+
+static void ntp_sync_cb(struct timeval *tv)
+{
+    (void)tv;
+    time_t now = time(NULL);
+    struct tm t;
+    gmtime_r(&now, &t);
+    char buf[32];
+    strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &t);
+    ESP_LOGI(TAG, "NTP synced: %s", buf);
+}
+
+static void ntp_start_task(void *pvParameters)
+{
+    (void)pvParameters;
+
+    const char *const servers[] = { NTP_SERVERS };
+    const size_t n_servers = sizeof(servers) / sizeof(servers[0]);
+
+    /* Log the server list so it's visible in the boot log. */
+    for (size_t i = 0; i < n_servers; i++) {
+        ESP_LOGI(TAG, "NTP server[%u]: %s", (unsigned)i, servers[i]);
+    }
+
+    esp_sntp_config_t cfg = {
+        .smooth_sync               = false,
+        .server_from_dhcp          = false,
+        .wait_for_sync             = true,
+        .start                     = true,
+        .sync_cb                   = ntp_sync_cb,
+        .renew_servers_after_new_IP = false,
+        .ip_event_to_renew         = IP_EVENT_STA_GOT_IP,
+        .index_of_first_server     = 0,
+        .num_of_servers            = n_servers,
+    };
+    for (size_t i = 0; i < n_servers && i < CONFIG_LWIP_SNTP_MAX_SERVERS; i++) {
+        cfg.servers[i] = servers[i];
+    }
+
+    esp_err_t err = esp_netif_sntp_init(&cfg);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_netif_sntp_init failed: %s", esp_err_to_name(err));
+        s_ntp_started = false;
+        vTaskDelete(NULL);
+        return;
+    }
+
+    /* Apply timezone before waiting so any logged timestamps are local. */
+    char tz_buf[NTP_TZ_MAX_LEN + 1];
+    snprintf(tz_buf, sizeof(tz_buf), "%s", NTP_TIMEZONE);
+    setenv("TZ", tz_buf, 1);
+    tzset();
+
+    /* Wait up to NTP_SYNC_TIMEOUT_SEC; log progress, then background. */
+    TickType_t deadline = xTaskGetTickCount() +
+                          pdMS_TO_TICKS((uint32_t)NTP_SYNC_TIMEOUT_SEC * 1000u);
+    while (xTaskGetTickCount() < deadline) {
+        esp_err_t wret = esp_netif_sntp_sync_wait(pdMS_TO_TICKS(5000));
+        if (wret == ESP_OK) {
+            /* sync_cb already logged the timestamp */
+            vTaskDelete(NULL);
+            return;
+        }
+        ESP_LOGI(TAG, "NTP: waiting for sync ...");
+    }
+    ESP_LOGW(TAG, "NTP: sync not complete within %d s -- continuing in background",
+             NTP_SYNC_TIMEOUT_SEC);
+
+    vTaskDelete(NULL);
+}
+
+static void ntp_dispatch_start(void)
+{
+    if (s_ntp_started) return;
+    s_ntp_started = true;
+
+    BaseType_t ret = xTaskCreate(ntp_start_task, "ntp_start",
+                                 4096, NULL,
+                                 tskIDLE_PRIORITY + 1, NULL);
+    if (ret != pdPASS) {
+        ESP_LOGW(TAG, "xTaskCreate(ntp_start_task) failed -- NTP not started");
+        s_ntp_started = false;
+    }
+}
+
+#endif /* !BRIDGE_LOOPBACK && NTP_ENABLE */
+
+/* --------------------------------------------------------------------------
  * mDNS -- hostname advertisement and _ssh._tcp service record
  *
  * Runs as a short-lived FreeRTOS task so the event handler (which runs in
@@ -553,6 +667,9 @@ static void wifi_event_handler(void *arg,
 #if !defined(BRIDGE_LOOPBACK) && defined(MDNS_ENABLE)
             mdns_dispatch_start();
 #endif
+#if !defined(BRIDGE_LOOPBACK) && defined(NTP_ENABLE)
+            ntp_dispatch_start();
+#endif
 #endif /* USE_STATIC_IPV4 */
 
             /* Bring up IPv6 (SLAAC / DHCPv6 / static) now that L2 is up. */
@@ -623,6 +740,9 @@ static void wifi_event_handler(void *arg,
             xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
 #if !defined(BRIDGE_LOOPBACK) && defined(MDNS_ENABLE)
             mdns_dispatch_start();
+#endif
+#if !defined(BRIDGE_LOOPBACK) && defined(NTP_ENABLE)
+            ntp_dispatch_start();
 #endif
 #endif /* !USE_STATIC_IPV4 */
 

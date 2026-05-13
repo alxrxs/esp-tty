@@ -284,6 +284,43 @@
 /* #define WIFI_MAC_BYTES  { 0x02, 0x12, 0x34, 0x56, 0x78, 0x9A } */
 
 /* --------------------------------------------------------------------------
+ * NTP / SNTP time synchronisation
+ *
+ * Off by default to keep the firmware off-grid-friendly.
+ * Define NTP_ENABLE to activate the SNTP client (uses ESP-IDF esp_netif_sntp
+ * API, not the legacy sntp_* macros).
+ *
+ * NTP_ENABLE: define to enable; otherwise undefined (NTP disabled).
+
+#define NTP_ENABLE
+
+ * NTP_SERVERS: comma-separated list of NTP server hostnames or IP addresses,
+ * consumed verbatim as an array initializer:
+ *
+ *     static const char *const ntp_servers[] = { NTP_SERVERS };
+ *
+ * Maximum server count: CONFIG_LWIP_SNTP_MAX_SERVERS (default 1; raise to 4
+ * in sdkconfig.defaults with CONFIG_LWIP_SNTP_MAX_SERVERS=4).
+ * Maximum hostname length: 253 characters (DNS label spec).
+
+#define NTP_SERVERS  "pool.ntp.org", "time.cloudflare.com"
+
+ * NTP_TIMEZONE: POSIX TZ string applied via setenv("TZ",...) + tzset().
+ * Examples: "UTC0", "PST8PDT,M3.2.0,M11.1.0", "CET-1CEST,M3.5.0,M10.5.0/3".
+ * Max 64 characters (wifi.c truncates at NTP_TZ_MAX_LEN=64 before setenv).
+
+#define NTP_TIMEZONE  "UTC0"
+
+ * NTP_SYNC_TIMEOUT_SEC: how many seconds to log "waiting for NTP sync" at
+ * boot before backgrounding.  The SNTP client keeps running after this;
+ * the timeout only controls log verbosity during the initial connect window.
+ * Default 30. Max practical: 3600.
+
+#define NTP_SYNC_TIMEOUT_SEC  30
+
+ * -------------------------------------------------------------------------- */
+
+/* --------------------------------------------------------------------------
  * mDNS / Bonjour
  *
  * Off by default.  Define MDNS_ENABLE to have the device announce itself as
