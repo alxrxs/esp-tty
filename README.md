@@ -13,27 +13,16 @@ hardware serial console. SSH into the ESP32-S3 over WiFi: you're
 at the server's login prompt over a network path that has nothing
 to do with the server's main NIC.
 
-Scope: the bridge needs Linux to be up -- the USB CDC interface
-depends on the server's USB stack and `agetty` running. It's for
-"Linux is healthy, network is broken," not for pre-boot, kernel
-panic, or a hung USB subsystem. The ESP32-S3 is the USB device;
-the server is the USB host; there is no serial-header / TTL-adapter
-path.
-
 ```mermaid
 flowchart LR
     target["Linux server<br/>(USB-serial)"] -- "USB-C" --> esp["ESP32-S3"] -- "WiFi" --> ssh["SSH client"]
 ```
 
-The other end has to be a USB *host* running something with a TTY
-on the resulting CDC node -- i.e. a general-purpose OS that runs an
-agetty / serial-console on /dev/ttyACM*. In practice that means a
-Linux server (the design intent), a Linux single-board computer
-(Raspberry Pi, etc.) running `serial-getty@ttyACM0`, or any other
-Linux/BSD/macOS host you want a remote console on. Network switches,
-microcontroller dev boards, and other USB-device peripherals don't
-fit -- they don't host USB, and they don't run a getty on a CDC node
-even if they did.
+Requirements on the server side: a running Linux/BSD/macOS kernel
+with USB host support and `agetty` (or equivalent) bound to the
+resulting `/dev/ttyACM*` node. A Linux server is the design target;
+a Raspberry Pi or other single-board computer running
+`serial-getty@ttyACM0` works the same way.
 
 A single SSH session is active at a time; opening a second one
 preempts the first within ~200 ms. Public-key authentication only.
@@ -115,8 +104,8 @@ ssh tty@192.168.1.42
 ```
 
 Verify the fingerprint matches what was printed on first boot. The
-username **must** be `tty` for a console session -- any other name is
-rejected.
+username is `tty` for a console session or `ota` for a signed
+firmware upload.
 
 ### Server-side setup
 
@@ -200,16 +189,16 @@ is not modified.
 
 ## Security model
 
-Authentication is public-key only. The authorized keys are compiled into
-the firmware from `config.h`; they live in flash, not NVS, and cannot be
-changed without a re-flash.
+Authentication is public-key only. The authorized keys are baked into
+the firmware from `config.h` at build time; updating them is a firmware
+re-flash.
 
 The threat model is a network attacker. A physical attacker who can
-dump the SPI flash can extract the NVS key from the `nvs_keys` partition
-and decrypt the on-device NVS (which holds the ED25519 host key). They
-cannot extract the authorized public keys (those are in firmware flash,
-which is unencrypted), and they cannot sign new OTA images without the
-ECDSA-P256 private key, which never touches the device.
+dump the SPI flash extracts the NVS key from the `nvs_keys` partition
+and decrypts the on-device NVS (which holds the ED25519 host key).
+The authorized public keys live in firmware flash (unencrypted but
+useless on their own). OTA image signing requires the ECDSA-P256
+private key, which is held off-device by the operator.
 
 Cipher hardening (compile-time):
 - AES-CBC, AES-192, SHA-1 MAC, DH key exchange are all disabled in
@@ -308,7 +297,7 @@ The native suite covers every library in `lib/` end-to-end, including
 the helpers extracted from `main/` (CDC drain, OTA stream accumulator,
 terminal-resize CSI formatter, scrollback header formatter). See
 [`test/README.md`](test/README.md) for the per-suite breakdown and the
-list of components that are not yet covered.
+coverage map.
 
 ## Dependencies
 
@@ -331,22 +320,19 @@ System dependencies (not pip-installable):
 | `qemu-system-xtensa` (Espressif fork) | QEMU smoke tests |
 | `patch` | applying `patches/*.patch` at cmake configure |
 
-## Scope and limitations
+## Scope
 
-- **Single concurrent SSH session** -- by design. The target's serial
-  console is a single shared resource; a second client preempts the
-  first rather than multiplexing.
-- **No mDNS / Bonjour** -- the device announces itself only via DHCP
-  hostname. On routers that forward DHCP names into local DNS, you can
-  reach it as `<DEVICE_HOSTNAME>.<local-domain>`.
-- **No GPIO control of the target's reset / boot pins** -- the bridge
-  carries serial data only.
-- **WPA2/WPA3-Enterprise EAP-TLS** is compiled in and structurally
-  correct but has not been validated against a real RADIUS server end
-  to end.
-- **No flash encryption** -- keeping eFuses unburned is a hard
-  requirement of the design; the device must remain reflashable. The
-  trade-off and what it implies is documented under "Security model".
+- **One SSH session at a time.** The target's serial console is a
+  single shared resource. A new connection preempts the active one;
+  there's no multiplexing layer.
+- **Network discovery via DHCP hostname.** On routers that forward
+  DHCP-supplied hostnames into local DNS, the device is reachable as
+  `<DEVICE_HOSTNAME>.<local-domain>`.
+- **Serial-data bridge only.** GPIO control of the target's reset or
+  boot pins is out of scope.
+- **eFuses are left unprogrammed by design** so the device stays
+  reflashable. The implications for physical-attacker resistance are
+  spelled out under "Security model".
 
 ## License
 
