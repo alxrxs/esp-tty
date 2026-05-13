@@ -133,8 +133,11 @@ CONFIG_LWIP_SNTP_MAX_SERVERS=4
 CONFIG_MBEDTLS_HARDWARE_AES=y
 # SHA: HW SHA engine on S3. Used for OTA signature hash (SHA-256).
 CONFIG_MBEDTLS_HARDWARE_SHA=y
-# MPI: HW RSA accelerator on S3 (big-number multiply). Speeds up ECDSA verify.
-CONFIG_MBEDTLS_HARDWARE_MPI=y
+# MPI: disabled. The S3's RSA peripheral has ~20-cycle/word data-transfer
+# overhead that makes it slower than software SP_256 for ECC. Nothing in
+# this firmware routes through mbedTLS MPI anyway (OTA verify uses PSA
+# software SP_256; wolfSSL uses Ed25519/X25519 which bypass MPI entirely).
+CONFIG_MBEDTLS_HARDWARE_MPI=n
 # NOTE: Do NOT enable MBEDTLS_HARDWARE_GCM -- S3 has no dedicated GCM engine.
 # NOTE: Do NOT enable MBEDTLS_HARDWARE_ECC -- not present on S3.
 

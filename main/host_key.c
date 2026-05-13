@@ -16,6 +16,7 @@
 #include "wolfssl/wolfcrypt/random.h"
 #include "wolfssl/wolfcrypt/asn_public.h"
 #include "wolfssl/wolfcrypt/sha256.h"
+#include "wolfssl/wolfcrypt/misc.h"
 #include "wolfssh/ssh.h"
 
 #include "pubkey_auth.h"
@@ -155,7 +156,7 @@ esp_err_t host_key_load_or_generate(WOLFSSH_CTX *ctx)
     int wsret = wolfSSH_CTX_UsePrivateKey_buffer(
         ctx, der, (word32)sz, WOLFSSH_FORMAT_ASN1);
 
-    memset(der, 0, sizeof(der));  /* wipe from stack */
+    ForceZero(der, sizeof(der));
 
     if (wsret < 0) {
         ESP_LOGE(TAG, "wolfSSH_CTX_UsePrivateKey_buffer failed: %d", wsret);
