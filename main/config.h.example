@@ -216,10 +216,11 @@
  * IPV6_MODE: one of IPV6_MODE_DISABLED, IPV6_MODE_SLAAC,
  *   IPV6_MODE_SLAAC_STATELESS_DHCPV6, IPV6_MODE_STATEFUL_DHCPV6,
  *   IPV6_MODE_STATIC (integer enum values 0..4 defined in wifi.c).
- * STATIC_IPV6_ADDRESS / STATIC_IPV6_GATEWAY: max 45 characters (IPv4-mapped
- *   form "0000:0000:0000:0000:0000:ffff:255.255.255.255"; pure IPv6 max 39).
+ * STATIC_IPV6_ADDRESS / STATIC_IPV6_GATEWAY: max 39 characters
+ *   ("xxxx:xxxx:xxxx:xxxx:xxxx:xxxx:xxxx:xxxx"); parsed by
+ *   esp_netif_str_to_ip6().
  * STATIC_IPV6_PREFIX_LEN: Range: 0..128 (used only in the boot log).
- * DNS strings: same 45-character limit as STATIC_IPV6_ADDRESS.
+ * DNS strings: same 39-character limit as STATIC_IPV6_ADDRESS.
 
 #define IPV6_MODE               IPV6_MODE_STATIC
 #define STATIC_IPV6_ADDRESS     "2001:db8::dead:beef"
@@ -285,12 +286,11 @@
 /* --------------------------------------------------------------------------
  * mDNS / Bonjour
  *
- * mDNS is enabled by default: the device announces itself as
- * <DEVICE_HOSTNAME>.local on the LAN and advertises the SSH service
- * on _ssh._tcp.  Adds ~5 KB of flash and a small multicast cost.
- * Define to disable mDNS; otherwise undefined (mDNS enabled).
+ * Off by default.  Define MDNS_ENABLE to have the device announce itself as
+ * <DEVICE_HOSTNAME>.local on the LAN and advertise the SSH service on
+ * _ssh._tcp.  Adds ~5 KB of flash and a small multicast cost.
  */
-/* #define MDNS_DISABLE 1 */
+/* #define MDNS_ENABLE 1 */
 
 /* --------------------------------------------------------------------------
  * Operational tuning -- leave the defaults unless you have a reason

@@ -68,7 +68,7 @@
 #include "esp_eap_client.h"
 #endif
 
-#if !defined(BRIDGE_LOOPBACK) && !defined(MDNS_DISABLE)
+#if !defined(BRIDGE_LOOPBACK) && defined(MDNS_ENABLE)
 #include "mdns.h"
 #endif
 
@@ -444,11 +444,11 @@ static void ipv6_bring_up(void)
  * the system event task with a limited stack) is not burdened with mDNS init.
  * The task deletes itself on completion or on any fatal error.
  *
- * Guarded by !BRIDGE_LOOPBACK && !MDNS_DISABLE -- the Wokwi/QEMU simulation
- * has no real radio and no use for mDNS; users who want to suppress mDNS can
- * define MDNS_DISABLE in config.h.
+ * Off by default.  Define MDNS_ENABLE in config.h to advertise the device.
+ * Always compiled out under BRIDGE_LOOPBACK -- the Wokwi/QEMU simulation has
+ * no real radio and no use for mDNS.
  * -------------------------------------------------------------------------- */
-#if !defined(BRIDGE_LOOPBACK) && !defined(MDNS_DISABLE)
+#if !defined(BRIDGE_LOOPBACK) && defined(MDNS_ENABLE)
 
 static volatile bool s_mdns_started = false;
 
@@ -496,7 +496,7 @@ static void mdns_dispatch_start(void)
     }
 }
 
-#endif /* !BRIDGE_LOOPBACK && !MDNS_DISABLE */
+#endif /* !BRIDGE_LOOPBACK && MDNS_ENABLE */
 
 /* --------------------------------------------------------------------------
  * Event handler
@@ -550,7 +550,7 @@ static void wifi_event_handler(void *arg,
             }
             s_retry_num = 0;
             xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
-#if !defined(BRIDGE_LOOPBACK) && !defined(MDNS_DISABLE)
+#if !defined(BRIDGE_LOOPBACK) && defined(MDNS_ENABLE)
             mdns_dispatch_start();
 #endif
 #endif /* USE_STATIC_IPV4 */
@@ -621,7 +621,7 @@ static void wifi_event_handler(void *arg,
 
             s_retry_num = 0;
             xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
-#if !defined(BRIDGE_LOOPBACK) && !defined(MDNS_DISABLE)
+#if !defined(BRIDGE_LOOPBACK) && defined(MDNS_ENABLE)
             mdns_dispatch_start();
 #endif
 #endif /* !USE_STATIC_IPV4 */

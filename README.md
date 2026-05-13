@@ -95,20 +95,17 @@ I (1203) wifi: WiFi MAC: 1c:db:d4:74:a1:fc
 I (5026) wifi: IP address : 192.168.1.42
 I (5037) host_key: Host key SHA-256 fingerprint: 88:e0:a6:58:...
 I (5079) ssh_server: Listening on TCP port 22
-I (5082) wifi: mDNS started: hostname=esp-tty.local, advertising _ssh._tcp port 22
 ```
 
-Connect by mDNS name (no need to look up the IP):
-
-```
-ssh tty@esp-tty.local
-```
-
-Or by IP if your resolver doesn't support mDNS:
+Connect to that IP:
 
 ```
 ssh tty@192.168.1.42
 ```
+
+If you'd rather reach the device by name, define `MDNS_ENABLE` in
+`config.h` and `ssh tty@esp-tty.local` will work via Avahi (Linux),
+Bonjour (macOS/Windows), or any other mDNS-aware resolver.
 
 Verify the fingerprint matches what was printed on first boot. The
 username is `tty` for a console session or `ota` for a signed
@@ -332,8 +329,9 @@ System dependencies (not pip-installable):
 - **One SSH session at a time.** The target's serial console is a
   single shared resource. A new connection preempts the active one;
   there's no multiplexing layer.
-- **mDNS / Bonjour.** The device announces itself as
-  `<DEVICE_HOSTNAME>.local` via multicast DNS (RFC 6762) and advertises
+- **mDNS / Bonjour (opt-in).** Off by default.  Define `MDNS_ENABLE`
+  in `config.h` to have the device announce itself as
+  `<DEVICE_HOSTNAME>.local` via multicast DNS (RFC 6762) and advertise
   the SSH service as `_ssh._tcp`.  Works with Avahi (Linux), Bonjour
   (macOS/Windows), and any mDNS-aware resolver.
 - **Serial-data bridge only.** GPIO control of the target's reset or
