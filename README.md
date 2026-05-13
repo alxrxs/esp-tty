@@ -169,9 +169,62 @@ option with usage notes; the highlights:
 All knobs guard with `#ifndef`, so omitting any of them keeps a sensible
 production default.
 
+### Managing multiple devices
+
+If you run more than one ESP32, keep a separate config per device as
+`main/config.h.<devname>` (e.g. `main/config.h.alpha`,
+`main/config.h.beta`). Each file starts with a marker line that tells
+the Makefile where to ship its OTA build:
+
+```c
+// MAKE-OTA-IP: 10.57.99.42
+// ...rest of the per-device config follows...
+```
+
+Then build and ship per device by name:
+
+```
+make ota   alpha    # copies config.h.alpha -> config.h, builds, OTAs to the marker IP
+make flash alpha    # same config switch, but USB-flashes (marker is ignored)
+```
+
+`make flash` and `make build` with no argument fall back to the current
+`main/config.h` unchanged, so the single-device workflow keeps working.
+`make ota` also accepts a raw IP or hostname -- if the argument doesn't
+match a `main/config.h.<name>` file, the current `config.h` is built and
+uploaded as-is:
+
+```
+make ota 192.168.1.42
+make ota esp-tty.local
+```
+
+`main/config.h` itself is gitignored and treated as the "currently
+materialized" copy; the canonical per-device files
+(`config.h.<devname>`) are what you maintain. Add `main/config.h.*` to
+`.gitignore` if those contain WiFi credentials or other secrets you
+don't want in the repo.
+
 ## OTA updates
 
-Sign and encrypt a built firmware image, then stream it over SSH:
+Build, sign, encrypt, and stream a firmware update to a running device
+in one step:
+
+```
+make ota 192.168.1.42       # raw IP or hostname
+make ota esp-tty.local
+make ota alpha              # per-device config (see above)
+```
+
+`make ota` builds the current `main/config.h` (or the
+`config.h.<devname>` you named), runs the image through
+`scripts/sign_firmware.py` (ECDSA-P256 signature, AES-256-GCM payload),
+and pipes the resulting `.ota` file into `ssh ota@<host>`. The SSH key
+is resolved by your normal ssh setup -- typically a `~/.ssh/config`
+`IdentityFile` entry for the device, or `ssh-add ~/.ssh/ota_key` so the
+agent offers it.
+
+If you'd rather run the steps by hand:
 
 ```
 python3 scripts/sign_firmware.py .pio/build/esp32s3/firmware.bin
