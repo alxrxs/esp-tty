@@ -42,34 +42,10 @@ if(NOT CMAKE_SCRIPT_MODE_FILE)
     )
 endif()
 
-# -- OTA signing key embedding -------------------------------------------------
-# When ota_keys/sign.pub.pem and ota_keys/aes.key exist, embed them into the
-# firmware.  These are the real keys (gitignored); see ota_keys/README.md.
-#
-# sign.pub.pem -> EMBED_TXTFILES -> _binary_sign_pub_pem_start/_end (NUL-appended)
-# aes.key      -> EMBED_FILES    -> _binary_aes_key_start/_end        (raw 32 bytes)
-#
-# If the files are absent (e.g., CI without keys), OTA is built without key
-# material and the OTA session will fail gracefully at runtime.
-set(OTA_KEY_DIR "${CMAKE_CURRENT_LIST_DIR}/../ota_keys")
-if(EXISTS "${OTA_KEY_DIR}/sign.pub.pem" AND EXISTS "${OTA_KEY_DIR}/aes.key")
-    set(OTA_EMBED_TXT "ota_keys/sign.pub.pem")
-    set(OTA_EMBED_BIN "ota_keys/aes.key")
-    set(OTA_KEYS_PRESENT TRUE)
-    message(STATUS "esp-tty: OTA key files found -- embedding into firmware")
-else()
-    set(OTA_EMBED_TXT "")
-    set(OTA_EMBED_BIN "")
-    set(OTA_KEYS_PRESENT FALSE)
-    message(STATUS "esp-tty: OTA key files NOT found -- OTA will be non-functional at runtime")
-endif()
-
-if(NOT CMAKE_SCRIPT_MODE_FILE)
-    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-        "${OTA_KEY_DIR}/sign.pub.pem"
-        "${OTA_KEY_DIR}/aes.key"
-    )
-endif()
+# OTA no longer embeds any pre-shared key material.  The on-device session
+# performs an ephemeral X25519 key exchange over the authenticated SSH ota@
+# channel (see main/ota_session.c).  The SSH layer's OTA_AUTHORIZED_PUBKEY
+# is the only OTA credential.
 
 idf_component_register(
     SRCS
@@ -84,8 +60,6 @@ idf_component_register(
         "host_key.c"
         "${CMAKE_CURRENT_LIST_DIR}/../lib/pubkey_auth/pubkey_auth.c"
         "ota_session.c"
-        "${CMAKE_CURRENT_LIST_DIR}/../lib/ota_verify/ota_verify.c"
-        "${CMAKE_CURRENT_LIST_DIR}/../lib/ota_stream/ota_stream.c"
         "${CMAKE_CURRENT_LIST_DIR}/../lib/mdns_dispatch/mdns_dispatch.c"
         "${CMAKE_CURRENT_LIST_DIR}/../lib/ssh_keepalive/ssh_keepalive.c"
     INCLUDE_DIRS
@@ -95,8 +69,6 @@ idf_component_register(
         "${CMAKE_CURRENT_LIST_DIR}/../lib/usb_cdc_drain"
         "${CMAKE_CURRENT_LIST_DIR}/../lib/term_resize"
         "${CMAKE_CURRENT_LIST_DIR}/../lib/pubkey_auth"
-        "${CMAKE_CURRENT_LIST_DIR}/../lib/ota_verify"
-        "${CMAKE_CURRENT_LIST_DIR}/../lib/ota_stream"
         "${CMAKE_CURRENT_LIST_DIR}/../lib/mdns_dispatch"
         "${CMAKE_CURRENT_LIST_DIR}/../lib/ssh_keepalive"
     REQUIRES
@@ -104,17 +76,6 @@ idf_component_register(
         wolfssl__wolfssh
         wpa_supplicant     # exposes esp_eap_client.h for WPA2/WPA3-Enterprise
         app_update         # esp_ota_ops.h
-        mbedtls            # mbedtls_ecdsa_verify, mbedtls_gcm_*, mbedtls_sha256_*
     EMBED_TXTFILES
         ${EAP_EMBED_FILES}
-        ${OTA_EMBED_TXT}
-    EMBED_FILES
-        ${OTA_EMBED_BIN}
 )
-
-# Define OTA_KEYS_EMBEDDED when key material is being embedded, so
-# ota_session.c can guard references to _binary_sign_pub_pem_start/end and
-# _binary_aes_key_start/end that only exist when the keys are present.
-if(OTA_KEYS_PRESENT)
-    target_compile_definitions(${COMPONENT_LIB} PRIVATE OTA_KEYS_EMBEDDED)
-endif()

@@ -26,6 +26,7 @@
 #define WOLFSSL_SHA512              /* required by ED25519           */
 #define USE_FAST_MATH
 
+
 /* -- Embedded constraints ---------------------------------------- */
 #define NO_FILESYSTEM
 #define NO_OLD_TLS

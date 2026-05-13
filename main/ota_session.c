@@ -2,27 +2,33 @@
  * ota_session.c -- OTA firmware update over SSH channel for esp-tty
  *
  * Linked from ssh_server.c when username == "ota".
- * Streams the OTA image from the SSH channel into ota_verify, which
- * decrypts and writes it to the inactive OTA partition.
  *
- * Key material:
- *   - ECDSA-P256 public key  : embedded from ota_keys/sign.pub.pem
- *                              via EMBED_TXTFILES -> _binary_sign_pub_pem_start
- *   - AES-256 raw key (32B)  : embedded from ota_keys/aes.key
- *                              via EMBED_FILES -> _binary_aes_key_start
+ * Wire protocol (over an authenticated SSH ota@ channel):
  *
- * Security:
- *   - SSH layer provides transport encryption and pubkey authentication.
- *   - OTA layer adds an independent ECDSA-P256 sig + AES-GCM authentication
- *     gate so a compromised SSH key cannot deliver a bad firmware image.
- *   - If either gate fails, esp_ota_set_boot_partition() is NOT called and
- *     the device continues running the current firmware.
+ *   Device -> Client: [0x02] [32B device_ephemeral_x25519_pub]
+ *   Client -> Device: [32B client_ephemeral_x25519_pub]
+ *
+ *   Both sides derive:
+ *     shared = X25519(own_priv, peer_pub)                  // 32 B
+ *     key    = HKDF-SHA256(ikm=shared,
+ *                          salt="esp-tty-ota-v2",
+ *                          info=client_pub || device_pub,
+ *                          L=32)
+ *
+ *   Client -> Device: [4B plaintext_len LE] [12B IV] [16B tag] [N B ciphertext]
+ *   Device -> Client: 0x00                            (success, about to reboot)
+ *                  or 0xFF + "<ascii reason>\n"       (failure, no reboot)
+ *
+ * AES-256-GCM with empty AAD; tag covers ciphertext only.
+ * Curve25519 keys use the little-endian (RFC 7748) convention on both sides.
+ *
+ * SSH layer already provides mutual authentication via OTA_AUTHORIZED_PUBKEY;
+ * the inner key exchange just adds an independent encryption layer with no
+ * pre-shared key material baked into the firmware.
  */
 
 #include "ota_session.h"
-#include "ota_verify.h"
-#include "ota_stream.h"
-#include "config.h"   /* OTA_AUTHORIZED_PUBKEY */
+#include "config.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -35,188 +41,352 @@
 #include "freertos/task.h"
 
 #include "wolfssh/ssh.h"
+#include "wolfssl/wolfcrypt/curve25519.h"
+#include "wolfssl/wolfcrypt/aes.h"
+#include "wolfssl/wolfcrypt/hmac.h"
+#include "wolfssl/wolfcrypt/random.h"
+#include "wolfssl/wolfcrypt/types.h"
+#include "wolfssl/wolfcrypt/error-crypt.h"
 
 static const char *TAG = "ota_session";
 
-/* -- Embedded key material ------------------------------------------------- */
-/* Symbols injected by CMake EMBED_TXTFILES / EMBED_FILES.
- * Only present when ota_keys/sign.pub.pem and ota_keys/aes.key exist at
- * build time.  When absent, OTA_KEYS_EMBEDDED is not defined and
- * ota_session_handler() returns an error without referencing them. */
-#ifdef OTA_KEYS_EMBEDDED
-extern const uint8_t _binary_sign_pub_pem_start[];
-extern const uint8_t _binary_sign_pub_pem_end[];
-extern const uint8_t _binary_aes_key_start[];
-extern const uint8_t _binary_aes_key_end[];
-#endif
+#define OTA_PROTO_VERSION   0x02
+#define X25519_KEY_LEN      32
+#define OTA_IV_LEN          12
+#define OTA_TAG_LEN         16
+#define OTA_AES_KEY_LEN     32
 
-/* Maximum total OTA image size we will accept.  The flash OTA partitions
- * are ~4 MiB; allow some headroom for the OTA wrapper (44-byte header +
- * 64-byte signature ~= 108 bytes) but cap below the 8 MiB PSRAM ceiling. */
-#define MAX_OTA_SIZE             (6u * 1024u * 1024u)
+/* Hard cap on plaintext firmware size.  ota_0 / ota_1 are ~4 MiB; we cap
+ * below the 8 MiB PSRAM ceiling so the ciphertext buffer fits. */
+#define MAX_OTA_PLAINTEXT   (4u * 1024u * 1024u)
 
-/* How many WS_WANT_READ-induced "transient 0-return" events the
- * ota_stream accumulator should tolerate before giving up.  Each transient
- * triggers a 10 ms vTaskDelay inside wolfssh_read_adapter, so 60000 ~=
- * 10 minutes of total idle before the session is considered dead -- well
- * past the original infinite-retry behaviour for realistic uploads. */
-#define MAX_OTA_ZERO_RETRIES     60000u
+/* Idle / channel-dead detection: WS_WANT_READ retries with a 10 ms delay,
+ * capped at MAX_READ_RETRIES (~10 minutes of total idle). */
+#define READ_POLL_MS        10
+#define MAX_READ_RETRIES    60000u
 
-/* -- Helper: send a short text reply to the SSH client -------------------- */
-static void ssh_send_reply(WOLFSSH *ssh, const char *msg)
+static const byte HKDF_SALT[] = "esp-tty-ota-v2"; /* 14 bytes, no NUL */
+#define HKDF_SALT_LEN  (sizeof(HKDF_SALT) - 1)
+
+/* -- small helpers --------------------------------------------------------- */
+
+static int ssh_send_all(WOLFSSH *ssh, const void *buf, size_t len)
 {
-    wolfSSH_stream_send(ssh, (byte *)msg, (word32)strlen(msg));
-}
+    const byte *p = (const byte *)buf;
+    size_t      remaining = len;
+    unsigned    spins = 0;
 
-/* -- ota_stream adapter: wolfSSH_stream_read -> ota_stream_read_fn ---------
- *
- *   > 0           -> bytes read
- *   WS_WANT_READ  -> return 0 (transient); the accumulator's retry budget
- *                   plus the vTaskDelay below mimic the original
- *                   "sleep 10 ms and retry" hot loop.
- *   <= 0 other    -> return -1 (terminal EOF/error)
- */
-static int wolfssh_read_adapter(void *ctx, uint8_t *buf, size_t cap)
-{
-    WOLFSSH *ssh = (WOLFSSH *)ctx;
-    int n = wolfSSH_stream_read(ssh, (byte *)buf, (word32)cap);
-    if (n == WS_WANT_READ) {
-        vTaskDelay(pdMS_TO_TICKS(10));
-        return 0;
+    while (remaining > 0) {
+        int n = wolfSSH_stream_send(ssh, (byte *)p, (word32)remaining);
+        if (n == WS_WANT_WRITE || n == WS_WANT_READ) {
+            if (++spins > MAX_READ_RETRIES) return -1;
+            vTaskDelay(pdMS_TO_TICKS(READ_POLL_MS));
+            continue;
+        }
+        if (n <= 0) return -1;
+        p += n;
+        remaining -= (size_t)n;
+        spins = 0;
     }
-    if (n <= 0) return -1;
-    return n;
+    return 0;
 }
 
-/* -- PSRAM-backed allocator hooks for ota_stream -------------------------
- *
- * The OTA image is potentially several MiB so the buffer must live in PSRAM,
- * not internal SRAM.  ota_stream uses alloc + realloc (or just realloc if
- * we pass NULL for alloc and the first realloc(NULL, n) call falls through
- * -- but heap_caps_realloc accepts NULL for the old pointer, so we expose
- * realloc-via-NULL as the initial-allocation path and keep alloc_fn NULL... )
- *
- * Cleaner: provide explicit wrappers for both so the caller flow is obvious
- * and so the free path uses the matching heap_caps_free.  heap_caps_malloc /
- * heap_caps_realloc / heap_caps_free all use the same MALLOC_CAP_SPIRAM pool.
- */
-static void *psram_alloc(size_t n)
+/* Read exactly len bytes from the SSH channel, blocking with retries on
+ * WS_WANT_READ.  Returns 0 on success, -1 on EOF/error/timeout. */
+static int ssh_read_exact(WOLFSSH *ssh, void *buf, size_t len)
 {
-    return heap_caps_malloc(n, MALLOC_CAP_SPIRAM);
+    byte    *p = (byte *)buf;
+    size_t   remaining = len;
+    unsigned spins = 0;
+
+    while (remaining > 0) {
+        int n = wolfSSH_stream_read(ssh, p, (word32)remaining);
+        if (n == WS_WANT_READ) {
+            if (++spins > MAX_READ_RETRIES) return -1;
+            vTaskDelay(pdMS_TO_TICKS(READ_POLL_MS));
+            continue;
+        }
+        if (n <= 0) return -1;
+        p += n;
+        remaining -= (size_t)n;
+        spins = 0;
+    }
+    return 0;
 }
-static void *psram_realloc(void *p, size_t n)
+
+static void send_failure(WOLFSSH *ssh, const char *reason)
 {
-    return heap_caps_realloc(p, n, MALLOC_CAP_SPIRAM);
+    byte b = 0xFF;
+    ssh_send_all(ssh, &b, 1);
+    if (reason && *reason) {
+        ssh_send_all(ssh, reason, strlen(reason));
+        ssh_send_all(ssh, "\n", 1);
+    }
 }
-static void  psram_free(void *p)
-{
-    heap_caps_free(p);
-}
+
+/* DMA-capable scratch (internal SRAM, word-aligned) for AES-GCM context.
+ * The ciphertext buffer itself lives in PSRAM; wolfSSL's SW path handles
+ * that fine even with the HW accelerator engaged (the driver copies into
+ * its own DMA buffer in chunks).  Tag and IV are small stack values. */
 
 /* -- OTA session handler --------------------------------------------------- */
 
 esp_err_t ota_session_handler(WOLFSSH *ssh)
 {
-    ESP_LOGI(TAG, "OTA session started");
+    ESP_LOGI(TAG, "OTA session started (v2 X25519+AES-GCM)");
 
-#ifndef OTA_KEYS_EMBEDDED
-    /* Keys were not embedded at build time -- refuse the session gracefully. */
-    ESP_LOGE(TAG, "OTA key material not embedded in firmware -- build with ota_keys/sign.pub.pem and ota_keys/aes.key");
-    ssh_send_reply(ssh, "OTA_ERR: key material not embedded in firmware\n");
-    return ESP_ERR_INVALID_STATE;
-#else
+    int           rc;
+    WC_RNG        rng;
+    curve25519_key dev_key;
+    curve25519_key cli_key;
+    int           rng_init = 0;
+    int           dev_key_init = 0;
+    int           cli_key_init = 0;
+    uint8_t      *ciphertext = NULL;
+    esp_ota_handle_t ota_handle = 0;
+    bool          ota_began = false;
 
-    /* Determine public key and AES key sizes */
-    size_t pub_pem_len = (size_t)(_binary_sign_pub_pem_end - _binary_sign_pub_pem_start);
-    size_t aes_key_len = (size_t)(_binary_aes_key_end      - _binary_aes_key_start);
+    /* ---- 1. Generate ephemeral device keypair ---------------------- */
+    rc = wc_InitRng(&rng);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "wc_InitRng failed: %d", rc);
+        send_failure(ssh, "rng init failed");
+        goto out;
+    }
+    rng_init = 1;
 
-    if (pub_pem_len == 0 || aes_key_len != 32) {
-        ESP_LOGE(TAG, "OTA key material invalid: pub_pem_len=%zu aes_key_len=%zu",
-                 pub_pem_len, aes_key_len);
-        ssh_send_reply(ssh, "OTA_ERR: key material not embedded in firmware\n");
-        return ESP_ERR_INVALID_STATE;
+    rc = wc_curve25519_init(&dev_key);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "wc_curve25519_init(dev) failed: %d", rc);
+        send_failure(ssh, "x25519 init failed");
+        goto out;
+    }
+    dev_key_init = 1;
+
+    rc = wc_curve25519_make_key(&rng, X25519_KEY_LEN, &dev_key);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "wc_curve25519_make_key failed: %d", rc);
+        send_failure(ssh, "x25519 keygen failed");
+        goto out;
     }
 
-    /* pub_pem must be NUL-terminated for mbedtls_pk_parse_public_key.
-       EMBED_TXTFILES normally appends a NUL byte, so pub_pem_len includes it. */
-    const uint8_t *pub_pem = _binary_sign_pub_pem_start;
-
-    /* Begin OTA verify session */
-    ota_verify_ctx_t *ctx = ota_verify_begin(pub_pem, pub_pem_len, _binary_aes_key_start);
-    if (!ctx) {
-        ESP_LOGE(TAG, "ota_verify_begin failed (OOM or bad key)");
-        ssh_send_reply(ssh, "OTA_ERR: failed to initialise verifier\n");
-        return ESP_ERR_NO_MEM;
+    uint8_t dev_pub[X25519_KEY_LEN];
+    word32  dev_pub_len = sizeof(dev_pub);
+    rc = wc_curve25519_export_public_ex(&dev_key, dev_pub, &dev_pub_len,
+                                        EC25519_LITTLE_ENDIAN);
+    if (rc != 0 || dev_pub_len != X25519_KEY_LEN) {
+        ESP_LOGE(TAG, "export_public failed: %d", rc);
+        send_failure(ssh, "x25519 export failed");
+        goto out;
     }
 
-    /* Stream the OTA image from the SSH channel into a PSRAM-backed
-     * growable buffer.  We don't know the image length in advance, so we
-     * read until wolfSSH_stream_read returns <= 0 (EOF or channel close).
-     *
-     * The growable-buffer logic lives in lib/ota_stream/ so it is native-
-     * unit-tested without wolfSSH or ESP-IDF.  Here we just supply:
-     *   - wolfssh_read_adapter : translate WS_WANT_READ -> 0 (transient).
-     *   - psram_*              : place the buffer in PSRAM, NOT internal SRAM.
-     *
-     * On S3 with 8 MB PSRAM, MAX_OTA_SIZE (6 MiB) comfortably handles any
-     * realistic firmware image (4 MB partition -> max ~4 MB signed image).
-     */
-    uint8_t *image_buf = NULL;
-    size_t   image_len = 0;
-
-    ota_stream_result_t sr = ota_stream_read_all(
-        wolfssh_read_adapter, ssh,
-        MAX_OTA_SIZE,
-        MAX_OTA_ZERO_RETRIES,
-        psram_alloc, psram_realloc, psram_free,
-        &image_buf, &image_len);
-
-    if (sr != OTA_STREAM_OK) {
-        if (sr == OTA_STREAM_ERR_OOM) {
-            ESP_LOGE(TAG, "OOM reading OTA image");
-        } else if (sr == OTA_STREAM_ERR_TOOBIG) {
-            ESP_LOGE(TAG, "OTA image exceeds MAX_OTA_SIZE (%u bytes)",
-                     (unsigned)MAX_OTA_SIZE);
-        } else {
-            ESP_LOGE(TAG, "OTA stream read failed: %d", (int)sr);
+    /* ---- 2. Send [version] [device pub] ---------------------------- */
+    {
+        uint8_t hdr[1 + X25519_KEY_LEN];
+        hdr[0] = OTA_PROTO_VERSION;
+        memcpy(hdr + 1, dev_pub, X25519_KEY_LEN);
+        if (ssh_send_all(ssh, hdr, sizeof(hdr)) != 0) {
+            ESP_LOGE(TAG, "send handshake failed");
+            goto out;
         }
-        ota_verify_abort(ctx);
-        ssh_send_reply(ssh, "OTA_ERR: failed to read image or image empty\n");
-        return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "Received %zu bytes -- verifying...", image_len);
-
-    /* Feed the full image to the verifier */
-    ota_verify_err_t e = ota_verify_feed(ctx, image_buf, image_len, image_len);
-    psram_free(image_buf);
-
-    if (e != OTA_VERIFY_OK) {
-        ota_verify_abort(ctx);
-        char reply[64];
-        snprintf(reply, sizeof(reply), "OTA_ERR: %s\n", ota_verify_strerror(e));
-        ssh_send_reply(ssh, reply);
-        ESP_LOGE(TAG, "OTA verify feed failed: %s", ota_verify_strerror(e));
-        return ESP_FAIL;
+    /* ---- 3. Receive client pub ------------------------------------- */
+    uint8_t cli_pub[X25519_KEY_LEN];
+    if (ssh_read_exact(ssh, cli_pub, X25519_KEY_LEN) != 0) {
+        ESP_LOGE(TAG, "client pubkey read failed");
+        goto out;
     }
 
-    e = ota_verify_end(ctx);
-    if (e != OTA_VERIFY_OK) {
-        char reply[64];
-        snprintf(reply, sizeof(reply), "OTA_ERR: %s\n", ota_verify_strerror(e));
-        ssh_send_reply(ssh, reply);
-        ESP_LOGE(TAG, "OTA verify end failed: %s", ota_verify_strerror(e));
-        return ESP_FAIL;
+    rc = wc_curve25519_init(&cli_key);
+    if (rc != 0) {
+        send_failure(ssh, "x25519 init failed");
+        goto out;
+    }
+    cli_key_init = 1;
+
+    rc = wc_curve25519_import_public_ex(cli_pub, X25519_KEY_LEN, &cli_key,
+                                        EC25519_LITTLE_ENDIAN);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "client pubkey import failed: %d", rc);
+        send_failure(ssh, "bad client pubkey");
+        goto out;
     }
 
-    /* Success -- confirm to client, then reboot */
-    ssh_send_reply(ssh, "OTA_OK\n");
+    /* ---- 4. Shared secret + HKDF ----------------------------------- */
+    uint8_t shared[X25519_KEY_LEN];
+    word32  shared_len = sizeof(shared);
+    rc = wc_curve25519_shared_secret_ex(&dev_key, &cli_key, shared, &shared_len,
+                                        EC25519_LITTLE_ENDIAN);
+    if (rc != 0 || shared_len != X25519_KEY_LEN) {
+        ESP_LOGE(TAG, "shared_secret failed: %d", rc);
+        send_failure(ssh, "ecdh failed");
+        goto out;
+    }
+
+    /* info = client_pub || device_pub */
+    uint8_t info[X25519_KEY_LEN * 2];
+    memcpy(info,                    cli_pub, X25519_KEY_LEN);
+    memcpy(info + X25519_KEY_LEN,   dev_pub, X25519_KEY_LEN);
+
+    uint8_t aes_key[OTA_AES_KEY_LEN];
+    rc = wc_HKDF(WC_SHA256,
+                 shared, shared_len,
+                 HKDF_SALT, HKDF_SALT_LEN,
+                 info, sizeof(info),
+                 aes_key, sizeof(aes_key));
+    /* shared is no longer needed */
+    memset(shared, 0, sizeof(shared));
+    if (rc != 0) {
+        ESP_LOGE(TAG, "wc_HKDF failed: %d", rc);
+        send_failure(ssh, "hkdf failed");
+        memset(aes_key, 0, sizeof(aes_key));
+        goto out;
+    }
+
+    /* ---- 5. Read payload header ------------------------------------ */
+    uint8_t  len_buf[4];
+    if (ssh_read_exact(ssh, len_buf, 4) != 0) {
+        ESP_LOGE(TAG, "payload length read failed");
+        memset(aes_key, 0, sizeof(aes_key));
+        goto out;
+    }
+    uint32_t plaintext_len = (uint32_t)len_buf[0]
+                           | ((uint32_t)len_buf[1] << 8)
+                           | ((uint32_t)len_buf[2] << 16)
+                           | ((uint32_t)len_buf[3] << 24);
+
+    if (plaintext_len == 0 || plaintext_len > MAX_OTA_PLAINTEXT) {
+        ESP_LOGE(TAG, "bad plaintext_len: %u", (unsigned)plaintext_len);
+        send_failure(ssh, "bad plaintext length");
+        memset(aes_key, 0, sizeof(aes_key));
+        goto out;
+    }
+
+    uint8_t iv[OTA_IV_LEN];
+    uint8_t tag[OTA_TAG_LEN];
+    if (ssh_read_exact(ssh, iv,  OTA_IV_LEN)  != 0 ||
+        ssh_read_exact(ssh, tag, OTA_TAG_LEN) != 0) {
+        ESP_LOGE(TAG, "iv/tag read failed");
+        memset(aes_key, 0, sizeof(aes_key));
+        goto out;
+    }
+
+    /* ---- 6. Allocate PSRAM ciphertext buffer ----------------------- */
+    ciphertext = heap_caps_malloc(plaintext_len, MALLOC_CAP_SPIRAM);
+    if (!ciphertext) {
+        ESP_LOGE(TAG, "OOM allocating %u bytes in PSRAM",
+                 (unsigned)plaintext_len);
+        send_failure(ssh, "oom");
+        memset(aes_key, 0, sizeof(aes_key));
+        goto out;
+    }
+
+    if (ssh_read_exact(ssh, ciphertext, plaintext_len) != 0) {
+        ESP_LOGE(TAG, "ciphertext read truncated");
+        send_failure(ssh, "truncated payload");
+        memset(aes_key, 0, sizeof(aes_key));
+        goto out;
+    }
+
+    /* ---- 7. AES-256-GCM decrypt in place --------------------------- */
+    Aes aes;
+    rc = wc_AesInit(&aes, NULL, INVALID_DEVID);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "wc_AesInit failed: %d", rc);
+        send_failure(ssh, "aes init failed");
+        memset(aes_key, 0, sizeof(aes_key));
+        goto out;
+    }
+    rc = wc_AesGcmSetKey(&aes, aes_key, OTA_AES_KEY_LEN);
+    memset(aes_key, 0, sizeof(aes_key));
+    if (rc != 0) {
+        ESP_LOGE(TAG, "wc_AesGcmSetKey failed: %d", rc);
+        wc_AesFree(&aes);
+        send_failure(ssh, "aes setkey failed");
+        goto out;
+    }
+
+    rc = wc_AesGcmDecrypt(&aes,
+                          ciphertext, ciphertext, plaintext_len,
+                          iv, OTA_IV_LEN,
+                          tag, OTA_TAG_LEN,
+                          NULL, 0);
+    wc_AesFree(&aes);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "AES-GCM decrypt/verify failed: %d", rc);
+        send_failure(ssh, "auth tag verify failed");
+        goto out;
+    }
+
+    ESP_LOGI(TAG, "Decrypted %u-byte image -- writing to OTA partition",
+             (unsigned)plaintext_len);
+
+    /* ---- 8. Stream plaintext to inactive OTA slot ------------------ */
+    const esp_partition_t *next = esp_ota_get_next_update_partition(NULL);
+    if (!next) {
+        ESP_LOGE(TAG, "no next OTA partition");
+        send_failure(ssh, "no ota partition");
+        goto out;
+    }
+
+    if (esp_ota_begin(next, plaintext_len, &ota_handle) != ESP_OK) {
+        ESP_LOGE(TAG, "esp_ota_begin failed");
+        send_failure(ssh, "ota begin failed");
+        goto out;
+    }
+    ota_began = true;
+
+    const size_t WRITE_CHUNK = 4096;
+    for (size_t off = 0; off < plaintext_len; off += WRITE_CHUNK) {
+        size_t n = plaintext_len - off;
+        if (n > WRITE_CHUNK) n = WRITE_CHUNK;
+        if (esp_ota_write(ota_handle, ciphertext + off, n) != ESP_OK) {
+            ESP_LOGE(TAG, "esp_ota_write failed at offset %u", (unsigned)off);
+            send_failure(ssh, "flash write failed");
+            goto out;
+        }
+    }
+
+    if (esp_ota_end(ota_handle) != ESP_OK) {
+        ESP_LOGE(TAG, "esp_ota_end failed");
+        ota_began = false;
+        send_failure(ssh, "ota end failed");
+        goto out;
+    }
+    ota_began = false;
+
+    if (esp_ota_set_boot_partition(next) != ESP_OK) {
+        ESP_LOGE(TAG, "esp_ota_set_boot_partition failed");
+        send_failure(ssh, "set boot partition failed");
+        goto out;
+    }
+
+    /* ---- 9. Success: 0x00, close, reboot --------------------------- */
+    {
+        byte ok = 0x00;
+        ssh_send_all(ssh, &ok, 1);
+    }
     wolfSSH_shutdown(ssh);
 
     ESP_LOGI(TAG, "OTA image accepted -- rebooting in 2 seconds");
+    /* Free crypto state before reboot for cleanliness; ciphertext is freed
+     * in the cleanup block but the process is about to vanish anyway. */
+    heap_caps_free(ciphertext);
+    ciphertext = NULL;
+    if (cli_key_init) wc_curve25519_free(&cli_key);
+    if (dev_key_init) wc_curve25519_free(&dev_key);
+    if (rng_init)     wc_FreeRng(&rng);
+
     vTaskDelay(pdMS_TO_TICKS(2000));
     esp_restart();
-
     return ESP_OK; /* unreachable */
-#endif /* OTA_KEYS_EMBEDDED */
+
+out:
+    if (ota_began)    esp_ota_abort(ota_handle);
+    if (ciphertext)   heap_caps_free(ciphertext);
+    if (cli_key_init) wc_curve25519_free(&cli_key);
+    if (dev_key_init) wc_curve25519_free(&dev_key);
+    if (rng_init)     wc_FreeRng(&rng);
+    return ESP_FAIL;
 }

@@ -42,6 +42,12 @@
 /* AES-GCM is the only cipher we want (AEAD, no padding oracle surface).
  * Explicitly enable it -- our minimal config doesn't auto-define HAVE_AESGCM. */
 #define HAVE_AESGCM
+
+/* OTA inner key exchange: HKDF-SHA256 derives the per-upload AES-256-GCM
+ * key from the X25519 shared secret (see main/ota_session.c).  Needs HMAC,
+ * which is enabled by default when NO_HMAC is not set (our config does not
+ * define NO_HMAC). */
+#define HAVE_HKDF
 /* Disable SHA-1 MAC algorithms (hmac-sha1, hmac-sha1-96). */
 #define WOLFSSH_NO_HMAC_SHA1
 #define WOLFSSH_NO_HMAC_SHA1_96

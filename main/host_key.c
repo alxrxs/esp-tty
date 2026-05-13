@@ -19,6 +19,20 @@
 #include "wolfssl/wolfcrypt/misc.h"
 #include "wolfssh/ssh.h"
 
+/* wolfSSL ships ForceZero() as an inlined helper in wolfcrypt/src/misc.c
+ * and our build excludes that translation unit (components/wolfssl/
+ * CMakeLists.txt drops misc.c from the wolfssl GLOB), so we can't link
+ * against the upstream symbol.  Provide a minimal compiler-barrier wipe
+ * locally -- volatile pointer prevents the dead-store optimisation that
+ * a plain memset() would invite for stack buffers about to go out of
+ * scope. */
+static void force_zero(void *mem, size_t len)
+{
+    volatile unsigned char *p = (volatile unsigned char *)mem;
+    while (len--) *p++ = 0;
+}
+#define ForceZero(p, n) force_zero((p), (n))
+
 #include "pubkey_auth.h"
 
 static const char *TAG = "host_key";

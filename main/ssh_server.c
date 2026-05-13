@@ -430,22 +430,29 @@ static void ssh_server_task(void *arg)
         /* Replay scrollback before going live -------------------------
          * Send the last SCROLLBACK_REPLAY_LINES lines of USB device
          * output so the user sees e.g. kernel panics or boot logs that
-         * arrived while no SSH client was connected. */
+         * arrived while no SSH client was connected.
+         *
+         * Always emit the header + footer, even when scrollback is empty,
+         * so the user gets immediate visual confirmation that the bridge
+         * is up and waiting for USB data.  Without this, a fresh boot with
+         * no USB activity leaves the SSH session output completely blank
+         * until something writes to the CDC endpoint -- which looks
+         * indistinguishable from a hung server. */
         if (s_scrollback) {
             size_t dump_len = 0;
             uint8_t *dump = scrollback_get_lines(s_scrollback,
                                                  SCROLLBACK_REPLAY_LINES,
                                                  &dump_len);
-            if (dump && dump_len > 0) {
-                /* Count lines + format header via the scrollback library so
-                 * the formatting is unit-testable on the native host. */
-                int  line_count = scrollback_count_newlines(dump, dump_len);
-                char hdr[64];
-                int  hdr_len = scrollback_format_header(line_count,
-                                                        hdr, sizeof hdr);
-                if (hdr_len > 0)
-                    wolfSSH_stream_send(ssh, (byte *)hdr, (word32)hdr_len);
+            int  line_count = (dump && dump_len > 0)
+                ? scrollback_count_newlines(dump, dump_len)
+                : 0;
+            char hdr[64];
+            int  hdr_len = scrollback_format_header(line_count,
+                                                    hdr, sizeof hdr);
+            if (hdr_len > 0)
+                wolfSSH_stream_send(ssh, (byte *)hdr, (word32)hdr_len);
 
+            if (dump && dump_len > 0) {
                 const uint8_t *p = dump;
                 size_t rem = dump_len;
                 while (rem > 0) {
@@ -454,12 +461,12 @@ static void ssh_server_task(void *arg)
                     p   += (size_t)n;
                     rem -= (size_t)n;
                 }
-
-                const char *footer = SCROLLBACK_FOOTER;
-                wolfSSH_stream_send(ssh, (byte *)footer,
-                                    (word32)strlen(footer));
-                free(dump);
             }
+
+            const char *footer = SCROLLBACK_FOOTER;
+            wolfSSH_stream_send(ssh, (byte *)footer,
+                                (word32)strlen(footer));
+            if (dump) free(dump);
         }
 
         /* Re-open rings in case they were closed by the previous session's

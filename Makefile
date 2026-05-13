@@ -3,7 +3,7 @@
 # Targets:
 #   make build                Compile firmware (no upload)
 #   make flash [DEVNAME]      Compile + flash over USB
-#   make ota   <DEVNAME|HOST> Compile + sign + encrypt + upload over Wi-Fi (SSH)
+#   make ota   <DEVNAME|HOST> Compile + upload over Wi-Fi (SSH, X25519+AES-GCM)
 #
 # Per-device configs (multi-ESP32 setups):
 #   Keep one main/config.h.<DEVNAME> per device. Each one starts with the
@@ -33,8 +33,8 @@ PIO := $(shell \
   test -x venv/bin/pio  && echo venv/bin/pio  || \
   echo pio)
 
-# Same idea for `python` -- scripts/sign_firmware.py needs the `cryptography`
-# package, which requirements.txt installs into the project venv.
+# Same idea for `python` -- scripts/ota_send.py needs paramiko + cryptography,
+# which requirements.txt installs into the project venv.
 PYTHON := $(shell \
   test -x .venv/bin/python && echo .venv/bin/python || \
   test -x venv/bin/python  && echo venv/bin/python  || \
@@ -69,10 +69,23 @@ OTA_TARGET := $(strip $(if $(DEV_FILE),\
   $(shell sed -nE 's|^[[:space:]]*//[[:space:]]*MAKE-OTA-IP:[[:space:]]*([^[:space:]]+).*|\1|p' $(DEV_FILE) | head -n1),\
   $(DEV_ARG)))
 
-.PHONY: flash build ota
+.PHONY: flash build ota test test-py
 
 build:
 	$(PIO) run -e $(ENV)
+
+# Pure-Python tests for scripts/: no hardware, no network, no SSH.
+# Covers scripts/apply_managed_patches_cmake.py and the OTA wire protocol
+# (scripts/ota_send.py via test/scripts/test_ota_send_unit.py +
+# test/scripts/test_ota_protocol_e2e.py).
+test-py:
+	$(PYTHON) -m pytest test/scripts/test_ota_send_unit.py \
+	                    test/scripts/test_ota_protocol_e2e.py -v
+	$(PYTHON) test/scripts/test_apply_patches.py
+
+# Aggregate: native (PlatformIO Unity) + python script tests.
+test: test-py
+	$(PIO) test -e native
 
 flash:
 	@if [ -n "$(DEV_ARG)" ] && [ -z "$(DEV_FILE)" ]; then \
@@ -87,9 +100,10 @@ flash:
 	fi
 	$(PIO) run -e $(ENV) --target upload $(UPLOAD_FLAGS)
 
-# OTA: sign + encrypt the freshly built firmware and stream it over SSH to
-# the device's `ota@` user. SSH key is resolved by the caller's ~/.ssh/config
-# / agent; no -i is passed.
+# OTA: stream the freshly built firmware to the device's `ota@` user.
+# Encryption is negotiated inside the SSH session via X25519 + AES-256-GCM
+# (see main/ota_session.c and scripts/ota_send.py); no pre-shared key files
+# are needed.  SSH auth uses the caller's ~/.ssh/config / agent.
 ota:
 	@if [ -z "$(OTA_TARGET)" ]; then \
 	    if [ -z "$(DEV_ARG)" ]; then \
@@ -105,8 +119,7 @@ ota:
 	    cp $(DEV_FILE) main/config.h; \
 	fi
 	$(PIO) run -e $(ENV)
-	$(PYTHON) scripts/sign_firmware.py $(FIRMWARE_BIN)
-	ssh ota@$(OTA_TARGET) < $(FIRMWARE_BIN).ota
+	$(PYTHON) scripts/ota_send.py $(OTA_TARGET) $(FIRMWARE_BIN)
 
 # Catch-all to swallow the positional argument so make doesn't try to build
 # it as a target. Scoped to `ota`/`flash` invocations only -- otherwise

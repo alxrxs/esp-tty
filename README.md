@@ -81,8 +81,6 @@ cp main/config.h.example main/config.h
 $EDITOR main/config.h     # WIFI_SSID, WIFI_PASS, AUTHORIZED_PUBKEYS,
                           # OTA_AUTHORIZED_PUBKEY at minimum
 
-bash scripts/gen_ota_key.sh   # writes ota_keys/{sign.key,sign.pub,aes.key}
-
 make            # build + flash (auto-detects the CH340 port)
 ```
 
@@ -217,32 +215,36 @@ make ota alpha              # per-device config (see above)
 ```
 
 `make ota` builds the current `main/config.h` (or the
-`config.h.<devname>` you named), runs the image through
-`scripts/sign_firmware.py` (ECDSA-P256 signature, AES-256-GCM payload),
-and pipes the resulting `.ota` file into `ssh ota@<host>`. The SSH key
-is resolved by your normal ssh setup -- typically a `~/.ssh/config`
-`IdentityFile` entry for the device, or `ssh-add ~/.ssh/ota_key` so the
-agent offers it.
+`config.h.<devname>` you named) and runs `scripts/ota_send.py
+<host> .pio/build/esp32s3/firmware.bin`. The script opens an SSH
+connection to `ota@<host>` (your normal SSH agent / `~/.ssh/config`
+resolves the key) and then performs an ephemeral X25519 key exchange
+inside the SSH session, derives a per-upload AES-256-GCM key with
+HKDF-SHA256, and streams the encrypted firmware to the device.
 
-If you'd rather run the steps by hand:
+If you'd rather run it by hand:
 
 ```
-python3 scripts/sign_firmware.py .pio/build/esp32s3/firmware.bin
-ssh -i ~/.ssh/ota_key ota@<device-ip> < .pio/build/esp32s3/firmware.bin.ota
+.venv/bin/python scripts/ota_send.py <device-ip> .pio/build/esp32s3/firmware.bin
 ```
 
 The device:
-1. Reads the streamed image into PSRAM.
-2. Verifies the ECDSA-P256 signature against the public key embedded in
-   firmware.
-3. Decrypts the AES-256-GCM payload and verifies the authentication tag.
-4. Writes the inactive OTA partition.
+1. Generates an ephemeral X25519 keypair and sends its public half over
+   the SSH channel.
+2. Receives the client's ephemeral X25519 public key, derives the
+   shared secret, and HKDF-SHA256s it into a 32-byte AES-256-GCM key.
+3. Reads the encrypted firmware into PSRAM, AES-256-GCM-decrypts it,
+   and verifies the authentication tag.
+4. Writes the plaintext to the inactive OTA partition.
 5. Sets the new partition as the next boot target and reboots.
 6. The new firmware self-marks valid after 30 s; if it crashes or
    wedges before then, the bootloader rolls back automatically.
 
-A failed signature or tag check aborts the upload; the boot partition
-is not modified.
+A failed auth-tag check aborts the upload; the boot partition is not
+modified. Because the encryption key is derived per-session and is
+never written to disk, **no pre-shared OTA key material is needed on
+the build host** -- the only OTA credential is the SSH key matching
+`OTA_AUTHORIZED_PUBKEY`.
 
 ## Security model
 
@@ -313,7 +315,6 @@ the same rings across sessions.
 | [`boards/`](boards/README.md) | Project-local PlatformIO board manifests |
 | [`patches/`](patches/README.md) | Patches applied to `managed_components/` at cmake configure time |
 | [`scripts/`](scripts/README.md) | Build hooks, key generation, firmware signing, port detection |
-| [`ota_keys/`](ota_keys/README.md) | OTA signing keys (gitignored except `.example`) |
 | [`test/`](test/README.md) | Native unit tests, QEMU smoke tests, simulator config |
 | `partitions.csv` | 16 MB A/B OTA partition table |
 | `platformio.ini` | Build environment definitions |
@@ -363,8 +364,8 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
-That installs PlatformIO (the build orchestrator) and `cryptography`
-(used by `scripts/sign_firmware.py`). PlatformIO pulls in ESP-IDF 5.4.1
+That installs PlatformIO (the build orchestrator), `paramiko`, and
+`cryptography` (both used by `scripts/ota_send.py`). PlatformIO pulls in ESP-IDF 5.4.1
 LTS via `espressif32@6.11.0` and the rest of the toolchain on first
 run. wolfSSL 5.8.2 and wolfSSH 1.4.20 are fetched by the IDF component
 manager at cmake configure time.
@@ -373,7 +374,7 @@ System dependencies (not pip-installable):
 
 | Tool | Used by |
 |---|---|
-| `openssl` | `scripts/gen_ota_key.sh`, EAP-TLS cert generation |
+| `openssl` | EAP-TLS cert generation |
 | `qemu-system-xtensa` (Espressif fork) | QEMU smoke tests |
 | `patch` | applying `patches/*.patch` at cmake configure |
 

@@ -17,4 +17,5 @@
 # minimum API levels actually used.
 
 platformio>=6.1.0      # build orchestrator + ESP-IDF wrapper
-cryptography>=3.0      # AES-256-GCM + ECDSA-P256 for scripts/sign_firmware.py
+cryptography>=3.0      # X25519 + AES-256-GCM + HKDF in scripts/ota_send.py
+paramiko>=2.10         # SSH client used by scripts/ota_send.py for OTA upload
