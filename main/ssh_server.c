@@ -46,6 +46,14 @@ static ring_t       *s_usb_to_ssh  = NULL;
 static ring_t       *s_ssh_to_usb  = NULL;
 static scrollback_t *s_scrollback  = NULL;
 
+/* SSH-protocol-level keepalive defaults (may be overridden in config.h). */
+#ifndef SSH_KEEPALIVE_INTERVAL_SEC
+#define SSH_KEEPALIVE_INTERVAL_SEC  30
+#endif
+#ifndef SSH_KEEPALIVE_COUNT_MAX
+#define SSH_KEEPALIVE_COUNT_MAX     3
+#endif
+
 /* Active session (protected by s_session_mutex) */
 static SemaphoreHandle_t s_session_mutex;
 static WOLFSSH      *s_active_ssh  = NULL;
@@ -103,12 +111,6 @@ static SemaphoreHandle_t s_pump_done_sem = NULL;
  * Sends SSH_MSG_GLOBAL_REQUEST ("keepalive@openssh.com", want-reply=1) after
  * INTERVAL_SEC seconds of idleness; drops the session after COUNT_MAX misses.
  * Set INTERVAL_SEC to 0 to disable (guarded by #if SSH_KEEPALIVE_INTERVAL_SEC>0). */
-#ifndef SSH_KEEPALIVE_INTERVAL_SEC
-#define SSH_KEEPALIVE_INTERVAL_SEC  30
-#endif
-#ifndef SSH_KEEPALIVE_COUNT_MAX
-#define SSH_KEEPALIVE_COUNT_MAX     3
-#endif
 
 /* Number of lines of scrollback to replay when a new SSH client connects.
  * Lower this if you find the connect-time scrollback too noisy. */
