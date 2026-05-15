@@ -1,7 +1,10 @@
 /*
  * usb_cdc.h -- TinyUSB CDC ACM device driver for esp-tty
  *
- * Exposes the ESP32-S3 native USB port as /dev/ttyACM0 on the Linux host.
+ * Exposes the ESP32-S3 native USB port as a CDC ACM device on the Linux host
+ * (typically /dev/ttyACM1; the DevKit's CH340 USB-UART bridge is usually
+ * /dev/ttyACM0 and is only used for flashing).  See the project README's
+ * "Server-side setup" section for how to pick the right node by USB VID/PID.
  * Data flows through two shared ring buffers owned by the caller:
  *
  *   CDC RX -> usb_to_ssh   (Linux host -> ESP32 -> SSH client)

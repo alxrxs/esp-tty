@@ -7,9 +7,9 @@ When the server's primary network goes down -- bad netplan, locked-out
 firewall rule, NIC carrier loss, mis-pulled cable, switch failure on
 the management VLAN -- you reach it via this device. Plug the
 ESP32-S3 DevKit into any free USB port on the server. The server
-sees a virtual serial port (`/dev/ttyACM0` from the ESP32-S3's
-TinyUSB CDC ACM endpoint) and runs `agetty` on it just like a
-hardware serial console. SSH into the ESP32-S3 over WiFi: you're
+sees a virtual serial port (the ESP32-S3's TinyUSB CDC ACM endpoint --
+typically `/dev/ttyACM1`; see [Server-side setup](#server-side-setup))
+and runs `agetty` on it just like a hardware serial console. SSH into the ESP32-S3 over WiFi: you're
 at the server's login prompt over a network path that has nothing
 to do with the server's main NIC.
 
@@ -21,8 +21,7 @@ flowchart LR
 Requirements on the server side: a running Linux/BSD/macOS kernel
 with USB host support and `agetty` (or equivalent) bound to the
 resulting `/dev/ttyACM*` node. A Linux server is the design target;
-a Raspberry Pi or other single-board computer running
-`serial-getty@ttyACM0` works the same way.
+a Raspberry Pi or other single-board computer works the same way.
 
 A single SSH session is active at a time; opening a second one
 preempts the first within ~200 ms. Public-key authentication only.
@@ -45,11 +44,13 @@ material is inspected.
   AES-256-GCM is the only cipher offered.
 - **ED25519 host key**, generated on first boot, stored in
   AES-XTS-256-encrypted NVS. Fingerprint printed at every boot.
-- **Signed + encrypted OTA** -- ECDSA-P256 signature, AES-256-GCM payload,
-  A/B partition scheme, automatic rollback if the new image fails its
-  30-second self-test.
-- **WPA2/WPA3-Personal** out of the box; **WPA2/WPA3-Enterprise EAP-TLS**
-  opt-in via a `#define` (see [`main/certs/README.md`](main/certs/README.md)).
+- **Encrypted OTA** -- X25519 ephemeral key exchange + HKDF-SHA256 + AES-256-GCM,
+  authenticated via SSH public key (`OTA_AUTHORIZED_PUBKEY`), A/B partition
+  scheme, automatic rollback if the new image fails its 30-second self-test.
+- **WPA2/WPA3-Personal** out of the box (Mode A); **WPA2/WPA3-Enterprise EAP-TLS**
+  with embedded certs opt-in via a `#define` (Mode B); or **SCEP auto-enrollment**
+  from a Microsoft NDES CA on first boot, with background cert renewal (Mode C).
+  See [`main/certs/README.md`](main/certs/README.md).
 - **Off-grid networking defaults** -- unlimited WiFi reconnect and a DHCP
   watchdog that re-kicks the DHCP client if no lease arrives. Survives an
   AP or DHCP server outage without intervention.
@@ -57,8 +58,8 @@ material is inspected.
   per-deployment knob: credentials, keys, USB descriptors, MAC override,
   hostname, retry policy, buffer sizes.
 - **240 MHz CPU, `-O2` build** -- production-tuned performance defaults.
-- **155 native unit tests** -- `pio test -e native` runs the full suite
-  on the host without any ESP32 hardware or emulator.
+- **236 native unit tests** across 20 suites, plus 37 pytest integration
+  cases -- all run on the host without any ESP32 hardware or emulator.
 
 ## Hardware
 
@@ -78,8 +79,10 @@ git clone <repo-url> && cd esp-tty
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 cp main/config.h.example main/config.h
-$EDITOR main/config.h     # WIFI_SSID, WIFI_PASS, AUTHORIZED_PUBKEYS,
-                          # OTA_AUTHORIZED_PUBKEY at minimum
+$EDITOR main/config.h     # Mode A (PSK): set WIFI_SSID, WIFI_PASS, AUTHORIZED_PUBKEYS,
+                          # OTA_AUTHORIZED_PUBKEY at minimum.
+                          # Mode C (SCEP): also set WIFI_ENTERPRISE_SSID, EAP_IDENTITY,
+                          # SCEP_URL, SCEP_CHALLENGE_PASSWORD -- see config.h.example.
 
 make            # build + flash (auto-detects the CH340 port)
 ```
@@ -111,11 +114,32 @@ firmware upload.
 
 ### Server-side setup
 
-On the Linux server the ESP32-S3 plugs into via USB, enable the stock
-systemd serial-getty on the CDC device:
+**Which port is which.** The DevKitC exposes two USB interfaces on the
+same cable:
+
+| USB VID:PID | Device node | What it is |
+|---|---|---|
+| `1a86:55d3` | `ttyACM0` | CH340 USB-UART -- ESP-IDF boot log and flash port |
+| `303a:4001` | `ttyACM1` | esp-tty TinyUSB CDC -- the SSH bridge data path |
+
+Node numbers shift if other ACM devices are present; to find the bridge
+port reliably, match by VID:PID:
 
 ```
-systemctl enable --now serial-getty@ttyACM0.service
+ls -l /dev/serial/by-id/ | grep '303a'
+```
+
+Or add a udev rule that gives it a stable symlink:
+
+```
+# /etc/udev/rules.d/99-esp-tty.rules
+SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{idProduct}=="4001", SYMLINK+="ttyESPTTY"
+```
+
+Enable getty on the bridge port (whichever node it is):
+
+```
+systemctl enable --now serial-getty@ttyACM1.service
 ```
 
 No drop-ins, no `TERM=` override, no special agetty flags needed.
@@ -133,14 +157,14 @@ node re-enumerates and getty restarts; on a flapping link that's
 easy to exceed. Disable the rate-limit so getty restarts forever:
 
 ```
-sudo mkdir -p /etc/systemd/system/serial-getty@ttyACM0.service.d
-sudo tee /etc/systemd/system/serial-getty@ttyACM0.service.d/restart-limits.conf <<'EOF'
+sudo mkdir -p /etc/systemd/system/serial-getty@ttyACM1.service.d
+sudo tee /etc/systemd/system/serial-getty@ttyACM1.service.d/restart-limits.conf <<'EOF'
 [Service]
 RestartSec=2
 StartLimitIntervalSec=0
 EOF
 sudo systemctl daemon-reload
-sudo systemctl restart serial-getty@ttyACM0.service
+sudo systemctl restart serial-getty@ttyACM1.service
 ```
 
 With `StartLimitIntervalSec=0` and `RestartSec=2`, getty respawns
@@ -275,69 +299,27 @@ They are typically separate VLANs on the same physical AP. The PSK
 bootstrap network does not need internet access -- only TCP/443 to the
 SCEP server and UDP/123 to your NTP source.
 
-### Bootstrap state machine
+### Boot decision
 
-The ESP32-S3 has no battery-backed RTC, so on a cold boot `time(NULL)`
-returns 0 (1970). Without a fresh NTP sync the device cannot tell whether
-its stored cert is still valid -- "valid until 2026-06-13" is meaningless
-relative to an epoch-0 clock. The state machine handles this in two ways:
+The ESP32-S3 has no battery-backed RTC. On a cold boot `time(NULL)` returns
+0, making cert expiry comparisons meaningless until NTP runs. Per-boot, the
+state machine (`lib/wifi_state/wifi_state.c`) picks one of three paths:
 
-- **`OTA_NTP_BEFORE_EAPTLS=1` (recommended)**: every boot routes through the
-  PSK bootstrap network long enough to run SNTP before any cert validity
-  check. After NTP, `time(NULL) >= 2020-01-01` and the cert-expiry
-  comparison is meaningful.
-- **`OTA_NTP_BEFORE_EAPTLS=0` (default)**: the device optimistically
-  attempts EAP-TLS immediately if a cert is stored, on the assumption that
-  RADIUS will reject expired certs and the retry-bounded fallback below
-  will catch it. Saves the bootstrap detour on every boot but takes longer
-  to recover from cert expiry.
+| Path | Condition | Action |
+|---|---|---|
+| **ENTERPRISE** | Cert in NVS; clock synced + valid, or unsynced | Join `WIFI_ENTERPRISE_SSID` via EAP-TLS |
+| **BOOTSTRAP_NTP_ONLY** | Cert in NVS; `OTA_NTP_BEFORE_EAPTLS=1`; clock not synced | Join `WIFI_SSID` (PSK) for SNTP only, then retry ENTERPRISE |
+| **BOOTSTRAP_FULL** | No cert, cert known-expired, or too many EAP-TLS failures | Join `WIFI_SSID` (PSK), sync NTP, run SCEP, store cert, reboot |
 
-Per-boot decision (`lib/wifi_state/wifi_state.c`):
+A full SCEP enrollment against real NDES takes ~9 s (mostly RSA-2048 keygen
++ the RA round-trip).
 
-1. Read NVS credential store.
-2. Compute `ntp_synced = (time(NULL) >= 2020-01-01)`. If false, the
-   stored `not_after` is treated as "unknown" -- not as "expired".
-3. Choose one of:
-   - **ENTERPRISE**: stored cert present, clock either synced + cert valid OR
-     unsynced (assume valid, try anyway). Join `WIFI_ENTERPRISE_SSID` via
-     EAP-TLS with the stored cert + key.
-   - **BOOTSTRAP_NTP_ONLY**: stored cert present, `OTA_NTP_BEFORE_EAPTLS=1`,
-     clock not synced. Join `WIFI_SSID` (PSK) just long enough to run SNTP,
-     then loop back to step 2.
-   - **BOOTSTRAP_FULL**: no stored cert, or cert known-expired (only after
-     a confirmed NTP sync), or `WIFI_ENTERPRISE_RETRY_MAX` consecutive
-     enterprise failures (assume the cert is bad even though the clock
-     said otherwise). Join `WIFI_SSID` (PSK), sync NTP, run SCEP enrollment
-     against `SCEP_URL`, store new cert in NVS, reboot into ENTERPRISE.
-
-A full SCEP enrollment cycle against real NDES takes ~9 s on the S3
-(mostly RSA-2048 keygen + the RA round-trip).
-
-#### Mode without NTP (`SCEP_NO_NTP_USE_ISSUANCE_TIME`)
-
-For air-gapped or off-grid deployments where no NTP server is reachable,
-define `SCEP_NO_NTP_USE_ISSUANCE_TIME` in `config.h`. This activates a third
-sub-mode: every boot performs a fresh SCEP enrollment regardless of what is
-already in NVS, then uses the issued cert's X.509 NotBefore field as the
-local-clock anchor (`settimeofday()`). The device reboots and joins the
-enterprise network with a fresh cert and a CA-attested "approximately now"
-clock.
-
-Trade-offs to be aware of:
-
-- Every boot costs ~9 s and burns one NDES challenge password.
-- The `cert_renewer` background task is disabled -- each reboot is itself a
-  renewal.
-- Clock accuracy equals the CA's clock precision minus enrollment latency.
-  If the CA pre-dates NotBefore by a few minutes (common for skew tolerance),
-  the anchor may start slightly in the past, which is fine for cert validity
-  checks.
-- The on-chip oscillator drifts across uptime without NTP correction. Devices
-  that run continuously for many hours may drift outside the RADIUS server's
-  clock-skew tolerance; frequent reboots or short session lifetimes keep this
-  in check.
-- Mutually exclusive with `OTA_NTP_BEFORE_EAPTLS`; defining both is a
-  compile-time error.
+**No-NTP mode (`SCEP_NO_NTP_USE_ISSUANCE_TIME`)**: for air-gapped deployments
+with no NTP source. Every boot re-enrolls a fresh cert and uses its X.509
+NotBefore as the local-clock anchor. Trades ~9 s per boot and one NDES
+challenge password per reboot for a clock anchor without an NTP server.
+`cert_renewer` is disabled -- each reboot is the renewal. Mutually exclusive
+with `OTA_NTP_BEFORE_EAPTLS`.
 
 ### Configuration knobs
 
@@ -351,6 +333,7 @@ All in `main/config.h`:
 | `OTA_NTP_BEFORE_EAPTLS` | Set to `1` to require an NTP sync before attempting EAP-TLS (recommended for production) |
 | `EAPTLS_FALLBACK_TIMEOUT_SEC` | Seconds to wait for EAP-TLS association before falling back to bootstrap PSK |
 | `WIFI_ENTERPRISE_RETRY_MAX` | Consecutive EAP-TLS failures before forcing a re-enroll (0 = unlimited retries) |
+| `CERT_RENEWAL_WINDOW_DAYS` | Start renewing when fewer than this many days remain before cert expiry (default 7) |
 
 Place your NDES CA chain PEM in `main/certs/scep_ca.pem`. This file is used
 as the TLS trust anchor for the HTTPS connection to NDES; it must contain the
@@ -383,8 +366,11 @@ The threat model is a network attacker. A physical attacker who can
 dump the SPI flash extracts the NVS key from the `nvs_keys` partition
 and decrypts the on-device NVS (which holds the ED25519 host key).
 The authorized public keys live in firmware flash (unencrypted but
-useless on their own). OTA image signing requires the ECDSA-P256
-private key, which is held off-device by the operator.
+useless on their own). OTA authentication requires the ED25519 private
+key matching `OTA_AUTHORIZED_PUBKEY`, which is held off-device by the
+operator; the ephemeral X25519 key exchange inside the OTA session adds
+an independent encryption layer with no pre-shared key material baked
+into the firmware.
 
 Cipher hardening (compile-time):
 - AES-CBC, AES-192, SHA-1 MAC, DH key exchange are all disabled in
@@ -465,7 +451,7 @@ Three PlatformIO environments are defined in `platformio.ini`:
 ```
 make build              # esp32s3
 pio run -e wokwi        # Wokwi build (no flash)
-pio test -e native      # 155 native test cases
+pio test -e native      # 236 native test cases
 ```
 
 ## Tests
@@ -474,15 +460,15 @@ Three tiers, all run on a Linux/macOS host without ESP32-S3 hardware:
 
 | Tier | Cases / scripts | Command |
 |---|---|---|
-| Native Unity unit tests | 155 cases across 13 suites | `pio test -e native` |
-| Integration scripts | 6 scripts (QEMU boot, NVS persistence, OTA signer roundtrip, clean build, key generation, patch application) | `bash test/scripts/<script>` |
+| Native Unity unit tests | 236 cases across 20 suites | `pio test -e native` |
+| pytest integration scripts | 37 cases (OTA protocol, OTA send unit, SCEP protocol) | `pytest test/scripts/test_ota_*.py test/scripts/test_scep_*.py` |
+| QEMU / shell scripts | QEMU boot, NVS persistence, clean build, patch application | `bash` / `python3` per script in `test/scripts/` |
 | Wokwi simulator | interactive | open `test/wokwi/wokwi.toml` |
 
 The native suite covers every library in `lib/` end-to-end, including
-the helpers extracted from `main/` (CDC drain, OTA stream accumulator,
-terminal-resize CSI formatter, scrollback header formatter). See
-[`test/README.md`](test/README.md) for the per-suite breakdown and the
-coverage map.
+the helpers extracted from `main/` (CDC drain, terminal-resize CSI
+formatter, scrollback header formatter). See [`test/README.md`](test/README.md)
+for the per-suite breakdown and the coverage map.
 
 ## Dependencies
 
