@@ -246,6 +246,133 @@ never written to disk, **no pre-shared OTA key material is needed on
 the build host** -- the only OTA credential is the SSH key matching
 `OTA_AUTHORIZED_PUBKEY`.
 
+## Automatic certificate enrollment (SCEP)
+
+Implements RFC 8894 SCEP to enroll a device certificate from a Microsoft NDES
+CA without manually copying key material per device. The enrolled cert is used
+for WPA3-Enterprise EAP-TLS authentication, removing the need for PSK
+credentials in production firmware.
+
+### Threat-model fit
+
+WPA3-Enterprise EAP-TLS with per-device certificates offers stronger
+authentication guarantees than PSK: each device holds a unique RSA-2048
+private key, never transmitted over any network, and the CA can revoke
+individual device certs if a device is compromised. SCEP automates the
+enrollment so new devices self-provision on first boot.
+
+### Two SSIDs, by design
+
+802.11 ties an SSID to one auth mode, so this feature uses two distinct
+networks:
+
+| Knob | Network | Auth | Used for |
+|---|---|---|---|
+| `WIFI_SSID` + `WIFI_PASS` | bootstrap | WPA2/WPA3-Personal (PSK) | NTP sync + SCEP enrollment only |
+| `WIFI_ENTERPRISE_SSID` + `EAP_IDENTITY` | enterprise | WPA3-Enterprise / EAP-TLS | normal operation |
+
+They are typically separate VLANs on the same physical AP. The PSK
+bootstrap network does not need internet access -- only TCP/443 to the
+SCEP server and UDP/123 to your NTP source.
+
+### Bootstrap state machine
+
+The ESP32-S3 has no battery-backed RTC, so on a cold boot `time(NULL)`
+returns 0 (1970). Without a fresh NTP sync the device cannot tell whether
+its stored cert is still valid -- "valid until 2026-06-13" is meaningless
+relative to an epoch-0 clock. The state machine handles this in two ways:
+
+- **`OTA_NTP_BEFORE_EAPTLS=1` (recommended)**: every boot routes through the
+  PSK bootstrap network long enough to run SNTP before any cert validity
+  check. After NTP, `time(NULL) >= 2020-01-01` and the cert-expiry
+  comparison is meaningful.
+- **`OTA_NTP_BEFORE_EAPTLS=0` (default)**: the device optimistically
+  attempts EAP-TLS immediately if a cert is stored, on the assumption that
+  RADIUS will reject expired certs and the retry-bounded fallback below
+  will catch it. Saves the bootstrap detour on every boot but takes longer
+  to recover from cert expiry.
+
+Per-boot decision (`lib/wifi_state/wifi_state.c`):
+
+1. Read NVS credential store.
+2. Compute `ntp_synced = (time(NULL) >= 2020-01-01)`. If false, the
+   stored `not_after` is treated as "unknown" -- not as "expired".
+3. Choose one of:
+   - **ENTERPRISE**: stored cert present, clock either synced + cert valid OR
+     unsynced (assume valid, try anyway). Join `WIFI_ENTERPRISE_SSID` via
+     EAP-TLS with the stored cert + key.
+   - **BOOTSTRAP_NTP_ONLY**: stored cert present, `OTA_NTP_BEFORE_EAPTLS=1`,
+     clock not synced. Join `WIFI_SSID` (PSK) just long enough to run SNTP,
+     then loop back to step 2.
+   - **BOOTSTRAP_FULL**: no stored cert, or cert known-expired (only after
+     a confirmed NTP sync), or `WIFI_ENTERPRISE_RETRY_MAX` consecutive
+     enterprise failures (assume the cert is bad even though the clock
+     said otherwise). Join `WIFI_SSID` (PSK), sync NTP, run SCEP enrollment
+     against `SCEP_URL`, store new cert in NVS, reboot into ENTERPRISE.
+
+A full SCEP enrollment cycle against real NDES takes ~9 s on the S3
+(mostly RSA-2048 keygen + the RA round-trip).
+
+#### Mode without NTP (`SCEP_NO_NTP_USE_ISSUANCE_TIME`)
+
+For air-gapped or off-grid deployments where no NTP server is reachable,
+define `SCEP_NO_NTP_USE_ISSUANCE_TIME` in `config.h`. This activates a third
+sub-mode: every boot performs a fresh SCEP enrollment regardless of what is
+already in NVS, then uses the issued cert's X.509 NotBefore field as the
+local-clock anchor (`settimeofday()`). The device reboots and joins the
+enterprise network with a fresh cert and a CA-attested "approximately now"
+clock.
+
+Trade-offs to be aware of:
+
+- Every boot costs ~9 s and burns one NDES challenge password.
+- The `cert_renewer` background task is disabled -- each reboot is itself a
+  renewal.
+- Clock accuracy equals the CA's clock precision minus enrollment latency.
+  If the CA pre-dates NotBefore by a few minutes (common for skew tolerance),
+  the anchor may start slightly in the past, which is fine for cert validity
+  checks.
+- The on-chip oscillator drifts across uptime without NTP correction. Devices
+  that run continuously for many hours may drift outside the RADIUS server's
+  clock-skew tolerance; frequent reboots or short session lifetimes keep this
+  in check.
+- Mutually exclusive with `OTA_NTP_BEFORE_EAPTLS`; defining both is a
+  compile-time error.
+
+### Configuration knobs
+
+All in `main/config.h`:
+
+| Key | Purpose |
+|---|---|
+| `SCEP_URL` | Full URL to the NDES `mscep.dll` PKIOperation endpoint, e.g. `https://pki.example.com/certsrv/mscep/mscep.dll` |
+| `SCEP_CHALLENGE_PASSWORD` | One-time enrollment password from the NDES web UI |
+| `WIFI_ENTERPRISE_SSID` | SSID of the WPA3-Enterprise network; also the trigger that enables the full SCEP+EAP-TLS state machine |
+| `OTA_NTP_BEFORE_EAPTLS` | Set to `1` to require an NTP sync before attempting EAP-TLS (recommended for production) |
+| `EAPTLS_FALLBACK_TIMEOUT_SEC` | Seconds to wait for EAP-TLS association before falling back to bootstrap PSK |
+| `WIFI_ENTERPRISE_RETRY_MAX` | Consecutive EAP-TLS failures before forcing a re-enroll (0 = unlimited retries) |
+
+Place your NDES CA chain PEM in `main/certs/scep_ca.pem`. This file is used
+as the TLS trust anchor for the HTTPS connection to NDES; it must contain the
+root CA that signed the NDES server's TLS certificate (not necessarily the
+same CA that signs device certs).
+
+### Compatibility and limitations
+
+- Tested against **Microsoft NDES (legacy CryptoAPI/CSP mode)** on Windows
+  Server. NDES in this mode rejects ECDSA-signed pkiMessages; the firmware
+  always uses **RSA-2048** for the device key and CSR signature.
+- The NDES CertRep uses **RSAES-OAEP/SHA-1** to encrypt the CEK back to the
+  client; the firmware dispatches on the `keyEncryptionAlgorithm` OID so it
+  also accepts the legacy **PKCS#1 v1.5** variant used by some other SCEP CAs.
+- **RSA-2048 only** -- NDES in legacy mode will not issue certs for EC keys.
+- **One-time bootstrap network required** -- a PSK SSID must be reachable on
+  first boot and on every re-enrollment. After successful enrollment the device
+  operates entirely on the enterprise network.
+
+See the OTA section above for the related auto-update story; the same EAP-TLS
+cert can be used to authenticate OTA connections in a combined deployment.
+
 ## Security model
 
 Authentication is public-key only. The authorized keys are baked into

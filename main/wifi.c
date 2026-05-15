@@ -40,6 +40,7 @@
  */
 
 #include <string.h>
+#include <time.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
@@ -50,6 +51,7 @@
 #include "esp_netif.h"
 #include "esp_netif_net_stack.h"
 #include "esp_wifi.h"
+#include "esp_system.h"
 
 /* config.h must come before the WIFI_USE_ENTERPRISE guard below because
  * that macro is defined there (not on the command line). */
@@ -66,6 +68,36 @@
 
 #ifdef WIFI_USE_ENTERPRISE
 #include "esp_eap_client.h"
+#endif
+
+/* EAP outer/anonymous identity sent in Phase 1 of EAP-TLS (before the TLS
+ * tunnel is up).  Many RADIUS servers want anonymous@<realm> here; others
+ * accept the cert CN directly.  Default to "anonymous" so a Mode B or
+ * Mode C build that forgets to set EAP_IDENTITY in config.h still compiles
+ * -- with the obvious caveat that "anonymous" will only work if the
+ * RADIUS server accepts it. */
+#if defined(WIFI_USE_ENTERPRISE) || defined(WIFI_ENTERPRISE_SSID)
+# ifndef EAP_IDENTITY
+#  define EAP_IDENTITY  "anonymous"
+# endif
+#endif
+
+/* Smart state machine (opt-in via WIFI_ENTERPRISE_SSID in config.h) */
+#ifdef WIFI_ENTERPRISE_SSID
+#include "esp_eap_client.h"
+#include "esp_netif_sntp.h"
+#include "esp_sntp.h"
+#include <sys/time.h>
+#include "cred_store.h"
+#include "scep_enroll.h"
+#include "wifi_state.h"
+#endif
+
+/* Mutual exclusion: SCEP_NO_NTP_USE_ISSUANCE_TIME and OTA_NTP_BEFORE_EAPTLS
+ * are fundamentally opposite strategies for handling the unsynced clock.
+ * Defining both is a configuration error; catch it at compile time. */
+#if defined(SCEP_NO_NTP_USE_ISSUANCE_TIME) && defined(OTA_NTP_BEFORE_EAPTLS) && OTA_NTP_BEFORE_EAPTLS
+#error "SCEP_NO_NTP_USE_ISSUANCE_TIME and OTA_NTP_BEFORE_EAPTLS are mutually exclusive -- pick one"
 #endif
 
 #if !defined(BRIDGE_LOOPBACK) && defined(MDNS_ENABLE)
@@ -1050,3 +1082,653 @@ esp_err_t wifi_init_sta(void)
     ESP_LOGE(TAG, "unexpected event group state 0x%lx", (unsigned long)bits);
     return ESP_FAIL;
 }
+
+/* ==========================================================================
+ * wifi_init_smart() -- two-network boot-time state machine
+ *
+ * Available only when WIFI_ENTERPRISE_SSID is defined in config.h.
+ *
+ * High-level flow:
+ *   1. Read NVS credential store.
+ *   2. Decide: bootstrap-full, bootstrap-NTP-only, or enterprise.
+ *   3a. ENTERPRISE: connect EAP-TLS; success -> done; fail -> loop.
+ *   3b. BOOTSTRAP_NTP_ONLY: connect PSK, sync NTP, disconnect, go to 2.
+ *   3c. BOOTSTRAP_FULL: connect PSK, sync NTP, check cert expiry, run SCEP
+ *       if needed, reboot after successful enrollment.
+ *
+ * Driver lifecycle:
+ *   - esp_wifi_init() is called once.
+ *   - Between network switches: esp_wifi_stop() -> reconfigure -> start().
+ *   - esp_wifi_deinit() is never called (too destructive).
+ *   - Enterprise enable/disable wrappers guard the EAP supplicant state.
+ *
+ * See wifi_state.h for the pure decision function and its truth table.
+ * ========================================================================== */
+
+#ifdef WIFI_ENTERPRISE_SSID
+
+/* --------------------------------------------------------------------------
+ * Smart-mode tunables
+ * -------------------------------------------------------------------------- */
+
+/* How many enterprise attempts before falling back to bootstrap to re-enroll.
+ * 0 = unlimited (never fall back due to attempt count alone). */
+#ifndef WIFI_ENTERPRISE_RETRY_MAX
+# define WIFI_ENTERPRISE_RETRY_MAX  5
+#endif
+
+/* Seconds to wait for an IP in enterprise mode before declaring failure. */
+#ifndef EAPTLS_FALLBACK_TIMEOUT_SEC
+# define EAPTLS_FALLBACK_TIMEOUT_SEC  60
+#endif
+
+/* Cert is considered "expired" when fewer than this many seconds remain.
+ * Default 86400 = 24 hours (early renewal window so overnight expiry doesn't
+ * bite).  Override in config.h if your CA issues short-lived certs. */
+#ifndef CERT_EXPIRY_WINDOW_SEC
+# define CERT_EXPIRY_WINDOW_SEC  86400
+#endif
+
+/* Seconds to wait for NTP sync on the bootstrap network. */
+#ifndef SMART_NTP_SYNC_TIMEOUT_SEC
+# define SMART_NTP_SYNC_TIMEOUT_SEC  30
+#endif
+
+/* Minimum plausible epoch: 2020-01-01 00:00:00 UTC.
+ * Used to detect an unsynced clock still at reset (0 or 1970). */
+#define MIN_PLAUSIBLE_EPOCH  ((time_t)1577836800)
+
+/* --------------------------------------------------------------------------
+ * forward declaration for ntp_dispatch_start used in smart mode below.
+ * The function is already defined above under !BRIDGE_LOOPBACK && NTP_ENABLE.
+ * For the smart path we need our own lightweight NTP sync that BLOCKS
+ * (unlike the background ntp_dispatch_start which tasks and returns).
+ * -------------------------------------------------------------------------- */
+
+/* Bring up PSK, wait for IP, call on_ip(), stop WiFi.
+ *
+ * The caller is responsible for having called esp_wifi_init() once already.
+ * This function does not call esp_wifi_init() or esp_wifi_deinit().
+ *
+ * Returns the return value of on_ip() on success, or ESP_FAIL on connection
+ * failure. */
+static esp_err_t wifi_mode_psk(const char *ssid,
+                                const char *pass,
+                                esp_err_t (*on_ip)(void))
+{
+    ESP_LOGI(TAG, "[smart] connecting to bootstrap PSK network \"%s\"", ssid);
+
+    /* Disable enterprise supplicant if it was previously active. */
+    esp_wifi_sta_enterprise_disable();
+
+    wifi_config_t cfg = {
+        .sta = {
+            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
+            .sae_pwe_h2e        = WPA3_SAE_PWE_BOTH,
+            .pmf_cfg = {
+                .capable  = true,
+                .required = false,
+            },
+        },
+    };
+    /* ssid and pass may be up to 32 / 64 bytes; use strncpy to be safe. */
+    strncpy((char *)cfg.sta.ssid,     ssid, sizeof(cfg.sta.ssid) - 1);
+    strncpy((char *)cfg.sta.password, pass, sizeof(cfg.sta.password) - 1);
+
+    /* Reset event-group bits from any previous round. */
+    xEventGroupClearBits(s_wifi_event_group,
+                         WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
+    s_retry_num = 0;
+
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &cfg));
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    /* Wait for IP or failure.  WIFI_MAX_RETRY=0 means infinite here too. */
+    EventBits_t bits = xEventGroupWaitBits(
+        s_wifi_event_group,
+        WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+        pdFALSE, pdFALSE,
+        portMAX_DELAY);
+
+    if (!(bits & WIFI_CONNECTED_BIT)) {
+        ESP_LOGE(TAG, "[smart] PSK connect to \"%s\" failed", ssid);
+        esp_wifi_stop();
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "[smart] PSK connected to \"%s\"", ssid);
+    esp_err_t result = on_ip ? on_ip() : ESP_OK;
+
+    esp_wifi_stop();
+    return result;
+}
+
+/* Context passed to the on_ip callback for enterprise mode. */
+typedef struct {
+    const cred_store_t *creds;
+} smart_enterprise_ctx_t;
+
+/* Synchronously wait for NTP sync up to SMART_NTP_SYNC_TIMEOUT_SEC.
+ * Returns true if clock looks sane after the wait. */
+static bool smart_ntp_wait_sync(void)
+{
+#if !defined(BRIDGE_LOOPBACK) && defined(NTP_ENABLE)
+    ESP_LOGI(TAG, "[smart] waiting up to %d s for NTP sync ...",
+             SMART_NTP_SYNC_TIMEOUT_SEC);
+
+    /* If SNTP has not been inited yet, start it now. */
+    const char *const servers[] = { NTP_SERVERS };
+    const size_t n_servers = sizeof(servers) / sizeof(servers[0]);
+
+    esp_sntp_config_t cfg = {
+        .smooth_sync                = false,
+        .server_from_dhcp           = false,
+        .wait_for_sync              = true,
+        .start                      = true,
+        .sync_cb                    = NULL,
+        .renew_servers_after_new_IP = false,
+        .ip_event_to_renew          = IP_EVENT_STA_GOT_IP,
+        .index_of_first_server      = 0,
+        .num_of_servers             = n_servers,
+    };
+    for (size_t i = 0; i < n_servers && i < CONFIG_LWIP_SNTP_MAX_SERVERS; i++) {
+        cfg.servers[i] = servers[i];
+    }
+
+    /* esp_netif_sntp_init is idempotent if called a second time -- it will
+     * return ESP_ERR_INVALID_STATE if already running; that is fine. */
+    esp_err_t init_err = esp_netif_sntp_init(&cfg);
+    if (init_err != ESP_OK && init_err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "[smart] esp_netif_sntp_init: %s",
+                 esp_err_to_name(init_err));
+        return false;
+    }
+
+    TickType_t deadline = xTaskGetTickCount() +
+        pdMS_TO_TICKS((uint32_t)SMART_NTP_SYNC_TIMEOUT_SEC * 1000u);
+    while (xTaskGetTickCount() < deadline) {
+        if (esp_netif_sntp_sync_wait(pdMS_TO_TICKS(5000)) == ESP_OK) {
+            break;
+        }
+        ESP_LOGI(TAG, "[smart] NTP: still waiting ...");
+    }
+#else
+    /* NTP not enabled or loopback build -- skip. */
+#endif /* NTP_ENABLE */
+
+    time_t now = time(NULL);
+    bool synced = (now >= MIN_PLAUSIBLE_EPOCH);
+    ESP_LOGI(TAG, "[smart] NTP sync check: epoch=%lld plausible=%s",
+             (long long)now, synced ? "yes" : "no");
+    return synced;
+}
+
+/* on_ip callback for bootstrap NTP-only pass: sync NTP, return. */
+static esp_err_t smart_on_ip_ntp_only(void)
+{
+    smart_ntp_wait_sync();
+    return ESP_OK;  /* Always return OK; caller checks time() afterwards. */
+}
+
+/* on_ip callback for bootstrap full pass: sync NTP (unless no-NTP mode),
+ * check cert, enroll via SCEP.
+ *
+ * In SCEP_NO_NTP_USE_ISSUANCE_TIME mode NTP is skipped entirely; after a
+ * successful enrollment the issued cert's NotBefore field is used to set the
+ * local clock before rebooting into enterprise mode. */
+static esp_err_t smart_on_ip_full(void)
+{
+#ifdef SCEP_NO_NTP_USE_ISSUANCE_TIME
+    /* No-NTP mode: skip SNTP entirely.  We'll set the clock from the cert's
+     * NotBefore after enrollment below. */
+    ESP_LOGI(TAG, "[smart] no-NTP mode: skipping SNTP sync");
+#else
+    bool synced = smart_ntp_wait_sync();
+    (void)synced;
+
+    /* Check cert expiry from NVS (reload after NTP so time is correct). */
+    cred_store_t creds = {};
+    bool cert_present = (cred_store_load(&creds) == ESP_OK);
+    bool cert_expired = false;
+
+    if (cert_present) {
+        time_t now = time(NULL);
+        if (now >= MIN_PLAUSIBLE_EPOCH) {
+            time_t expiry = (time_t)creds.not_after;
+            cert_expired = (expiry - now) < (time_t)CERT_EXPIRY_WINDOW_SEC;
+            if (!cert_expired) {
+                /* Cert is still valid; RADIUS must have been a transient
+                 * failure.  Return OK -- caller will retry enterprise. */
+                ESP_LOGI(TAG,
+                         "[smart] cert valid for %lld more s -- RADIUS transient?",
+                         (long long)(expiry - now));
+                return ESP_OK;
+            }
+            ESP_LOGW(TAG,
+                     "[smart] cert expires in %lld s -- renewing via SCEP",
+                     (long long)(expiry - now));
+        } else {
+            /* Clock not synced -- can't evaluate expiry; re-enroll to be safe. */
+            ESP_LOGW(TAG, "[smart] clock unsynced -- re-enrolling as precaution");
+        }
+    } else {
+        ESP_LOGI(TAG, "[smart] no stored cert -- running SCEP enrollment");
+    }
+#endif /* !SCEP_NO_NTP_USE_ISSUANCE_TIME */
+
+    /* Run SCEP enrollment. */
+#if defined(SCEP_URL) && defined(SCEP_CHALLENGE_PASSWORD)
+    ESP_LOGI(TAG, "[smart] starting SCEP enrollment at %s", SCEP_URL);
+    esp_err_t enroll_err = scep_enroll(SCEP_URL, SCEP_CHALLENGE_PASSWORD, NULL);
+    if (enroll_err != ESP_OK) {
+        ESP_LOGE(TAG, "[smart] SCEP enrollment failed: %s",
+                 esp_err_to_name(enroll_err));
+        return ESP_FAIL;
+    }
+
+#ifdef SCEP_NO_NTP_USE_ISSUANCE_TIME
+    /* No-NTP mode: set the local clock from the issued cert's NotBefore.
+     * This gives an approximately-correct wall-clock anchor (CA-attested "now")
+     * so subsequent time(NULL) calls are in the right era for EAP-TLS. */
+    {
+        cred_store_t fresh_creds = {};
+        if (cred_store_load(&fresh_creds) == ESP_OK && fresh_creds.dev_cert_len > 0) {
+            uint64_t not_before_epoch = 0;
+            esp_err_t nb_err = cred_store_parse_not_before(
+                fresh_creds.dev_cert, fresh_creds.dev_cert_len,
+                &not_before_epoch);
+            if (nb_err == ESP_OK) {
+                struct timeval tv = {
+                    .tv_sec  = (time_t)not_before_epoch,
+                    .tv_usec = 0,
+                };
+                settimeofday(&tv, NULL);
+                ESP_LOGI(TAG,
+                         "[smart] no-NTP mode: local time set to cert NotBefore"
+                         " = %llu", (unsigned long long)not_before_epoch);
+            } else {
+                ESP_LOGW(TAG,
+                         "[smart] no-NTP mode: cred_store_parse_not_before "
+                         "failed (%s) -- clock unchanged",
+                         esp_err_to_name(nb_err));
+            }
+        } else {
+            ESP_LOGW(TAG,
+                     "[smart] no-NTP mode: could not reload creds after "
+                     "enrollment -- clock unchanged");
+        }
+    }
+#endif /* SCEP_NO_NTP_USE_ISSUANCE_TIME */
+
+    ESP_LOGI(TAG, "[smart] SCEP enrollment succeeded -- rebooting for clean state");
+    /* Reboot so the new cert is loaded from a clean state. */
+    esp_restart();
+    /* Not reached. */
+#else
+    ESP_LOGW(TAG, "[smart] SCEP_URL / SCEP_CHALLENGE_PASSWORD not defined -- "
+                  "skipping enrollment; returning OK to retry enterprise");
+#endif
+    return ESP_OK;
+}
+
+/* Configure and start EAP-TLS.
+ *
+ * Feeds creds from NVS into the EAP supplicant if available; otherwise falls
+ * back to the EMBED_TXTFILES compile-time certificates (if compiled in).
+ * Returns ESP_OK if configuration was applied, ESP_FAIL on any setup error. */
+static esp_err_t smart_configure_eaptls(const cred_store_t *creds)
+{
+    ESP_LOGI(TAG, "[smart] configuring EAP-TLS (identity: %s)", EAP_IDENTITY);
+
+    ESP_ERROR_CHECK(esp_eap_client_set_identity(
+        (const unsigned char *)EAP_IDENTITY, strlen(EAP_IDENTITY)));
+
+    if (creds && creds->ca_chain_len > 0 && creds->dev_cert_len > 0 &&
+        creds->dev_key_len > 0) {
+        /* Use NVS-stored credentials. */
+        ESP_LOGI(TAG, "[smart] using NVS creds (CA %u B, cert %u B, key %u B)",
+                 (unsigned)creds->ca_chain_len,
+                 (unsigned)creds->dev_cert_len,
+                 (unsigned)creds->dev_key_len);
+
+        esp_err_t err = esp_eap_client_set_ca_cert(
+            creds->ca_chain, creds->ca_chain_len);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "[smart] set_ca_cert failed: %s",
+                     esp_err_to_name(err));
+            return ESP_FAIL;
+        }
+
+        err = esp_eap_client_set_certificate_and_key(
+            creds->dev_cert, creds->dev_cert_len,
+            creds->dev_key,  creds->dev_key_len,
+            NULL, 0);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "[smart] set_certificate_and_key failed: %s",
+                     esp_err_to_name(err));
+            return ESP_FAIL;
+        }
+    } else {
+        /* Fallback: compile-time embedded certs (EMBED_TXTFILES path).
+         * Only valid when WIFI_USE_ENTERPRISE was defined at build time. */
+#ifdef WIFI_USE_ENTERPRISE
+        ESP_LOGW(TAG, "[smart] NVS creds empty -- falling back to embedded certs");
+        extern const uint8_t eap_ca_pem_start[]     asm("_binary_ca_pem_start");
+        extern const uint8_t eap_ca_pem_end[]       asm("_binary_ca_pem_end");
+        extern const uint8_t eap_client_crt_start[] asm("_binary_client_crt_start");
+        extern const uint8_t eap_client_crt_end[]   asm("_binary_client_crt_end");
+        extern const uint8_t eap_client_key_start[] asm("_binary_client_key_start");
+        extern const uint8_t eap_client_key_end[]   asm("_binary_client_key_end");
+
+        ESP_ERROR_CHECK(esp_eap_client_set_ca_cert(
+            eap_ca_pem_start,
+            eap_ca_pem_end - eap_ca_pem_start));
+        ESP_ERROR_CHECK(esp_eap_client_set_certificate_and_key(
+            eap_client_crt_start,
+            eap_client_crt_end - eap_client_crt_start,
+            eap_client_key_start,
+            eap_client_key_end - eap_client_key_start,
+            NULL, 0));
+#else
+        ESP_LOGE(TAG, "[smart] no NVS creds and no embedded certs -- "
+                      "EAP-TLS will fail");
+        return ESP_FAIL;
+#endif
+    }
+
+    ESP_ERROR_CHECK(esp_eap_client_set_eap_methods(ESP_EAP_TYPE_TLS));
+    ESP_ERROR_CHECK(esp_wifi_sta_enterprise_enable());
+    return ESP_OK;
+}
+
+/* Push new EAP-TLS credentials into the supplicant while already connected.
+ *
+ * Called by cert_renewer.c after a successful SCEP re-enrollment to update
+ * the supplicant's cert+key buffers.  The caller is responsible for calling
+ * esp_wifi_disconnect() afterwards to trigger 802.1X re-auth.
+ *
+ * Only sets CA cert and client cert+key; identity and method flags are
+ * already configured from the initial smart_configure_eaptls() call.
+ *
+ * Returns ESP_OK on success, ESP_FAIL if any ESP-IDF call fails.
+ *
+ * Only available when WIFI_ENTERPRISE_SSID is defined. */
+esp_err_t smart_eap_apply_creds(const cred_store_t *creds)
+{
+    if (!creds || creds->ca_chain_len == 0 ||
+        creds->dev_cert_len == 0 || creds->dev_key_len == 0) {
+        ESP_LOGE(TAG, "[smart] smart_eap_apply_creds: credentials are empty");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "[smart] applying renewed EAP-TLS creds "
+                  "(CA %u B, cert %u B, key %u B)",
+             (unsigned)creds->ca_chain_len,
+             (unsigned)creds->dev_cert_len,
+             (unsigned)creds->dev_key_len);
+
+    esp_err_t err = esp_eap_client_set_ca_cert(
+        creds->ca_chain, creds->ca_chain_len);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "[smart] set_ca_cert failed: %s", esp_err_to_name(err));
+        return ESP_FAIL;
+    }
+
+    err = esp_eap_client_set_certificate_and_key(
+        creds->dev_cert, creds->dev_cert_len,
+        creds->dev_key,  creds->dev_key_len,
+        NULL, 0);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "[smart] set_certificate_and_key failed: %s",
+                 esp_err_to_name(err));
+        return ESP_FAIL;
+    }
+
+    return ESP_OK;
+}
+
+/* Bring up the enterprise (EAP-TLS) network, wait up to timeout_sec for an IP.
+ *
+ * Returns ESP_OK if IP obtained, ESP_FAIL if timeout or disconnect. */
+static esp_err_t wifi_mode_enterprise(const char         *ssid,
+                                       uint32_t            timeout_sec,
+                                       const cred_store_t *creds)
+{
+    ESP_LOGI(TAG, "[smart] connecting to enterprise network \"%s\" "
+                  "(timeout %u s)", ssid, (unsigned)timeout_sec);
+
+    wifi_config_t cfg = {
+        .sta = {
+            .threshold.authmode = WIFI_AUTH_WPA2_ENTERPRISE,
+            .pmf_cfg = {
+                .capable  = true,
+                .required = true,
+            },
+        },
+    };
+    strncpy((char *)cfg.sta.ssid, ssid, sizeof(cfg.sta.ssid) - 1);
+
+    /* Configure EAP-TLS credentials. */
+    if (smart_configure_eaptls(creds) != ESP_OK) {
+        return ESP_FAIL;
+    }
+
+    xEventGroupClearBits(s_wifi_event_group,
+                         WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
+    s_retry_num = 0;
+
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &cfg));
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    TickType_t wait = (timeout_sec == 0)
+        ? portMAX_DELAY
+        : pdMS_TO_TICKS(timeout_sec * 1000u);
+
+    EventBits_t bits = xEventGroupWaitBits(
+        s_wifi_event_group,
+        WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+        pdFALSE, pdFALSE,
+        wait);
+
+    if (bits & WIFI_CONNECTED_BIT) {
+        ESP_LOGI(TAG, "[smart] enterprise connected to \"%s\"", ssid);
+        return ESP_OK;
+    }
+
+    ESP_LOGE(TAG, "[smart] enterprise connect to \"%s\" failed/timed out", ssid);
+    esp_wifi_stop();
+    esp_wifi_sta_enterprise_disable();
+    return ESP_FAIL;
+}
+
+/* --------------------------------------------------------------------------
+ * Public entry point
+ * -------------------------------------------------------------------------- */
+
+esp_err_t wifi_init_smart(void)
+{
+    /* 1. Create shared resources (event group, DHCP watchdog). */
+    s_wifi_event_group = xEventGroupCreate();
+    configASSERT(s_wifi_event_group);
+
+#if DHCP_RETRY_TIMEOUT_SEC > 0 && !defined(USE_STATIC_IPV4)
+    s_dhcp_watchdog = xTimerCreate(
+        "dhcp_wd",
+        pdMS_TO_TICKS(DHCP_RETRY_TIMEOUT_SEC * 1000),
+        pdFALSE, NULL, dhcp_watchdog_cb);
+    if (!s_dhcp_watchdog) {
+        ESP_LOGW(TAG, "[smart] DHCP watchdog timer creation failed");
+    }
+#endif
+
+    /* 2. TCP/IP stack + netif. */
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    s_sta_netif = esp_netif_create_default_wifi_sta();
+    configASSERT(s_sta_netif);
+
+    esp_err_t herr = esp_netif_set_hostname(s_sta_netif, DEVICE_HOSTNAME);
+    if (herr != ESP_OK) {
+        ESP_LOGW(TAG, "[smart] set_hostname failed: %s",
+                 esp_err_to_name(herr));
+    }
+
+    /* 3. WiFi driver init (once). */
+    wifi_init_config_t driver_cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&driver_cfg));
+
+    /* 4. Register persistent event handlers (reconnect + IP logging). */
+    esp_event_handler_instance_t inst_wifi;
+    esp_event_handler_instance_t inst_ip;
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(
+        WIFI_EVENT, ESP_EVENT_ANY_ID,
+        &wifi_event_handler, NULL, &inst_wifi));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(
+        IP_EVENT, IP_EVENT_STA_GOT_IP,
+        &wifi_event_handler, NULL, &inst_ip));
+
+#if IPV6_MODE != IPV6_MODE_DISABLED && defined(CONFIG_LWIP_IPV6)
+    esp_event_handler_instance_t inst_ip6;
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(
+        IP_EVENT, IP_EVENT_GOT_IP6,
+        &wifi_event_handler, NULL, &inst_ip6));
+    (void)inst_ip6;
+#endif
+
+    /* 5. Load stored credentials. */
+    cred_store_t creds = {};
+    bool cert_present = (cred_store_load(&creds) == ESP_OK);
+
+    /* 6. Evaluate initial clock. */
+    time_t now = time(NULL);
+    bool ntp_synced = (now >= MIN_PLAUSIBLE_EPOCH);
+
+    /* 7. Cert expiry check (only when cert exists and clock is plausible). */
+    bool cert_expired = false;
+    if (cert_present && ntp_synced) {
+        time_t expiry = (time_t)creds.not_after;
+        cert_expired = (expiry - now) < (time_t)CERT_EXPIRY_WINDOW_SEC;
+        if (cert_expired) {
+            ESP_LOGW(TAG, "[smart] cert expires in %lld s -- will re-enroll",
+                     (long long)(expiry - now));
+        } else {
+            ESP_LOGI(TAG, "[smart] cert valid for %lld more s",
+                     (long long)(expiry - now));
+        }
+    }
+
+#ifndef OTA_NTP_BEFORE_EAPTLS
+# define OTA_NTP_BEFORE_EAPTLS 0
+#endif
+    bool ntp_req = (OTA_NTP_BEFORE_EAPTLS != 0);
+
+#ifdef SCEP_NO_NTP_USE_ISSUANCE_TIME
+    bool no_ntp = true;
+#else
+    bool no_ntp = false;
+#endif
+
+    int enterprise_attempts = 0;
+
+    /* 8. Main loop -- iterate until enterprise is up or all paths fail. */
+    for (;;) {
+        wifi_decision_t decision = wifi_decide_next_step(
+            cert_present, cert_expired, ntp_synced,
+            ntp_req, no_ntp, enterprise_attempts, WIFI_ENTERPRISE_RETRY_MAX);
+
+        ESP_LOGI(TAG, "[smart] decision=%d (cert=%d expired=%d synced=%d "
+                      "ntp_req=%d attempts=%d max=%d)",
+                 (int)decision, (int)cert_present, (int)cert_expired,
+                 (int)ntp_synced, (int)ntp_req,
+                 enterprise_attempts, WIFI_ENTERPRISE_RETRY_MAX);
+
+        if (decision == WIFI_DECISION_ENTERPRISE) {
+            enterprise_attempts++;
+            esp_err_t rc = wifi_mode_enterprise(
+                WIFI_ENTERPRISE_SSID,
+                (uint32_t)EAPTLS_FALLBACK_TIMEOUT_SEC,
+                cert_present ? &creds : NULL);
+
+            if (rc == ESP_OK) {
+                /* DONE: enterprise is connected.
+                 * Deregister the bootstrap event instances; the persistent
+                 * wifi_event_handler keeps running for reconnect. */
+                esp_event_handler_instance_unregister(
+                    IP_EVENT, IP_EVENT_STA_GOT_IP, inst_ip);
+                esp_event_handler_instance_unregister(
+                    WIFI_EVENT, ESP_EVENT_ANY_ID, inst_wifi);
+
+#if !defined(BRIDGE_LOOPBACK) && defined(MDNS_ENABLE)
+                mdns_dispatch_start();
+#endif
+#if !defined(BRIDGE_LOOPBACK) && defined(NTP_ENABLE)
+                ntp_dispatch_start();
+#endif
+                return ESP_OK;
+            }
+
+            /* Enterprise failed.  Loop back to wifi_decide_next_step with
+             * the updated attempt count; it will decide what to do. */
+            ESP_LOGW(TAG,
+                     "[smart] enterprise attempt %d failed -- re-evaluating",
+                     enterprise_attempts);
+            continue;
+
+        } else if (decision == WIFI_DECISION_BOOTSTRAP_NTP_ONLY) {
+            ESP_LOGI(TAG, "[smart] bootstrap NTP-only pass on \"%s\"",
+                     WIFI_SSID);
+            esp_err_t rc = wifi_mode_psk(WIFI_SSID, WIFI_PASS,
+                                          smart_on_ip_ntp_only);
+            if (rc != ESP_OK) {
+                ESP_LOGW(TAG, "[smart] bootstrap PSK connect failed");
+            }
+            /* Refresh NTP state for next decision. */
+            now = time(NULL);
+            ntp_synced = (now >= MIN_PLAUSIBLE_EPOCH);
+            /* Loop -- next decision should now be ENTERPRISE (or FULL if
+             * something went wrong). */
+            continue;
+
+        } else { /* WIFI_DECISION_BOOTSTRAP_FULL */
+            ESP_LOGI(TAG, "[smart] bootstrap full pass on \"%s\"", WIFI_SSID);
+            esp_err_t rc = wifi_mode_psk(WIFI_SSID, WIFI_PASS,
+                                          smart_on_ip_full);
+            /* smart_on_ip_full calls esp_restart() on successful enrollment;
+             * reaching here means either:
+             *   a) SCEP succeeded but esp_restart hasn't fired yet (impossible
+             *      with esp_restart in the callback), or
+             *   b) no SCEP_URL defined (fallback warning was logged), or
+             *   c) enrollment failed.
+             *
+             * In case (b) the cert is still valid (transient RADIUS failure).
+             * Re-evaluate with updated state so we retry enterprise. */
+            if (rc != ESP_OK) {
+                ESP_LOGE(TAG,
+                         "[smart] bootstrap full pass failed (PSK or SCEP) -- "
+                         "retrying enterprise anyway");
+                /* Reload creds in case partial enrollment wrote something. */
+                cert_present = (cred_store_load(&creds) == ESP_OK);
+            }
+            now = time(NULL);
+            ntp_synced = (now >= MIN_PLAUSIBLE_EPOCH);
+            /* Re-check expiry now that time may be synced. */
+            if (cert_present && ntp_synced) {
+                time_t expiry = (time_t)creds.not_after;
+                cert_expired = (expiry - now) < (time_t)CERT_EXPIRY_WINDOW_SEC;
+            } else {
+                cert_expired = false;
+            }
+            /* Reset enterprise attempt counter so the retry budget is fresh. */
+            enterprise_attempts = 0;
+            continue;
+        }
+    }
+
+    /* Unreachable -- loop only exits via return ESP_OK or esp_restart(). */
+    return ESP_FAIL;
+}
+
+#endif /* WIFI_ENTERPRISE_SSID */

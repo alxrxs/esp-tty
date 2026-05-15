@@ -80,7 +80,8 @@ build:
 # test/scripts/test_ota_protocol_e2e.py).
 test-py:
 	$(PYTHON) -m pytest test/scripts/test_ota_send_unit.py \
-	                    test/scripts/test_ota_protocol_e2e.py -v
+	                    test/scripts/test_ota_protocol_e2e.py \
+	                    test/scripts/test_scep_protocol_e2e.py -v
 	$(PYTHON) test/scripts/test_apply_patches.py
 
 # Aggregate: native (PlatformIO Unity) + python script tests.

@@ -17,10 +17,78 @@
 #include "usb_cdc.h"
 #include "ssh_server.h"
 #include "rollback_decision.h"
+#include "scep_enroll.h"
+#ifdef WIFI_ENTERPRISE_SSID
+#include "cert_renewer.h"
+#endif
+#include "mbedtls/pk.h"
+#include "mbedtls/entropy.h"
+#include "mbedtls/ctr_drbg.h"
 #include "config.h"   /* RING_BUFFER_BYTES, SCROLLBACK_BUFFER_BYTES,
                          OTA_ROLLBACK_DELAY_MS (all optional, defaults below) */
 
 static const char *TAG = "main";
+
+/* SCEP_SMOKE_TEST_ON_BOOT: quick re-verify hook for development.
+ *
+ * WARNING: this fires on every boot, unconditionally re-enrolling even when
+ * valid credentials exist.  Each re-enrollment consumes an NDES OTP challenge
+ * and creates a new audit-log entry on the CA.  Leave this UNDEFINED in
+ * production firmware; it is a development-only diagnostic tool. */
+#ifdef SCEP_SMOKE_TEST_ON_BOOT
+void scep_smoke_task(void *arg)
+{
+    (void)arg;
+    ESP_LOGW(TAG, "SCEP smoke test: enrolling now against %s", SCEP_URL);
+    TickType_t t0 = xTaskGetTickCount();
+    esp_err_t scep_rc = scep_enroll(SCEP_URL, SCEP_CHALLENGE_PASSWORD, NULL);
+    TickType_t t1 = xTaskGetTickCount();
+    ESP_LOGW(TAG, "SCEP smoke test: result=%s (0x%x) elapsed=%lu ms",
+             esp_err_to_name(scep_rc), (unsigned)scep_rc,
+             (unsigned long)((t1 - t0) * portTICK_PERIOD_MS));
+    vTaskDelete(NULL);
+}
+#endif
+
+#ifdef SCEP_KEYGEN_BENCH_ON_BOOT
+void rsa_bench_task(void *arg)
+{
+    (void)arg;
+    mbedtls_entropy_context  entropy;
+    mbedtls_ctr_drbg_context ctr_drbg;
+    mbedtls_pk_context       pk;
+    TickType_t t0, t1;
+
+    mbedtls_entropy_init(&entropy);
+    mbedtls_ctr_drbg_init(&ctr_drbg);
+    mbedtls_pk_init(&pk);
+
+    int rc = mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy,
+                                    (const unsigned char *)"bench", 5);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "keygen bench: ctr_drbg_seed failed: -0x%04x", (unsigned)(-rc));
+        goto bench_done;
+    }
+    rc = mbedtls_pk_setup(&pk, mbedtls_pk_info_from_type(MBEDTLS_PK_RSA));
+    if (rc != 0) {
+        ESP_LOGE(TAG, "keygen bench: pk_setup failed: -0x%04x", (unsigned)(-rc));
+        goto bench_done;
+    }
+    ESP_LOGW(TAG, "RSA-2048 keygen bench: starting...");
+    t0 = xTaskGetTickCount();
+    rc = mbedtls_rsa_gen_key(mbedtls_pk_rsa(pk), mbedtls_ctr_drbg_random,
+                              &ctr_drbg, 2048, 65537);
+    t1 = xTaskGetTickCount();
+    ESP_LOGW(TAG, "RSA-2048 keygen bench: rc=-0x%04x elapsed=%lu ms",
+             (unsigned)(-rc), (unsigned long)((t1 - t0) * portTICK_PERIOD_MS));
+
+bench_done:
+    mbedtls_pk_free(&pk);
+    mbedtls_ctr_drbg_free(&ctr_drbg);
+    mbedtls_entropy_free(&entropy);
+    vTaskDelete(NULL);
+}
+#endif
 
 /* Per-direction ring buffer size (PSRAM-backed). Override in config.h
  * if you need more headroom for bursty workloads. */
@@ -32,7 +100,7 @@ static const char *TAG = "main";
  * values let the device retain more history of the target's serial output
  * between SSH sessions; bounded by free PSRAM. */
 #ifndef SCROLLBACK_BUFFER_BYTES
-#define SCROLLBACK_BUFFER_BYTES SCROLLBACK_BUFFER_BYTES   /* 128 KB by default */
+#define SCROLLBACK_BUFFER_BYTES (128 * 1024)
 #endif
 
 /* -- Rollback self-test ---------------------------------------------------
@@ -133,13 +201,51 @@ void app_main(void)
     ESP_LOGI(TAG, "BRIDGE_LOOPBACK mode -- USB CDC bypassed");
 #endif
 
+#ifdef SCEP_KEYGEN_BENCH_ON_BOOT
+    /* Pre-Wi-Fi RSA-2048 keygen timing.  Runs in a dedicated 32KB-stack
+       task because RSA bignum scratch (~4-8 KB even with WOLFSSL_SMALL_STACK)
+       overflows the default main_task stack.  Doesn't need network. */
+    extern void rsa_bench_task(void *);
+    xTaskCreate(rsa_bench_task, "rsa_bench", 32768, NULL, 5, NULL);
+#endif
+
     /* -- 4. Wi-Fi STA ---------------------------------------------- */
+#ifdef WIFI_ENTERPRISE_SSID
+    /* Smart two-network state machine: bootstrap PSK -> NTP -> SCEP -> enterprise.
+     * Only compiled/called when WIFI_ENTERPRISE_SSID is defined in config.h. */
+    err = wifi_init_smart();
+#else
     err = wifi_init_sta();
+#endif
     if (err != ESP_OK) {
         /* wifi.c keeps retrying; SSH server starts anyway in case an
            existing TCP session was pre-established during the grace window. */
-        ESP_LOGW(TAG, "wifi_init_sta returned error -- SSH server starting anyway");
+        ESP_LOGW(TAG, "wifi_init returned error -- SSH server starting anyway");
     }
+
+#ifdef SCEP_SMOKE_TEST_ON_BOOT
+    /* SCEP enrollment smoke test (post-Wi-Fi).  Spawned into a 32KB-stack
+       task because scep_enroll's PKCS#7 + CSR + bignum scratch overflows
+       the default main_task stack and panics with IllegalInstruction.
+       Same reason as the keygen bench task above. */
+    extern void scep_smoke_task(void *);
+    if (err == ESP_OK) {
+        xTaskCreate(scep_smoke_task, "scep_smoke", 32768, NULL, 5, NULL);
+    }
+#endif
+
+#ifdef WIFI_ENTERPRISE_SSID
+    /* Certificate renewal watchdog.  Polls the stored cert's NotAfter and
+       re-enrolls via SCEP when within CERT_RENEWAL_WINDOW_DAYS of expiry.
+       Runs indefinitely; retries on failure.  Independent of the smoke-test
+       task above. */
+    if (err == ESP_OK) {
+        esp_err_t renewer_err = cert_renewer_start();
+        if (renewer_err != ESP_OK) {
+            ESP_LOGW(TAG, "cert_renewer_start failed -- renewal will not run");
+        }
+    }
+#endif
 
     /* -- 5. SSH server --------------------------------------------- */
     /* host_key_load_or_generate needs Wi-Fi up for hardware RNG entropy.

@@ -40,11 +40,25 @@ CERT_FILES = [
     ("client.key", "client.key.S", "TEXT"),
 ]
 
+# SCEP server's TLS trust bundle.  Embedded conditionally (independent of the
+# EAP-TLS cert triple); falls back to the firmware-bundled trust store when
+# absent.
+SCEP_CERT_FILES = [
+    ("scep_ca.pem", "scep_ca.pem.S", "TEXT"),
+]
+
 
 def _all_certs_present():
     return all(
         os.path.isfile(os.path.join(CERT_DIR, name))
         for name, _, _ in CERT_FILES
+    )
+
+
+def _scep_cert_present():
+    return all(
+        os.path.isfile(os.path.join(CERT_DIR, name))
+        for name, _, _ in SCEP_CERT_FILES
     )
 
 
@@ -89,6 +103,8 @@ def _generate_asm_for_files(file_list, src_dir):
 def _generate_cert_asm():
     if _all_certs_present():
         _generate_asm_for_files(CERT_FILES, CERT_DIR)
+    if _scep_cert_present():
+        _generate_asm_for_files(SCEP_CERT_FILES, CERT_DIR)
 
 
 # Run immediately at script-evaluation time -- before SCons reads sources.

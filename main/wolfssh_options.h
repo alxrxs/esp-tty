@@ -19,20 +19,22 @@
 #define WOLFSSH_SHELL               /* enable window-change resize callback */
 #define DEFAULT_WINDOW_SZ  2000    /* shrunk for embedded use       */
 
-/* -- Crypto: ED25519 only (RSA disabled to save ~40 KB flash) ---- */
+/* -- Crypto: ED25519 only (SCEP enrollment now uses mbedTLS RSA) -- */
+/* RSA is no longer compiled into wolfSSL.  SCEP uses mbedTLS directly. */
 #define HAVE_ECC
 #define HAVE_CURVE25519
 #define HAVE_ED25519
 #define WOLFSSL_SHA512              /* required by ED25519           */
 #define USE_FAST_MATH
 
+/* Disable RSA in wolfSSL -- SCEP uses mbedTLS for all RSA operations */
+#define NO_RSA
+#define WOLFSSH_NO_RSA
 
 /* -- Embedded constraints ---------------------------------------- */
 #define NO_FILESYSTEM
 #define NO_OLD_TLS
 #define WOLFSSL_SMALL_STACK
-#define NO_RSA
-#define WOLFSSH_NO_RSA
 
 /* -- ESP32 hardware acceleration --------------------------------- */
 #define NO_WOLFSSL_ESP32_CRYPT_HASH_SHA224

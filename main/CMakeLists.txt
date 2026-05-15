@@ -31,14 +31,39 @@ else()
     set(EAP_EMBED_FILES "")
 endif()
 
-# Register the cert paths as configure dependencies so CMake re-runs when
-# certs are added or removed (project-mode only; CONFIGURE_DEPENDS is invalid
-# in ESP-IDF's script-mode requirement pass).
+# Register the EAP cert paths as configure dependencies.
 if(NOT CMAKE_SCRIPT_MODE_FILE)
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
         "${EAP_CERT_DIR}/ca.pem"
         "${EAP_CERT_DIR}/client.crt"
         "${EAP_CERT_DIR}/client.key"
+    )
+endif()
+
+# -- SCEP CA bundle embedding --------------------------------------------------
+# When main/certs/scep_ca.pem exists, embed it into the firmware.
+# This provides the TLS trust anchor for HTTPS connections to the SCEP server.
+# The file must contain the full chain from the SCEP server's certificate up to
+# (and including) the root CA in PEM format.
+#
+# To set up: copy main/certs/scep_ca.pem.example -> main/certs/scep_ca.pem
+# and replace the placeholder with your actual CA certificate chain.
+#
+# Produces linker symbols used by scep_transport.c:
+#   _binary_scep_ca_pem_start
+#   _binary_scep_ca_pem_end
+set(SCEP_CA_PEM "${EAP_CERT_DIR}/scep_ca.pem")
+if(EXISTS "${SCEP_CA_PEM}")
+    set(SCEP_EMBED_FILES "certs/scep_ca.pem")
+    message(STATUS "esp-tty: SCEP CA bundle found -- embedding into firmware")
+else()
+    set(SCEP_EMBED_FILES "")
+    message(STATUS "esp-tty: main/certs/scep_ca.pem not found -- SCEP transport disabled")
+endif()
+
+if(NOT CMAKE_SCRIPT_MODE_FILE)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${SCEP_CA_PEM}"
     )
 endif()
 
@@ -62,6 +87,12 @@ idf_component_register(
         "ota_session.c"
         "${CMAKE_CURRENT_LIST_DIR}/../lib/mdns_dispatch/mdns_dispatch.c"
         "${CMAKE_CURRENT_LIST_DIR}/../lib/ssh_keepalive/ssh_keepalive.c"
+        "scep_enroll.c"
+        "cert_renewer.c"
+        "${CMAKE_CURRENT_LIST_DIR}/../lib/cert_renewer/cert_renewer_decide.c"
+        "${CMAKE_CURRENT_LIST_DIR}/../lib/scep_proto/scep_proto.c"
+        "${CMAKE_CURRENT_LIST_DIR}/../lib/cred_store/cred_store.c"
+        "${CMAKE_CURRENT_LIST_DIR}/../lib/scep_transport/scep_transport.c"
     INCLUDE_DIRS
         "."
         "${CMAKE_CURRENT_LIST_DIR}/../lib/ring"
@@ -71,11 +102,19 @@ idf_component_register(
         "${CMAKE_CURRENT_LIST_DIR}/../lib/pubkey_auth"
         "${CMAKE_CURRENT_LIST_DIR}/../lib/mdns_dispatch"
         "${CMAKE_CURRENT_LIST_DIR}/../lib/ssh_keepalive"
+        "${CMAKE_CURRENT_LIST_DIR}/../lib/cred_store"
+        "${CMAKE_CURRENT_LIST_DIR}/../lib/scep_transport"
+        "${CMAKE_CURRENT_LIST_DIR}/../lib/scep_proto"
+        "${CMAKE_CURRENT_LIST_DIR}/../lib/cert_renewer"
     REQUIRES
         wolfssl
         wolfssl__wolfssh
         wpa_supplicant     # exposes esp_eap_client.h for WPA2/WPA3-Enterprise
         app_update         # esp_ota_ops.h
+        nvs_flash          # cred_store NVS backend
+        esp_http_client    # scep_transport HTTPS
+        mbedtls            # TLS backing for esp_http_client
     EMBED_TXTFILES
         ${EAP_EMBED_FILES}
+        ${SCEP_EMBED_FILES}
 )

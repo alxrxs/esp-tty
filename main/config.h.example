@@ -8,39 +8,89 @@
 #pragma once
 
 /* --------------------------------------------------------------------------
- * Wi-Fi -- choose ONE of the two blocks below.
+ * Wi-Fi -- pick ONE of the three modes below.
+ *
+ * An IEEE-802.11 SSID is locked to exactly one authentication mode at the
+ * AP, so PSK and EAP-TLS are always separate networks.  The three modes
+ * below trade off how many networks are involved and when authentication
+ * material is provisioned:
+ *
+ *   Mode A: one PSK network only.
+ *   Mode B: one EAP-TLS network only; client cert + key embedded at build.
+ *   Mode C: one PSK *bootstrap* network + one EAP-TLS *enterprise* network,
+ *           with the enterprise client cert auto-enrolled via SCEP on first
+ *           boot (and re-enrolled on expiry).  See the SCEP section near
+ *           the bottom of this file for the related knobs.
  * -------------------------------------------------------------------------- */
 
-/* -- Option A: WPA2/WPA3-Personal (PSK) ----------------------------------- */
+/* -- Mode A: WPA2/WPA3-Personal (PSK) only -------------------------------- *
+ * Fill in WIFI_SSID + WIFI_PASS, do NOT define WIFI_USE_ENTERPRISE or
+ * WIFI_ENTERPRISE_SSID.
+ * -------------------------------------------------------------------------- */
 /* IEEE 802.11 SSID. Max 32 bytes (stored in wifi_sta_config_t.ssid[32]). */
 #define WIFI_SSID   "your-ssid-here"
 /* WPA passphrase. Range: 8..63 bytes (WPA2/WPA3-PSK spec; IDF stores in
  * wifi_sta_config_t.password[64], so 63 bytes + NUL). */
 #define WIFI_PASS   "your-password-here"
 
-/* -- Option B: WPA2/WPA3-Enterprise (EAP-TLS) ----------------------------- *
- * Uncomment WIFI_USE_ENTERPRISE and fill in the fields below.
- * Then place your real certificates in main/certs/ (see main/certs/README.md).
- * The password field (WIFI_PASS) is ignored when enterprise mode is active.
+/* -- Mode B: WPA2/WPA3-Enterprise (EAP-TLS) only, embedded certs ---------- *
+ * One network, EAP-TLS authenticated with a client cert that you placed in
+ * main/certs/ at build time.  WIFI_SSID is reassigned to the enterprise
+ * network name (the #undef/#redefine pattern below overrides the Mode A
+ * value already set above).  WIFI_PASS is kept defined (to empty string)
+ * for API symmetry; it is not used in EAP-TLS mode.
+ * Uncomment WIFI_USE_ENTERPRISE, do NOT define WIFI_ENTERPRISE_SSID.
  *
- * Outer/anonymous identity sent in Phase 1 (before TLS tunnel is up).
- * Many RADIUS servers require this to be  anonymous@<realm>  for privacy.
- * If your server accepts the cert CN directly, use that instead.
- * EAP_IDENTITY: Max 127 bytes (esp_eap_client_set_identity limit).
+ * Place real certs in main/certs/ (see main/certs/README.md) -- the build
+ * embeds them via EMBED_TXTFILES.
+ *
+ * Outer/anonymous EAP identity sent in Phase 1 (before the TLS tunnel is
+ * up).  Many RADIUS servers want anonymous@<realm> here; otherwise the
+ * cert CN.  Max 127 bytes (esp_eap_client_set_identity limit).
 
 #define WIFI_USE_ENTERPRISE
+#undef  WIFI_SSID
+#undef  WIFI_PASS
 #define WIFI_SSID           "your-enterprise-ssid"
-#define WIFI_PASS           ""          // unused in enterprise mode; keep defined
+#define WIFI_PASS           ""
 #define EAP_IDENTITY        "anonymous@example.org"
 
  * Optional: set EAP_DISABLE_TIME_CHECK to 1 if the device has no SNTP/RTC
  * and cert expiry validation is failing at boot.
- * WARNING: this removes a security check; enable SNTP in production instead.
- * Define to enable; otherwise undefined.
+ * WARNING: this removes a security check; enable SNTP in production
+ * instead, or use Mode C with OTA_NTP_BEFORE_EAPTLS=1.
 
 #define EAP_DISABLE_TIME_CHECK  1
 
- * --------------------------------------------------------------------------- */
+ * --------------------------------------------------------------------------- *
+ *
+ * -- Mode C: PSK bootstrap + EAP-TLS enterprise (auto-SCEP enrollment) ----- *
+ * TWO separate SSIDs.  Keep WIFI_SSID/WIFI_PASS pointing at your PSK
+ * bootstrap network (the one the device joins to sync NTP and run SCEP
+ * enrollment).  Then also define WIFI_ENTERPRISE_SSID pointing at the
+ * WPA3-Enterprise network the device should use for normal operation.
+ *
+ * The smart state machine in main/wifi.c (wifi_init_smart) decides at
+ * each boot:
+ *
+ *   ENTERPRISE:       cert in NVS and valid -- go straight to
+ *                     WIFI_ENTERPRISE_SSID.
+ *   BOOTSTRAP_FULL:   no cert, or cert expired -- join WIFI_SSID (PSK),
+ *                     sync NTP, enroll via SCEP against SCEP_URL, reboot
+ *                     into WIFI_ENTERPRISE_SSID.
+ *   BOOTSTRAP_NTP_ONLY (requires OTA_NTP_BEFORE_EAPTLS=1):
+ *                     clock not yet synced -- join WIFI_SSID briefly to
+ *                     sync NTP, then loop back for an ENTERPRISE attempt
+ *                     (so RADIUS server-cert NotBefore/After can be
+ *                     validated).
+ *
+ * The two SSIDs must be distinct (per 802.11, one SSID = one auth mode).
+ * Mode C requires Mode A's WIFI_SSID/WIFI_PASS to be set, plus
+ * WIFI_ENTERPRISE_SSID, EAP_IDENTITY, SCEP_URL, and SCEP_CHALLENGE_PASSWORD
+ * defined (see the SCEP and Wi-Fi Enterprise sections near the bottom).
+ * Do NOT also define WIFI_USE_ENTERPRISE -- the state machine drives
+ * enterprise mode at runtime instead.
+ * -------------------------------------------------------------------------- */
 
 /* --------------------------------------------------------------------------
  * SSH server
@@ -154,8 +204,8 @@
 #define STATIC_IPV4_ADDRESS      "10.57.16.91"
 #define STATIC_IPV4_NETMASK      "255.255.255.0"
 #define STATIC_IPV4_GATEWAY      "10.57.16.1"
-#define STATIC_IPV4_DNS_PRIMARY  "1.1.1.1"       // optional; max 15 characters
-#define STATIC_IPV4_DNS_SECONDARY "1.0.0.1"      // optional; max 15 characters
+#define STATIC_IPV4_DNS_PRIMARY  "1.1.1.1"       /* optional; max 15 characters */
+#define STATIC_IPV4_DNS_SECONDARY "1.0.0.1"      /* optional; max 15 characters */
 
  * -------------------------------------------------------------------------- */
 
@@ -226,8 +276,8 @@
 #define STATIC_IPV6_ADDRESS     "2001:db8::dead:beef"
 #define STATIC_IPV6_PREFIX_LEN  64
 #define STATIC_IPV6_GATEWAY     "fe80::1"
-#define STATIC_IPV6_DNS_PRIMARY   "2606:4700:4700::1111"   // optional (Cloudflare)
-#define STATIC_IPV6_DNS_SECONDARY "2001:4860:4860::8888"   // optional (Google)
+#define STATIC_IPV6_DNS_PRIMARY   "2606:4700:4700::1111"   /* optional (Cloudflare) */
+#define STATIC_IPV6_DNS_SECONDARY "2001:4860:4860::8888"   /* optional (Google) */
 
  * -------------------------------------------------------------------------- */
 
@@ -434,3 +484,194 @@
  * Passed as int max_lines to scrollback_get_lines(); max INT_MAX
  * (2147483647), though practically bounded by SCROLLBACK_BUFFER_BYTES. */
 #define SCROLLBACK_REPLAY_LINES     1000
+
+/* --------------------------------------------------------------------------
+ * Wi-Fi Enterprise + SCEP auto-enrollment  (Mode C from the top of file)
+ *
+ * Defining WIFI_ENTERPRISE_SSID is the opt-in switch for Mode C: it makes
+ * app_main() call wifi_init_smart() instead of the legacy wifi_init_sta().
+ * The state machine then has TWO networks to choose between at each boot:
+ *
+ *     WIFI_SSID + WIFI_PASS          -- PSK bootstrap (set in Mode A block above)
+ *     WIFI_ENTERPRISE_SSID + EAP_*   -- WPA3-Enterprise (this block)
+ *
+ * These MUST be two different SSIDs.  A single AP-side SSID can only carry
+ * one auth mode (PSK or 802.1X), so the bootstrap PSK network and the
+ * production EAP-TLS network are physically separate networks (typically
+ * separate VLANs on the same access point).
+ *
+ * Per-boot decision (see lib/wifi_state/):
+ *
+ *   1. Read the NVS credential store (lib/cred_store/).
+ *   2. Decide one of: ENTERPRISE, BOOTSTRAP_NTP_ONLY, BOOTSTRAP_FULL.
+ *   3. ENTERPRISE: join WIFI_ENTERPRISE_SSID via EAP-TLS using the cert
+ *      from NVS.  Normal operating mode.
+ *   4. BOOTSTRAP_NTP_ONLY: join WIFI_SSID (PSK), sync NTP, drop, loop back
+ *      to step 2.  Used when OTA_NTP_BEFORE_EAPTLS is set and the clock
+ *      is unsynced (needed so RADIUS server-cert NotBefore/After can be
+ *      validated on the next ENTERPRISE attempt).
+ *   5. BOOTSTRAP_FULL: join WIFI_SSID (PSK), sync NTP, run SCEP enrollment
+ *      against SCEP_URL / SCEP_CHALLENGE_PASSWORD, store cert in NVS,
+ *      reboot into ENTERPRISE.
+ *
+ * When WIFI_ENTERPRISE_SSID is NOT defined the smart state machine is
+ * compiled out and the build falls back to Modes A or B unchanged.
+ *
+ * SCEP wire details (RFC 8894):
+ *   Key algorithm: RSA-2048 SHA-256 PKCS#1v1.5 (§3.5.2).  Microsoft NDES
+ *   in legacy CryptoAPI/CSP mode only accepts RSA-signed pkiMessages;
+ *   ECDSA returns failInfo=1 (badMessageCheck).  Tested working against
+ *   Microsoft NDES.
+ *
+ * To enable Mode C, uncomment the four defines in the template block below
+ * (WIFI_ENTERPRISE_SSID, EAP_IDENTITY, SCEP_URL, SCEP_CHALLENGE_PASSWORD).
+ *
+ * IEEE 802.11 SSID max: 32 bytes.
+ * SCEP_URL max: 511 chars (SCEP_URL_MAX - 1 in scep_transport.c); must use
+ *   the https:// scheme (scep_transport.c rejects non-HTTPS URLs before
+ *   making any network connection).
+ * SCEP_CHALLENGE_PASSWORD max: 255 chars (PKCS#9 challengePassword limit).
+ *   Keep confidential -- it authorises certificate issuance.
+ * -------------------------------------------------------------------------- */
+
+/* Uncomment the whole block to enable Mode C:
+
+#define WIFI_ENTERPRISE_SSID     "your-wpa3-enterprise-ssid"
+#define EAP_IDENTITY             "anonymous@example.org"
+#define SCEP_URL                 "https://scep.example.com/certsrv/mscep/mscep.dll"
+#define SCEP_CHALLENGE_PASSWORD  "replace-with-your-static-challenge"
+
+ * -------------------------------------------------------------------------- */
+
+/* OTA_NTP_BEFORE_EAPTLS: when defined (set to 1), the Wi-Fi state machine
+ * syncs NTP time before starting the EAP-TLS handshake.  This ensures the
+ * device clock is correct for certificate validity checks.  Requires
+ * NTP_ENABLE to also be defined.
+ *
+ * MUTUALLY EXCLUSIVE with SCEP_NO_NTP_USE_ISSUANCE_TIME below: the two
+ * options are opposite approaches to the unsynced-clock problem.  Defining
+ * both produces a compile-time #error.
+ *
+ * Define to enable (value 1 is conventional but any non-zero value works):
+ */
+/* #define OTA_NTP_BEFORE_EAPTLS  1 */
+
+/* SCEP_NO_NTP_USE_ISSUANCE_TIME: "no-NTP, fresh-cert-every-boot" mode.
+ *
+ * Use case: off-grid or air-gapped devices with no reachable NTP source.
+ * Instead of syncing the clock via SNTP before joining the enterprise network,
+ * the device re-enrolls a fresh SCEP certificate on every boot and uses the
+ * issued cert's X.509 NotBefore field as a local-time anchor.  The CA clock
+ * is effectively the authoritative time source.
+ *
+ * How it works:
+ *   1. Every boot the state machine takes the BOOTSTRAP_FULL path: joins the
+ *      PSK network, runs SCEP enrollment, receives a fresh cert from the CA.
+ *   2. The new cert's NotBefore (CA-attested "now") is extracted via
+ *      cred_store_parse_not_before() and applied with settimeofday().
+ *   3. The device reboots and joins the enterprise network with a fresh cert
+ *      and an approximately-correct clock anchor.
+ *   4. The cert_renewer background task is skipped -- each reboot is already
+ *      a renewal.
+ *
+ * Trade-offs:
+ *   - Every boot incurs a full SCEP enrollment (~9 s round-trip to NDES).
+ *   - Each enrollment burns one NDES challenge password and creates one CA
+ *     audit-log entry.  High-frequency reboots will exhaust static challenge
+ *     pools faster; configure NDES for auto-challenge or set a generous OTP
+ *     pool.
+ *   - The clock anchor is only as accurate as the CA's clock, minus any
+ *     skew introduced by enrollment latency.  For a CA that applies NotBefore
+ *     at the moment of signing, accuracy is typically within seconds.  For a
+ *     CA that pre-dates certs by minutes (to tolerate clock skew in the
+ *     client), the anchor may be slightly in the past -- which is acceptable
+ *     for certificate validity checks.
+ *   - After the reboot, time(NULL) drifts forward at the normal rate of the
+ *     on-chip oscillator.  Without NTP the clock will gradually diverge from
+ *     wall time across reboots.  Reboot frequently enough to keep the drift
+ *     within the CA's clock-skew tolerance window (typically ±5 minutes for
+ *     Kerberos-based RADIUS).
+ *   - MUTUALLY EXCLUSIVE with OTA_NTP_BEFORE_EAPTLS.  Defining both is a
+ *     compile-time error (wifi.c #errors out).
+ *
+ * Implied settings when this macro is defined:
+ *   - NTP_ENABLE is NOT required (and should not be defined if you want a
+ *     truly air-gapped device).
+ *   - cert_renewer background task is disabled.
+ *   - The per-boot BOOTSTRAP_FULL path always runs, regardless of whether a
+ *     valid cert is already stored in NVS.
+ */
+/* #define SCEP_NO_NTP_USE_ISSUANCE_TIME */
+
+/* EAPTLS_FALLBACK_TIMEOUT_SEC: seconds to wait for the EAP-TLS handshake
+ * to complete before falling back (e.g. reverting to PSK or aborting).
+ * The Wi-Fi state machine starts this timer when enterprise mode is active
+ * and EAP_DISABLE_TIME_CHECK is not set.
+ *
+ * Lower values catch a stuck RADIUS server faster but may fail on high-
+ * latency links (VPN-connected RADIUS, intercontinental enterprise).
+ * Default 60 s. Max practical: 300 (5 minutes). */
+#define EAPTLS_FALLBACK_TIMEOUT_SEC  60
+
+/* -- Internal Mode-C tunables (defaults usually fine) --------------------- *
+ * These all have #ifndef fallbacks in main/wifi.c; override only if you
+ * have a specific reason.  Leaving them undefined here uses the defaults
+ * shown in parentheses.
+ * -------------------------------------------------------------------------- */
+
+/* WIFI_ENTERPRISE_RETRY_MAX: after this many consecutive failed enterprise
+ * auth attempts, the state machine assumes the stored cert is bad and
+ * falls back to BOOTSTRAP_FULL (re-enrolls) even if NTP says the cert is
+ * still valid.  0 = unlimited (never fall back due to attempt count alone;
+ * only cert expiry triggers fallback).  Default 5. */
+/* #define WIFI_ENTERPRISE_RETRY_MAX        5 */
+
+/* SMART_NTP_SYNC_TIMEOUT_SEC: how long the BOOTSTRAP_NTP_ONLY and
+ * BOOTSTRAP_FULL paths wait for SNTP to deliver a synced time before
+ * giving up and proceeding (with whatever clock the device has).  Default
+ * 30 s.  Bump this if your NTP source is high-latency. */
+/* #define SMART_NTP_SYNC_TIMEOUT_SEC       30 */
+
+/* CERT_EXPIRY_WINDOW_SEC: stored cert is treated as "expired" when fewer
+ * than this many seconds remain to NotAfter.  Triggers BOOTSTRAP_FULL on
+ * the next boot decision.  Default 86400 (24 hours) so an overnight expiry
+ * doesn't surprise you.  Bump higher for short-lived (hours-scale) certs. */
+/* #define CERT_EXPIRY_WINDOW_SEC           86400 */
+
+/* EAP_IDENTITY note (when WIFI_USE_ENTERPRISE or WIFI_ENTERPRISE_SSID is
+ * defined):
+ *   When SCEP_URL is also defined (Mode C), the SCEP-issued certificate CN is
+ *   used as the EAP-TLS client identity presented to the RADIUS server.  The
+ *   outer anonymous identity (EAP_IDENTITY, sent before the TLS tunnel is up)
+ *   is still taken from this macro; it is typically "anonymous@<realm>" for
+ *   privacy.  The inner identity is derived from the client certificate CN
+ *   by the RADIUS server.
+ */
+
+/* --------------------------------------------------------------------------
+ * Certificate renewal watchdog (cert_renewer.c)
+ *
+ * Available only when WIFI_ENTERPRISE_SSID is defined (Mode C above).
+ * cert_renewer_start() is called by app_main() after wifi_init_smart()
+ * returns ESP_OK.  The task polls the stored cert's NotAfter and re-enrolls
+ * via SCEP when the cert is within CERT_RENEWAL_WINDOW_DAYS of expiry.
+ *
+ * Assumption: the SCEP server is reachable from the enterprise segment
+ * (corporate routing); no PSK detour is needed for renewal.
+ * -------------------------------------------------------------------------- */
+
+/* CERT_RENEWAL_WINDOW_DAYS: start renewing when the stored cert has fewer
+ * than this many days remaining.  Cert lifetime from NDES is typically
+ * 30 days; a 7-day window leaves slack for retries if SCEP is briefly
+ * unreachable.  Range: 1..365. */
+#define CERT_RENEWAL_WINDOW_DAYS          7
+
+/* CERT_RENEWAL_CHECK_INTERVAL_SEC: how often the renewer task wakes up
+ * to check expiry when no renewal is in progress.  86400 = once per day.
+ * Range: 60..604800 (1 minute to 1 week). */
+#define CERT_RENEWAL_CHECK_INTERVAL_SEC   86400
+
+/* CERT_RENEWAL_RETRY_INTERVAL_SEC: how often to retry SCEP when a renewal
+ * attempt fails.  Continues indefinitely (no giveup).  3600 = once per
+ * hour.  Range: 60..86400. */
+#define CERT_RENEWAL_RETRY_INTERVAL_SEC   3600

@@ -23,7 +23,10 @@
 #define WOLFSSH_SHELL               /* enable window-change resize callback */
 #define DEFAULT_WINDOW_SZ  2000    /* shrunk for embedded use       */
 
-/* -- Crypto: ED25519 only (RSA disabled to save ~40 KB flash) ---- */
+/* -- Crypto: ED25519 only (SCEP enrollment now uses mbedTLS RSA) -- */
+/* RSA is no longer compiled into wolfSSL.  SCEP uses mbedTLS directly,
+ * which avoids the wolfSSL PKCS#7/RSA-4096 crash in AddRecipient_KTRI.
+ * mbedTLS RSA is always available on ESP32 (it is the OTA/TLS stack). */
 #define HAVE_ECC
 #define HAVE_CURVE25519
 #define HAVE_ED25519
@@ -31,12 +34,13 @@
 #define WOLFSSL_SHA512              /* required by ED25519           */
 #define USE_FAST_MATH
 
+/* Disable RSA in wolfSSL -- SCEP now uses mbedTLS for all RSA operations */
+#define NO_RSA
+
 /* -- Embedded constraints ---------------------------------------- */
 #define NO_FILESYSTEM
 #define NO_OLD_TLS
 #define WOLFSSL_SMALL_STACK
-#define NO_RSA
-#define WOLFSSH_NO_RSA
 
 /* -- wolfSSH cipher hardening ------------------------------------ */
 /* AES-GCM is the only cipher we want (AEAD, no padding oracle surface).
@@ -66,6 +70,13 @@
  * pinned to "aes256-gcm@openssh.com" only via wolfSSH_CTX_SetAlgoListCipher
  * in ssh_server.c. */
 #define NO_AES_192
+
+/* -- SCEP wire-protocol: now handled entirely by mbedTLS ----------- */
+/* scep_proto.c no longer uses any wc_PKCS7_* or wc_MakeCert* APIs.
+ * All PKCS#7 EnvelopedData / SignedData construction and parsing is done
+ * with hand-rolled DER writes and mbedtls_aes_* / mbedtls_rsa_* calls.
+ * This removes the wolfSSL PKCS#7 code path that crashed on RSA-4096
+ * RA certs inside wc_PKCS7_AddRecipient_KTRI. */
 
 /* -- ESP32 hardware acceleration ---------------------------------- */
 /*
