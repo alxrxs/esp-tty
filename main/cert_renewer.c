@@ -16,6 +16,8 @@
  * Only compiled when WIFI_ENTERPRISE_SSID is defined.
  */
 
+#include "config.h"   /* must precede the WIFI_ENTERPRISE_SSID #ifdef */
+
 #ifdef WIFI_ENTERPRISE_SSID
 
 #include "cert_renewer.h"
@@ -29,11 +31,11 @@
 
 #include "esp_log.h"
 #include "esp_wifi.h"
+#include "nvs.h"      /* ESP_ERR_NVS_NOT_FOUND */
 
 #include "cred_store.h"
 #include "scep_enroll.h"
 #include "wifi.h"     /* smart_eap_apply_creds() */
-#include "config.h"
 
 static const char *TAG = "cert_renew";
 

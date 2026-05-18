@@ -47,6 +47,7 @@
 #include "freertos/timers.h"
 
 #include "esp_event.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_netif_net_stack.h"
@@ -1024,10 +1025,9 @@ esp_err_t wifi_init_sta(void)
     ESP_ERROR_CHECK(esp_eap_client_set_disable_time_check(true));
 #endif
 
-    /* Restrict to EAP-TLS only so the supplicant doesn't fall back to
-     * PEAP/TTLS if the server offers them (belt-and-suspenders). */
-    ESP_ERROR_CHECK(esp_eap_client_set_eap_methods(ESP_EAP_TYPE_TLS));
-
+    /* EAP-TLS only: with just cert+key configured (no username/password),
+     * the IDF 5.4.1 supplicant auto-selects EAP-TLS.  An explicit
+     * method-restriction API existed in older IDFs but was removed. */
     ESP_ERROR_CHECK(esp_wifi_sta_enterprise_enable());
 #endif /* WIFI_USE_ENTERPRISE */
 
@@ -1287,15 +1287,22 @@ static esp_err_t smart_on_ip_full(void)
     bool synced = smart_ntp_wait_sync();
     (void)synced;
 
-    /* Check cert expiry from NVS (reload after NTP so time is correct). */
-    cred_store_t creds = {};
-    bool cert_present = (cred_store_load(&creds) == ESP_OK);
+    /* Check cert expiry from NVS (reload after NTP so time is correct).
+     * Heap-allocate the cred_store_t (~14 KB) to avoid overflowing
+     * whatever task stack this callback runs on. */
+    cred_store_t *creds = heap_caps_calloc(1, sizeof(cred_store_t),
+                                           MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+    if (!creds) {
+        ESP_LOGE(TAG, "[smart] full: failed to allocate cred_store_t");
+        return ESP_FAIL;
+    }
+    bool cert_present = (cred_store_load(creds) == ESP_OK);
     bool cert_expired = false;
 
     if (cert_present) {
         time_t now = time(NULL);
         if (now >= MIN_PLAUSIBLE_EPOCH) {
-            time_t expiry = (time_t)creds.not_after;
+            time_t expiry = (time_t)creds->not_after;
             cert_expired = (expiry - now) < (time_t)CERT_EXPIRY_WINDOW_SEC;
             if (!cert_expired) {
                 /* Cert is still valid; RADIUS must have been a transient
@@ -1303,6 +1310,7 @@ static esp_err_t smart_on_ip_full(void)
                 ESP_LOGI(TAG,
                          "[smart] cert valid for %lld more s -- RADIUS transient?",
                          (long long)(expiry - now));
+                heap_caps_free(creds);
                 return ESP_OK;
             }
             ESP_LOGW(TAG,
@@ -1315,6 +1323,7 @@ static esp_err_t smart_on_ip_full(void)
     } else {
         ESP_LOGI(TAG, "[smart] no stored cert -- running SCEP enrollment");
     }
+    heap_caps_free(creds);
 #endif /* !SCEP_NO_NTP_USE_ISSUANCE_TIME */
 
     /* Run SCEP enrollment. */
@@ -1332,11 +1341,12 @@ static esp_err_t smart_on_ip_full(void)
      * This gives an approximately-correct wall-clock anchor (CA-attested "now")
      * so subsequent time(NULL) calls are in the right era for EAP-TLS. */
     {
-        cred_store_t fresh_creds = {};
-        if (cred_store_load(&fresh_creds) == ESP_OK && fresh_creds.dev_cert_len > 0) {
+        cred_store_t *fresh_creds = heap_caps_calloc(1, sizeof(cred_store_t),
+                                                     MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+        if (fresh_creds && cred_store_load(fresh_creds) == ESP_OK && fresh_creds->dev_cert_len > 0) {
             uint64_t not_before_epoch = 0;
             esp_err_t nb_err = cred_store_parse_not_before(
-                fresh_creds.dev_cert, fresh_creds.dev_cert_len,
+                fresh_creds->dev_cert, fresh_creds->dev_cert_len,
                 &not_before_epoch);
             if (nb_err == ESP_OK) {
                 struct timeval tv = {
@@ -1358,6 +1368,7 @@ static esp_err_t smart_on_ip_full(void)
                      "[smart] no-NTP mode: could not reload creds after "
                      "enrollment -- clock unchanged");
         }
+        heap_caps_free(fresh_creds);
     }
 #endif /* SCEP_NO_NTP_USE_ISSUANCE_TIME */
 
@@ -1437,7 +1448,8 @@ static esp_err_t smart_configure_eaptls(const cred_store_t *creds)
 #endif
     }
 
-    ESP_ERROR_CHECK(esp_eap_client_set_eap_methods(ESP_EAP_TYPE_TLS));
+    /* EAP-TLS only: with just cert+key configured the IDF supplicant
+     * auto-selects EAP-TLS (no method-restriction API in IDF 5.4.1). */
     ESP_ERROR_CHECK(esp_wifi_sta_enterprise_enable());
     return ESP_OK;
 }
@@ -1598,9 +1610,21 @@ esp_err_t wifi_init_smart(void)
     (void)inst_ip6;
 #endif
 
-    /* 5. Load stored credentials. */
-    cred_store_t creds = {};
-    bool cert_present = (cred_store_load(&creds) == ESP_OK);
+    /* 5. Load stored credentials.
+     *
+     * cred_store_t is ~14 KB (dev_key[2048] + dev_cert[4096] + ca_chain[8192]
+     * + metadata).  The main task's stack is only 3584 bytes, so declaring
+     * this on the stack would smash the heap immediately below it.  Allocate
+     * on the heap instead.  We use internal RAM (not PSRAM) to ensure the
+     * buffers are accessible from any context (NVS, mbedTLS, EAP supplicant). */
+    cred_store_t *creds_p = heap_caps_calloc(1, sizeof(cred_store_t),
+                                              MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+    if (!creds_p) {
+        ESP_LOGE(TAG, "[smart] failed to allocate cred_store_t (%u B) -- aborting",
+                 (unsigned)sizeof(cred_store_t));
+        return ESP_ERR_NO_MEM;
+    }
+    bool cert_present = (cred_store_load(creds_p) == ESP_OK);
 
     /* 6. Evaluate initial clock. */
     time_t now = time(NULL);
@@ -1609,7 +1633,7 @@ esp_err_t wifi_init_smart(void)
     /* 7. Cert expiry check (only when cert exists and clock is plausible). */
     bool cert_expired = false;
     if (cert_present && ntp_synced) {
-        time_t expiry = (time_t)creds.not_after;
+        time_t expiry = (time_t)creds_p->not_after;
         cert_expired = (expiry - now) < (time_t)CERT_EXPIRY_WINDOW_SEC;
         if (cert_expired) {
             ESP_LOGW(TAG, "[smart] cert expires in %lld s -- will re-enroll",
@@ -1650,7 +1674,7 @@ esp_err_t wifi_init_smart(void)
             esp_err_t rc = wifi_mode_enterprise(
                 WIFI_ENTERPRISE_SSID,
                 (uint32_t)EAPTLS_FALLBACK_TIMEOUT_SEC,
-                cert_present ? &creds : NULL);
+                cert_present ? creds_p : NULL);
 
             if (rc == ESP_OK) {
                 /* DONE: enterprise is connected.
@@ -1667,6 +1691,7 @@ esp_err_t wifi_init_smart(void)
 #if !defined(BRIDGE_LOOPBACK) && defined(NTP_ENABLE)
                 ntp_dispatch_start();
 #endif
+                heap_caps_free(creds_p);
                 return ESP_OK;
             }
 
@@ -1710,13 +1735,13 @@ esp_err_t wifi_init_smart(void)
                          "[smart] bootstrap full pass failed (PSK or SCEP) -- "
                          "retrying enterprise anyway");
                 /* Reload creds in case partial enrollment wrote something. */
-                cert_present = (cred_store_load(&creds) == ESP_OK);
+                cert_present = (cred_store_load(creds_p) == ESP_OK);
             }
             now = time(NULL);
             ntp_synced = (now >= MIN_PLAUSIBLE_EPOCH);
             /* Re-check expiry now that time may be synced. */
             if (cert_present && ntp_synced) {
-                time_t expiry = (time_t)creds.not_after;
+                time_t expiry = (time_t)creds_p->not_after;
                 cert_expired = (expiry - now) < (time_t)CERT_EXPIRY_WINDOW_SEC;
             } else {
                 cert_expired = false;
@@ -1728,6 +1753,7 @@ esp_err_t wifi_init_smart(void)
     }
 
     /* Unreachable -- loop only exits via return ESP_OK or esp_restart(). */
+    heap_caps_free(creds_p);
     return ESP_FAIL;
 }
 

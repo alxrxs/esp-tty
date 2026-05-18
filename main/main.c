@@ -2,6 +2,11 @@
  * main.c -- app_main: NVS init, ring buffer allocation, task spawn
  */
 
+/* config.h MUST precede project-internal headers because several of them
+ * (wifi.h, cert_renewer.h) gate their public declarations on macros
+ * defined in config.h (notably WIFI_ENTERPRISE_SSID). */
+#include "config.h"
+
 #include "esp_log.h"
 #include "esp_partition.h"
 #include "esp_ota_ops.h"
@@ -24,8 +29,6 @@
 #include "mbedtls/pk.h"
 #include "mbedtls/entropy.h"
 #include "mbedtls/ctr_drbg.h"
-#include "config.h"   /* RING_BUFFER_BYTES, SCROLLBACK_BUFFER_BYTES,
-                         OTA_ROLLBACK_DELAY_MS (all optional, defaults below) */
 
 static const char *TAG = "main";
 
