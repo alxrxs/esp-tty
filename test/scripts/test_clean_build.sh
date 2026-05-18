@@ -2,7 +2,7 @@
 # test/scripts/test_clean_build.sh -- Clean-build reproducibility test
 #
 # 1. Wipes build cache (managed_components, dependencies.lock, .pio/build/wokwi)
-# 2. Creates a minimal main/config.h from main/config.h.example (saves/restores original)
+# 2. Creates a minimal main/config.h from main/config.example.h (saves/restores original)
 # 3. Runs `pio run -e wokwi`  -- must succeed
 # 4. Runs `pio test -e native` -- must show all native tests passing
 # 5. Restores original main/config.h
@@ -14,7 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
 
 CONFIG_H="$PROJECT_DIR/main/config.h"
-CONFIG_EXAMPLE="$PROJECT_DIR/main/config.h.example"
+CONFIG_EXAMPLE="$PROJECT_DIR/main/config.example.h"
 CONFIG_BACKUP="/tmp/esp-tty-clean-build-config.h.bak"
 
 PASS=0

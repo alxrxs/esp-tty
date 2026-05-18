@@ -24,7 +24,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 CONFIG_H="$PROJECT_DIR/main/config.h"
-CONFIG_EXAMPLE="$PROJECT_DIR/main/config.h.example"
+CONFIG_EXAMPLE="$PROJECT_DIR/main/config.example.h"
 CONFIG_BACKUP="/tmp/esp-tty-ka-matrix-config.h.bak"
 BUILD_DIR="$PROJECT_DIR/.pio/build/esp32s3"
 

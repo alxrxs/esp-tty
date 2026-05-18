@@ -1,6 +1,12 @@
 # User credentials -- never commit
+# Active config: main/config.h
+# Per-device configs: main/config.<devname>.h (multi-ESP32 setups)
+# Build-script backups: main/config.h.*.bak (NTP build-matrix etc.)
+# Only main/config.example.h is tracked.
 main/config.h
-main/config.h*
+main/config.h.*
+main/config.*.h
+!main/config.example.h
 
 # EAP-TLS certificates -- real certs are gitignored; only .example files are tracked
 main/certs/*.pem
@@ -33,3 +39,4 @@ dependencies.lock
 # Python bytecode (test scripts)
 __pycache__/
 *.pyc
+.claude/

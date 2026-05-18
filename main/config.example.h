@@ -1,5 +1,5 @@
 /*
- * config.h.example -- compile-time configuration template for esp-tty
+ * config.example.h -- compile-time configuration template for esp-tty
  *
  * Copy this file to config.h, fill in your values, then build.
  * config.h is gitignored and must never be committed.

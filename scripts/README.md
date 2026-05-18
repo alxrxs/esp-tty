@@ -94,7 +94,7 @@ Usage:
 .venv/bin/python scripts/ota_send.py <host> .pio/build/esp32s3/firmware.bin
 # or, via the Makefile wrapper:
 make ota <host>
-make ota <devname>      # uses main/config.h.<devname>
+make ota <devname>      # uses main/config.<devname>
 ```
 
 Test hooks (used by the test plan in CLAUDE.md):

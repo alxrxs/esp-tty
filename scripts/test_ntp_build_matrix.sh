@@ -16,7 +16,7 @@
 # ------------
 #   - pio (PlatformIO CLI) in PATH or .venv/bin/pio
 #   - xtensa-esp32s3-elf-nm (part of the ESP-IDF toolchain)
-#   - A minimal config.h.example-compatible config.h (the script writes one)
+#   - A minimal config.example.h-compatible config.h (the script writes one)
 #
 # Usage
 #   scripts/test_ntp_build_matrix.sh

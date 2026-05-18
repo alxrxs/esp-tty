@@ -78,11 +78,11 @@ to fit internal SRAM.
 git clone <repo-url> && cd esp-tty
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
-cp main/config.h.example main/config.h
+cp main/config.example.h main/config.h
 $EDITOR main/config.h     # Mode A (PSK): set WIFI_SSID, WIFI_PASS, AUTHORIZED_PUBKEYS,
                           # OTA_AUTHORIZED_PUBKEY at minimum.
                           # Mode C (SCEP): also set WIFI_ENTERPRISE_SSID, EAP_IDENTITY,
-                          # SCEP_URL, SCEP_CHALLENGE_PASSWORD -- see config.h.example.
+                          # SCEP_URL, SCEP_CHALLENGE_PASSWORD -- see config.example.h.
 
 make            # build + flash (auto-detects the CH340 port)
 ```
@@ -174,7 +174,7 @@ This is the right setting for an unattended out-of-band console.
 ## Configuration
 
 Every per-deployment knob lives in `main/config.h` (copied from
-`main/config.h.example`, gitignored). The example file documents each
+`main/config.example.h`, gitignored). The example file documents each
 option with usage notes; the highlights:
 
 | Section | Keys | Purpose |
@@ -194,8 +194,8 @@ production default.
 ### Managing multiple devices
 
 If you run more than one ESP32, keep a separate config per device as
-`main/config.h.<devname>` (e.g. `main/config.h.alpha`,
-`main/config.h.beta`). Each file starts with a marker line that tells
+`main/config.<devname>` (e.g. `main/config.alpha.h`,
+`main/config.beta.h`). Each file starts with a marker line that tells
 the Makefile where to ship its OTA build:
 
 ```c
@@ -206,14 +206,14 @@ the Makefile where to ship its OTA build:
 Then build and ship per device by name:
 
 ```
-make ota   alpha    # copies config.h.alpha -> config.h, builds, OTAs to the marker IP
+make ota   alpha    # copies config.alpha.h -> config.h, builds, OTAs to the marker IP
 make flash alpha    # same config switch, but USB-flashes (marker is ignored)
 ```
 
 `make flash` and `make build` with no argument fall back to the current
 `main/config.h` unchanged, so the single-device workflow keeps working.
 `make ota` also accepts a raw IP or hostname -- if the argument doesn't
-match a `main/config.h.<name>` file, the current `config.h` is built and
+match a `main/config.<name>.h` file, the current `config.h` is built and
 uploaded as-is:
 
 ```
@@ -223,7 +223,7 @@ make ota esp-tty.local
 
 `main/config.h` itself is gitignored and treated as the "currently
 materialized" copy; the canonical per-device files
-(`config.h.<devname>`) are what you maintain. Add `main/config.h.*` to
+(`config.<devname>`) are what you maintain. Add `main/config.*.h` to
 `.gitignore` if those contain WiFi credentials or other secrets you
 don't want in the repo.
 
@@ -239,7 +239,7 @@ make ota alpha              # per-device config (see above)
 ```
 
 `make ota` builds the current `main/config.h` (or the
-`config.h.<devname>` you named) and runs `scripts/ota_send.py
+`config.<devname>` you named) and runs `scripts/ota_send.py
 <host> .pio/build/esp32s3/firmware.bin`. The script opens an SSH
 connection to `ota@<host>` (your normal SSH agent / `~/.ssh/config`
 resolves the key) and then performs an ephemeral X25519 key exchange

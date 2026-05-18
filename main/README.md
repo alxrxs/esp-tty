@@ -40,7 +40,7 @@ directly together by the bridge pump, enabling loopback testing without USB
 hardware.
 
 `config.h` is the compile-time configuration file and is gitignored. It must be
-created before the first build by copying `config.h.example` and filling in the
+created before the first build by copying `config.example.h` and filling in the
 values specific to your deployment. The example file is extensively commented and
 covers Wi-Fi credentials, SSH public keys, USB descriptor strings, network
 identity, and operational tuning knobs such as ring buffer sizes, scrollback
@@ -60,7 +60,7 @@ capacity, TCP keepalive parameters, and the OTA rollback delay. Enterprise Wi-Fi
 | `ssh_server.c` | wolfSSH accept loop, single-session takeover with semaphore synchronisation, pubkey auth dispatch, bridge pump tasks |
 | `ota_session.c` | OTA SSH channel handler: streaming receive, `ota_verify_feed` loop, ECDSA+AES-GCM verification, partition switch and reboot |
 | `host_key.c` | ED25519 host key generation (wolfCrypt RNG) and NVS persistence; SHA-256 fingerprint printed to UART on every boot |
-| `config.h.example` | Compile-time configuration template; copy to `config.h` (gitignored) before building |
+| `config.example.h` | Compile-time configuration template; copy to `config.h` (gitignored) before building |
 | `wolfssh_options.h` | wolfSSH compile-time feature flags: disables AES-CBC, AES-192, SHA-1 MACs, and DH key exchange |
 | `CMakeLists.txt` | ESP-IDF component registration; conditionally embeds EAP-TLS certs via `EMBED_TXTFILES` when present in `certs/` |
 | `idf_component.yml` | IDF component manager manifest (wolfSSL, wolfSSH, TinyUSB versions) |
@@ -83,10 +83,10 @@ flowchart TB
 
 ## Configuration
 
-Before building, copy `config.h.example` to `config.h` and edit it:
+Before building, copy `config.example.h` to `config.h` and edit it:
 
 ```
-cp main/config.h.example main/config.h
+cp main/config.example.h main/config.h
 ```
 
 `config.h` is gitignored and must never be committed. Key knobs:

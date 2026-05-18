@@ -6,16 +6,16 @@
 #   make ota   <DEVNAME|HOST> Compile + upload over Wi-Fi (SSH, X25519+AES-GCM)
 #
 # Per-device configs (multi-ESP32 setups):
-#   Keep one main/config.h.<DEVNAME> per device. Each one starts with the
+#   Keep one main/config.<DEVNAME>.h per device. Each one starts with the
 #   marker line
 #       // MAKE-OTA-IP: <ip-or-hostname>
 #   so the Makefile knows where to ship its OTA build.
 #
-#   `make ota alpha` finds main/config.h.alpha, reads MAKE-OTA-IP from it,
+#   `make ota alpha` finds main/config.alpha.h, reads MAKE-OTA-IP from it,
 #   copies it to main/config.h, builds, and uploads to that IP/host.
 #   `make flash alpha` does the same minus the OTA -- MAKE-OTA-IP is ignored.
 #
-#   `make ota 192.168.1.42` (any string that doesn't name a config.h.<name>
+#   `make ota 192.168.1.42` (any string that doesn't name a config.<name>.h
 #   file) is treated as a raw IP/hostname: the currently materialized
 #   main/config.h is built and uploaded as-is, no config switch.
 #
@@ -57,10 +57,10 @@ UPLOAD_FLAGS := $(if $(PORT),--upload-port $(PORT),)
 FIRMWARE_BIN := .pio/build/$(ENV)/firmware.bin
 
 # Positional argument: the first command-line goal that isn't a known target.
-# May name a per-device config (main/config.h.<DEV_ARG> exists) or, for `ota`
+# May name a per-device config (main/config.<DEV_ARG>.h exists) or, for `ota`
 # only, a raw IP/hostname.
-DEV_ARG  := $(firstword $(filter-out ota flash build,$(MAKECMDGOALS)))
-DEV_FILE := $(wildcard main/config.h.$(DEV_ARG))
+DEV_ARG  := $(firstword $(filter-out ota flash build test test-py,$(MAKECMDGOALS)))
+DEV_FILE := $(wildcard main/config.$(DEV_ARG).h)
 
 # OTA destination: parsed from MAKE-OTA-IP in the matched config file, or
 # DEV_ARG itself if no config file matched. Empty if no DEV_ARG was given,
@@ -90,9 +90,10 @@ test: test-py
 
 flash:
 	@if [ -n "$(DEV_ARG)" ] && [ -z "$(DEV_FILE)" ]; then \
-	    echo "make flash $(DEV_ARG): no main/config.h.$(DEV_ARG) found." >&2; \
+	    echo "make flash $(DEV_ARG): no main/config.$(DEV_ARG).h found." >&2; \
 	    echo "Available device configs:" >&2; \
-	    ls main/config.h.* 2>/dev/null | sed 's|^|  |' >&2 || echo "  (none)" >&2; \
+	    ls main/config.*.h 2>/dev/null | grep -vE 'config\.(h|example)\.h$$' \
+	        | sed 's|^|  |' >&2 || echo "  (none)" >&2; \
 	    exit 1; \
 	fi
 	@if [ -n "$(DEV_FILE)" ]; then \
@@ -108,7 +109,7 @@ flash:
 ota:
 	@if [ -z "$(OTA_TARGET)" ]; then \
 	    if [ -z "$(DEV_ARG)" ]; then \
-	        echo "Usage: make ota <devname>       (uses main/config.h.<devname>)" >&2; \
+	        echo "Usage: make ota <devname>       (uses main/config.<devname>.h)" >&2; \
 	        echo "       make ota <ip-or-host>    (uses main/config.h as-is)" >&2; \
 	    else \
 	        echo "$(DEV_FILE) is missing a '// MAKE-OTA-IP: <ip>' marker." >&2; \

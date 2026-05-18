@@ -11,7 +11,7 @@
 #
 # Requirements:
 #   - PlatformIO with the esp32s3 environment configured
-#   - main/config.h present (copy from config.h.example)
+#   - main/config.h present (copy from config.example.h)
 #   - nm or objdump available (binutils for xtensa or host nm for ELF grep)
 #
 # Exit codes:

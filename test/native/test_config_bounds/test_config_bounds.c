@@ -1,9 +1,9 @@
 /*
  * test_config_bounds.c -- compile-time and runtime bound checks for config
- * macro values documented in config.h.example.
+ * macro values documented in config.example.h.
  *
  * Each _Static_assert below corresponds to a bound annotation in
- * config.h.example.  If a fixture value exceeds its documented maximum,
+ * config.example.h.  If a fixture value exceeds its documented maximum,
  * the build fails here rather than silently producing wrong firmware.
  *
  * Uses fixture values (not real config.h) so this file is self-contained.
