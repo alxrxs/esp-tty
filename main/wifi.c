@@ -561,6 +561,12 @@ static void ntp_start_task(void *pvParameters)
         cfg.servers[i] = servers[i];
     }
 
+    /* Clear any prior SNTP singleton state so re-association events (which
+     * re-enter this task path via the s_ntp_started guard being externally
+     * reset, or via Wi-Fi-driver-internal SNTP touch) don't see "already
+     * initialized" and bail out. */
+    esp_netif_sntp_deinit();
+
     esp_err_t err = esp_netif_sntp_init(&cfg);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_netif_sntp_init failed: %s", esp_err_to_name(err));
