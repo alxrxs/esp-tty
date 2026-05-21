@@ -204,10 +204,10 @@
 #define STATIC_IPV4_ADDRESS      "10.57.16.91"
 #define STATIC_IPV4_NETMASK      "255.255.255.0"
 #define STATIC_IPV4_GATEWAY      "10.57.16.1"
-#define STATIC_IPV4_DNS_PRIMARY  "1.1.1.1"       /* optional; max 15 characters */
-#define STATIC_IPV4_DNS_SECONDARY "1.0.0.1"      /* optional; max 15 characters */
+#define STATIC_IPV4_DNS_PRIMARY  "1.1.1.1"       // optional; max 15 characters
+#define STATIC_IPV4_DNS_SECONDARY "1.0.0.1"      // optional; max 15 characters
 
- * -------------------------------------------------------------------------- */
+------------------------------------------------------------------------- */
 
 /* --------------------------------------------------------------------------
  * Network addressing -- IPv6
@@ -276,8 +276,8 @@
 #define STATIC_IPV6_ADDRESS     "2001:db8::dead:beef"
 #define STATIC_IPV6_PREFIX_LEN  64
 #define STATIC_IPV6_GATEWAY     "fe80::1"
-#define STATIC_IPV6_DNS_PRIMARY   "2606:4700:4700::1111"   /* optional (Cloudflare) */
-#define STATIC_IPV6_DNS_SECONDARY "2001:4860:4860::8888"   /* optional (Google) */
+#define STATIC_IPV6_DNS_PRIMARY   "2606:4700:4700::1111"   //optional (Cloudflare)
+#define STATIC_IPV6_DNS_SECONDARY "2001:4860:4860::8888"   // optional (Google)
 
  * -------------------------------------------------------------------------- */
 
