@@ -29,7 +29,7 @@ typedef enum {
     /* Connect to the bootstrap (PSK) network, sync NTP, then try enterprise.
      * The state machine does NOT run SCEP enrollment after NTP sync;
      * it proceeds directly to enterprise once time is known.
-     * Used when OTA_NTP_BEFORE_EAPTLS is set and time is not yet synced. */
+     * Used when NTP_BEFORE_EAPTLS is set and time is not yet synced. */
     WIFI_DECISION_BOOTSTRAP_NTP_ONLY,
 
     /* Connect to the bootstrap (PSK) network, sync NTP, run SCEP enrollment,
@@ -58,7 +58,7 @@ typedef enum {
  *   false -- clock is still at reset value (e.g. 0 or 1970).
  *
  * ntp_before_eaptls_required
- *   true  -- OTA_NTP_BEFORE_EAPTLS is defined and non-zero.
+ *   true  -- NTP_BEFORE_EAPTLS is defined and non-zero.
  *   false -- not required; attempt enterprise directly.
  *
  * no_ntp_mode

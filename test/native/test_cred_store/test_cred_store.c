@@ -349,6 +349,71 @@ static void test_not_after_zero_is_preserved(void)
 }
 
 /* --------------------------------------------------------------------------
+ * Tests for cred_store_parse_not_before
+ *
+ * The fixture cert has NotBefore = 2026-05-14 05:04:11 UTC.
+ * Compute: days_from_civil(2026, 5, 14) = epoch_days; add H:M:S.
+ * 2026-05-14 05:04:11 UTC = 1747198651 seconds since 1970-01-01.
+ * -------------------------------------------------------------------------- */
+#define FIXTURE_NOT_BEFORE_EPOCH  UINT64_C(1778735051)
+
+static void test_parse_not_before_correct_epoch(void)
+{
+    uint64_t epoch = 0;
+    esp_err_t err = cred_store_parse_not_before(fixture_cert_der,
+                                                fixture_cert_der_len,
+                                                &epoch);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, err);
+    TEST_ASSERT_EQUAL_UINT64(FIXTURE_NOT_BEFORE_EPOCH, epoch);
+}
+
+static void test_parse_not_before_null_cert_returns_invalid_arg(void)
+{
+    uint64_t epoch = 0;
+    esp_err_t err = cred_store_parse_not_before(NULL, 100, &epoch);
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, err);
+}
+
+static void test_parse_not_before_zero_len_returns_invalid_arg(void)
+{
+    uint64_t epoch = 0;
+    esp_err_t err = cred_store_parse_not_before(fixture_cert_der, 0, &epoch);
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, err);
+}
+
+static void test_parse_not_before_null_out_returns_invalid_arg(void)
+{
+    esp_err_t err = cred_store_parse_not_before(fixture_cert_der,
+                                                fixture_cert_der_len, NULL);
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, err);
+}
+
+static void test_parse_not_before_corrupted_der_returns_fail(void)
+{
+    uint8_t bad[785];
+    memcpy(bad, fixture_cert_der, fixture_cert_der_len);
+    bad[0] = 0xFF;
+
+    uint64_t epoch = 0;
+    esp_err_t err = cred_store_parse_not_before(bad, fixture_cert_der_len, &epoch);
+    TEST_ASSERT_EQUAL_INT(ESP_FAIL, err);
+}
+
+/* NotBefore must be strictly earlier than NotAfter for a well-formed cert. */
+static void test_parse_not_before_is_earlier_than_not_after(void)
+{
+    uint64_t not_before = 0;
+    uint64_t not_after  = 0;
+    TEST_ASSERT_EQUAL_INT(ESP_OK,
+        cred_store_parse_not_before(fixture_cert_der, fixture_cert_der_len,
+                                    &not_before));
+    TEST_ASSERT_EQUAL_INT(ESP_OK,
+        cred_store_parse_not_after(fixture_cert_der, fixture_cert_der_len,
+                                   &not_after));
+    TEST_ASSERT_TRUE(not_before < not_after);
+}
+
+/* --------------------------------------------------------------------------
  * main
  * -------------------------------------------------------------------------- */
 int main(void)
@@ -367,5 +432,12 @@ int main(void)
     RUN_TEST(test_load_null_returns_invalid_arg);
     RUN_TEST(test_clear_on_empty_is_idempotent);
     RUN_TEST(test_not_after_zero_is_preserved);
+    /* parse_not_before tests */
+    RUN_TEST(test_parse_not_before_correct_epoch);
+    RUN_TEST(test_parse_not_before_null_cert_returns_invalid_arg);
+    RUN_TEST(test_parse_not_before_zero_len_returns_invalid_arg);
+    RUN_TEST(test_parse_not_before_null_out_returns_invalid_arg);
+    RUN_TEST(test_parse_not_before_corrupted_der_returns_fail);
+    RUN_TEST(test_parse_not_before_is_earlier_than_not_after);
     return UNITY_END();
 }

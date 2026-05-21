@@ -27,6 +27,14 @@
 #include "esp_http_client.h"
 #include "esp_heap_caps.h"
 
+/* When building for native host tests the linker-script symbols for the
+ * embedded CA cert are not available.  Provide empty stand-ins so the code
+ * compiles; the stub's esp_http_client_init ignores cert_pem anyway. */
+#ifdef SCEP_TRANSPORT_NATIVE_TEST
+static const uint8_t scep_ca_pem_start[] = { 0 };
+static const uint8_t scep_ca_pem_end[]   = { 0 };
+#endif
+
 static const char *TAG = "scep_transport";
 
 /* Initial response buffer allocation in PSRAM (bytes).

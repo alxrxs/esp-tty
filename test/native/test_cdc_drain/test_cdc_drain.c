@@ -339,6 +339,194 @@ void test_drain_handles_zero_first_call(void)
     free(sb);
 }
 
+/* -- Test 7: NULL ring -- data still pushed to scrollback, drain succeeds -- */
+
+void test_drain_with_null_ring_still_pushes_scrollback(void)
+{
+    scripted_read_ctx_t rctx = {
+        .bytes_to_return = {20, 0},
+        .step_count      = 2,
+        .call_count      = 0,
+        .fill_byte_base  = 0xCC,
+    };
+
+    scrollback_t *sb = scrollback_create(256);
+    TEST_ASSERT_NOT_NULL(sb);
+
+    /* Pass NULL ring: helper must not crash and must still push to scrollback. */
+    int rc = usb_cdc_drain(scripted_read_cb, &rctx, NULL, sb);
+
+    TEST_ASSERT_EQUAL_INT(2, rctx.call_count);
+    TEST_ASSERT_EQUAL_INT(20, rc);
+
+    size_t sb_len = 0;
+    uint8_t *sb_dump = scrollback_get_lines(sb, 100000, &sb_len);
+    TEST_ASSERT_NOT_NULL(sb_dump);
+    TEST_ASSERT_EQUAL_size_t(20, sb_len);
+    for (size_t i = 0; i < sb_len; i++)
+        TEST_ASSERT_EQUAL_UINT8(0xCC, sb_dump[i]);
+
+    free(sb_dump);
+    free(sb);
+}
+
+/* -- Test 8: NULL scrollback -- data still pushed to ring, drain succeeds -- */
+
+void test_drain_with_null_scrollback_still_writes_ring(void)
+{
+    scripted_read_ctx_t rctx = {
+        .bytes_to_return = {15, 0},
+        .step_count      = 2,
+        .call_count      = 0,
+        .fill_byte_base  = 0xDD,
+    };
+
+    ring_t *ring = ring_create(256);
+    TEST_ASSERT_NOT_NULL(ring);
+
+    /* Pass NULL scrollback: helper must not crash. */
+    int rc = usb_cdc_drain(scripted_read_cb, &rctx, ring, NULL);
+
+    TEST_ASSERT_EQUAL_INT(2, rctx.call_count);
+    TEST_ASSERT_EQUAL_INT(15, rc);
+
+    /* Ring should hold all 15 bytes. */
+    uint8_t ring_buf[32];
+    size_t ring_len = snapshot_ring(ring, ring_buf, sizeof(ring_buf));
+    TEST_ASSERT_EQUAL_size_t(15, ring_len);
+    for (size_t i = 0; i < ring_len; i++)
+        TEST_ASSERT_EQUAL_UINT8(0xDD, ring_buf[i]);
+
+    ring_free(ring);
+}
+
+/* -- Test 9: both ring and scrollback NULL -- only counts bytes drained ----- */
+
+void test_drain_with_both_null_counts_bytes(void)
+{
+    scripted_read_ctx_t rctx = {
+        .bytes_to_return = {10, 5, 0},
+        .step_count      = 3,
+        .call_count      = 0,
+        .fill_byte_base  = 0xEE,
+    };
+
+    int rc = usb_cdc_drain(scripted_read_cb, &rctx, NULL, NULL);
+
+    TEST_ASSERT_EQUAL_INT(3, rctx.call_count);
+    TEST_ASSERT_EQUAL_INT(15, rc);
+}
+
+/* -- Test 10: NULL read_fn returns -1 immediately without crashing ---------- */
+
+void test_drain_with_null_read_fn_returns_error(void)
+{
+    ring_t *ring = ring_create(64);
+    TEST_ASSERT_NOT_NULL(ring);
+
+    int rc = usb_cdc_drain(NULL, NULL, ring, NULL);
+    TEST_ASSERT_EQUAL_INT(-1, rc);
+
+    ring_free(ring);
+}
+
+/* -- Test 11: single-byte reads accumulate correctly ----------------------- */
+
+void test_drain_single_byte_reads_accumulate(void)
+{
+    /* Script: 5 reads of 1 byte each, then 0 (done). */
+    scripted_read_ctx_t rctx = {
+        .bytes_to_return = {1, 1, 1, 1, 1, 0},
+        .step_count      = 6,
+        .call_count      = 0,
+        .fill_byte_base  = 0xAB,
+    };
+
+    ring_t *ring = ring_create(64);
+    TEST_ASSERT_NOT_NULL(ring);
+
+    int rc = usb_cdc_drain(scripted_read_cb, &rctx, ring, NULL);
+    TEST_ASSERT_EQUAL_INT(6, rctx.call_count);
+    TEST_ASSERT_EQUAL_INT(5, rc);
+
+    uint8_t buf[8];
+    size_t got = snapshot_ring(ring, buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_size_t(5, got);
+
+    ring_free(ring);
+}
+
+/* -- Test 12: error mid-stream stops draining and returns -1 --------------- */
+
+void test_drain_error_mid_stream_returns_minus_one(void)
+{
+    scripted_read_ctx_t rctx = {
+        .bytes_to_return = {8, 8, -1},
+        .step_count      = 3,
+        .call_count      = 0,
+        .fill_byte_base  = 0x55,
+    };
+
+    ring_t *ring = ring_create(256);
+    TEST_ASSERT_NOT_NULL(ring);
+
+    int rc = usb_cdc_drain(scripted_read_cb, &rctx, ring, NULL);
+    TEST_ASSERT_EQUAL_INT(-1, rc);
+    TEST_ASSERT_EQUAL_INT(3, rctx.call_count);
+
+    /* Ring should contain the 16 bytes from the two successful reads */
+    uint8_t buf[32];
+    size_t got = snapshot_ring(ring, buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_size_t(16, got);
+
+    ring_free(ring);
+}
+
+/* -- Test 13: total byte count matches sum of scripted steps --------------- */
+
+void test_drain_total_count_matches_source(void)
+{
+    scripted_read_ctx_t rctx = {
+        .bytes_to_return = {10, 20, 30, 5, 0},
+        .step_count      = 5,
+        .call_count      = 0,
+        .fill_byte_base  = 0x77,
+    };
+
+    int rc = usb_cdc_drain(scripted_read_cb, &rctx, NULL, NULL);
+    TEST_ASSERT_EQUAL_INT(10 + 20 + 30 + 5, rc);
+    TEST_ASSERT_EQUAL_INT(5, rctx.call_count);
+}
+
+/* -- Test 14: scrollback receives correct content order -------------------- */
+
+void test_drain_scrollback_content_order(void)
+{
+    scripted_read_ctx_t rctx = {
+        .bytes_to_return = {4, 4, 0},
+        .step_count      = 3,
+        .call_count      = 0,
+        .fill_byte_base  = 0xAA,
+    };
+
+    scrollback_t *sb = scrollback_create(256);
+    TEST_ASSERT_NOT_NULL(sb);
+
+    int rc = usb_cdc_drain(scripted_read_cb, &rctx, NULL, sb);
+    TEST_ASSERT_EQUAL_INT(8, rc);
+
+    size_t sb_len = 0;
+    uint8_t *dump = scrollback_get_lines(sb, 100000, &sb_len);
+    TEST_ASSERT_NOT_NULL(dump);
+    TEST_ASSERT_EQUAL_size_t(8, sb_len);
+    /* chunk 0 fill byte = 0xAA, chunk 1 fill byte = 0xAB */
+    for (int i = 0; i < 4; i++) TEST_ASSERT_EQUAL_UINT8(0xAA, dump[i]);
+    for (int i = 4; i < 8; i++) TEST_ASSERT_EQUAL_UINT8(0xAB, dump[i]);
+
+    free(dump);
+    free(sb);
+}
+
 /* -- Main ------------------------------------------------------------------ */
 
 int main(void)
@@ -350,5 +538,15 @@ int main(void)
     RUN_TEST(test_drain_continues_when_ring_full_partial_write);
     RUN_TEST(test_drain_continues_when_ring_closed);
     RUN_TEST(test_drain_handles_zero_first_call);
+    /* Edge-case tests */
+    RUN_TEST(test_drain_with_null_ring_still_pushes_scrollback);
+    RUN_TEST(test_drain_with_null_scrollback_still_writes_ring);
+    RUN_TEST(test_drain_with_both_null_counts_bytes);
+    RUN_TEST(test_drain_with_null_read_fn_returns_error);
+    /* Additional coverage */
+    RUN_TEST(test_drain_single_byte_reads_accumulate);
+    RUN_TEST(test_drain_error_mid_stream_returns_minus_one);
+    RUN_TEST(test_drain_total_count_matches_source);
+    RUN_TEST(test_drain_scrollback_content_order);
     return UNITY_END();
 }

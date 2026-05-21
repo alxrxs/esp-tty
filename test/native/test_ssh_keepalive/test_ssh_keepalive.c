@@ -157,6 +157,96 @@ void test_ka_tick_wrap_triggers_send(void)
         ssh_keepalive_tick(&ka, now, false));
 }
 
+/* --- Inbound immediately after init -> idle, no send yet ------------------ */
+
+void test_ka_inbound_before_interval_stays_idle(void)
+{
+    ssh_keepalive_t ka = make_ka(1000, 3);
+
+    /* Inbound at tick 500 -- well before interval, reset activity */
+    ssh_ka_action_t act = ssh_keepalive_tick(&ka, 500, true);
+    TEST_ASSERT_EQUAL_INT(SSH_KA_IDLE, act);
+    TEST_ASSERT_EQUAL_UINT32(0, ka.unanswered);  /* inbound cleared any counter */
+}
+
+/* --- ssh_keepalive_sent increments unanswered monotonically --------------- */
+
+void test_ka_sent_increments_unanswered(void)
+{
+    ssh_keepalive_t ka = make_ka(1000, 10);
+    TEST_ASSERT_EQUAL_UINT32(0, ka.unanswered);
+
+    ssh_keepalive_sent(&ka, 1000);
+    TEST_ASSERT_EQUAL_UINT32(1, ka.unanswered);
+
+    ssh_keepalive_sent(&ka, 2000);
+    TEST_ASSERT_EQUAL_UINT32(2, ka.unanswered);
+
+    ssh_keepalive_sent(&ka, 3000);
+    TEST_ASSERT_EQUAL_UINT32(3, ka.unanswered);
+}
+
+/* --- DROP is sticky: once count_max hit, all subsequent ticks return DROP -- */
+
+void test_ka_drop_is_sticky_after_count_max(void)
+{
+    ssh_keepalive_t ka = make_ka(1000, 2);
+
+    ssh_keepalive_sent(&ka, 1000);
+    ssh_keepalive_sent(&ka, 2000);  /* unanswered == count_max == 2 */
+
+    /* Multiple ticks at far future -- all must return DROP, never SEND */
+    TEST_ASSERT_EQUAL_INT(SSH_KA_DROP, ssh_keepalive_tick(&ka, 5000, false));
+    TEST_ASSERT_EQUAL_INT(SSH_KA_DROP, ssh_keepalive_tick(&ka, 6000, false));
+    TEST_ASSERT_EQUAL_INT(SSH_KA_DROP, ssh_keepalive_tick(&ka, 9999, false));
+}
+
+/* --- After DROP, inbound resets counter and resumes normal behaviour ------- */
+
+void test_ka_inbound_after_drop_resets_and_resumes(void)
+{
+    ssh_keepalive_t ka = make_ka(1000, 2);
+
+    /* Exhaust budget */
+    ssh_keepalive_sent(&ka, 1000);
+    ssh_keepalive_sent(&ka, 2000);
+    TEST_ASSERT_EQUAL_INT(SSH_KA_DROP, ssh_keepalive_tick(&ka, 5000, false));
+
+    /* Inbound: resets the counter and last_activity timestamp */
+    ssh_keepalive_tick(&ka, 6000, true);
+    TEST_ASSERT_EQUAL_UINT32(0, ka.unanswered);
+
+    /* 900 ticks after inbound: still idle (below interval) */
+    TEST_ASSERT_EQUAL_INT(SSH_KA_IDLE,
+        ssh_keepalive_tick(&ka, 6900, false));
+
+    /* 1000 ticks after inbound: must send again */
+    TEST_ASSERT_EQUAL_INT(SSH_KA_SEND,
+        ssh_keepalive_tick(&ka, 7000, false));
+}
+
+/* --- count_max == 0: "unanswered >= count_max" is immediately true (0 >= 0)
+ *     so the first tick with no inbound returns DROP.  This is a degenerate
+ *     configuration: zero tolerance means instant drop.  Document this. ------- */
+
+void test_ka_count_max_zero_drops_immediately(void)
+{
+    /* With count_max == 0:
+     *   unanswered (0) >= count_max (0)  ->  DROP on every tick with no inbound.
+     * This is a documented corner case of the implementation. */
+    ssh_keepalive_t ka = make_ka(1000, 0);
+
+    /* Even at tick 1 (before any interval has elapsed) we get DROP. */
+    TEST_ASSERT_EQUAL_INT(SSH_KA_DROP,
+        ssh_keepalive_tick(&ka, 1, false));
+
+    /* Inbound resets unanswered to 0, but then the very next tick still DROPs
+     * because 0 >= 0. */
+    ssh_keepalive_tick(&ka, 500, true);   /* inbound: unanswered = 0 */
+    TEST_ASSERT_EQUAL_INT(SSH_KA_DROP,
+        ssh_keepalive_tick(&ka, 2000, false));
+}
+
 /* ------------------------------------------------------------------ */
 int main(void)
 {
@@ -172,5 +262,11 @@ int main(void)
     RUN_TEST(test_ka_drop_before_send_when_already_at_max);
     RUN_TEST(test_ka_second_probe_after_first);
     RUN_TEST(test_ka_tick_wrap_triggers_send);
+    /* New edge-case tests */
+    RUN_TEST(test_ka_inbound_before_interval_stays_idle);
+    RUN_TEST(test_ka_sent_increments_unanswered);
+    RUN_TEST(test_ka_drop_is_sticky_after_count_max);
+    RUN_TEST(test_ka_inbound_after_drop_resets_and_resumes);
+    RUN_TEST(test_ka_count_max_zero_drops_immediately);
     return UNITY_END();
 }

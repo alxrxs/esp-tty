@@ -193,6 +193,97 @@ def test_missing_patches_dir():
             fail(f"Missing patches/: unexpected exception: {e}")
 
 
+# -- Test 5: Component present in patches/ but absent from managed_components/ --
+
+def test_component_absent_from_managed_components():
+    """patches/<comp> present but managed_components/<comp> absent -> skip, no error."""
+    import io
+    from contextlib import redirect_stdout
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Create a patches/<comp>/*.patch but no managed_components/<comp>/
+        patch_dir = os.path.join(tmpdir, "patches", "ghost__comp")
+        os.makedirs(patch_dir)
+        with open(os.path.join(patch_dir, "0001-ghost.patch"), "w") as f:
+            f.write("--- a/x.txt\n+++ b/x.txt\n@@ -1 +1 @@\n-old\n+new\n")
+
+        buf = io.StringIO()
+        try:
+            with redirect_stdout(buf):
+                apply_patches(tmpdir)
+            ok("Absent managed_components: apply_patches() completed without exception")
+        except Exception as e:
+            fail(f"Absent managed_components: unexpected exception: {e}")
+
+        output = buf.getvalue()
+        if "not present" in output or "skipping" in output:
+            ok("Absent managed_components: printed a skip message")
+        else:
+            fail(f"Absent managed_components: expected skip message, got: {output!r}")
+
+
+# -- Test 6: Multiple patches applied in order --------------------------------
+
+def test_multiple_patches_applied_in_order():
+    """Two patches against the same component must both be applied in sorted order."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        mc_path = os.path.join(tmpdir, "managed_components", "multi__comp")
+        os.makedirs(mc_path)
+        target = os.path.join(mc_path, "target.txt")
+        with open(target, "w") as f:
+            f.write("line1\nline2\nline3\n")
+
+        patch_dir = os.path.join(tmpdir, "patches", "multi__comp")
+        os.makedirs(patch_dir)
+
+        # First patch: change line2 -> line2-a
+        import tempfile as _tf
+        def write_patch(orig, patched, patch_path):
+            with _tf.NamedTemporaryFile("w", suffix=".txt", delete=False) as o:
+                o.write(orig); oname = o.name
+            with _tf.NamedTemporaryFile("w", suffix=".txt", delete=False) as p:
+                p.write(patched); pname = p.name
+            result = subprocess.run(
+                ["diff", "-u", "--label", "a/target.txt", "--label", "b/target.txt",
+                 oname, pname],
+                capture_output=True, text=True)
+            os.unlink(oname); os.unlink(pname)
+            with open(patch_path, "w") as f:
+                f.write(result.stdout)
+
+        write_patch("line1\nline2\nline3\n", "line1\nline2-a\nline3\n",
+                    os.path.join(patch_dir, "0001-first.patch"))
+        write_patch("line1\nline2-a\nline3\n", "line1\nline2-a\nline3-b\n",
+                    os.path.join(patch_dir, "0002-second.patch"))
+
+        try:
+            apply_patches(tmpdir)
+        except Exception as e:
+            fail(f"Multiple patches: unexpected exception: {e}")
+            return
+
+        with open(target) as f:
+            result = f.read()
+
+        if "line2-a" in result and "line3-b" in result:
+            ok("Multiple patches: both patches applied correctly in order")
+        else:
+            fail(f"Multiple patches: expected both changes, got: {result!r}")
+
+
+# -- Test 7: Empty patches/ directory (no subdirs) -> no-op ------------------
+
+def test_empty_patches_dir_is_noop():
+    """An empty patches/ directory (no component subdirs) must be a no-op."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        os.makedirs(os.path.join(tmpdir, "patches"))  # empty patches/
+        try:
+            apply_patches(tmpdir)
+            ok("Empty patches/: apply_patches() returned without error")
+        except Exception as e:
+            fail(f"Empty patches/: unexpected exception: {e}")
+
+
 # -- Run all tests -------------------------------------------------------------
 
 if __name__ == "__main__":
@@ -207,6 +298,15 @@ if __name__ == "__main__":
 
     print("[test_apply_patches] -- Test 4: Missing patches/ dir -> no-op ---")
     test_missing_patches_dir()
+
+    print("[test_apply_patches] -- Test 5: Component absent -> skip --------")
+    test_component_absent_from_managed_components()
+
+    print("[test_apply_patches] -- Test 6: Multiple patches in order -------")
+    test_multiple_patches_applied_in_order()
+
+    print("[test_apply_patches] -- Test 7: Empty patches/ dir -> no-op -----")
+    test_empty_patches_dir_is_noop()
 
     print()
     total = PASS_COUNT + FAIL_COUNT

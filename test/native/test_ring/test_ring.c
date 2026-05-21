@@ -20,6 +20,28 @@ void setUp(void)    {}
 void tearDown(void) {}
 /* ------------------------------------------------------------------ */
 
+/* --- ring_create edge cases --------------------------------------- */
+
+void test_ring_create_min_capacity(void)
+{
+    /* capacity=1 is the smallest useful ring */
+    ring_t *r = ring_create(1);
+    TEST_ASSERT_NOT_NULL(r);
+    uint8_t b = 0x42;
+    TEST_ASSERT_EQUAL_INT(1, ring_try_send(r, &b, 1));
+    /* Now full -- another try_send should return 0 */
+    uint8_t extra = 0xFF;
+    TEST_ASSERT_EQUAL_INT(0, ring_try_send(r, &extra, 1));
+    ring_free(r);
+}
+
+void test_ring_free_null_is_safe(void)
+{
+    /* ring_free(NULL) must not crash */
+    ring_free(NULL);
+    TEST_PASS();
+}
+
 /* --- Basic FIFO correctness ---------------------------------------- */
 
 void test_ring_fifo_order(void)
@@ -471,6 +493,85 @@ void test_ring_try_send_returns_quickly_under_contention(void)
     ring_free(r);
 }
 
+/* -- NULL guard tests for ring_try_send ------------------------------------ */
+
+/* try_send with NULL ring pointer returns -1 (not a crash) */
+void test_ring_try_send_null_ring_returns_error(void)
+{
+    uint8_t buf[4] = {0x01, 0x02, 0x03, 0x04};
+    int result = ring_try_send(NULL, buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_INT(-1, result);
+}
+
+/* try_send with NULL buf and non-zero len returns -1 (not a crash) */
+void test_ring_try_send_null_buf_returns_error(void)
+{
+    ring_t *r = ring_create(64);
+    TEST_ASSERT_NOT_NULL(r);
+    int result = ring_try_send(r, NULL, 4);
+    TEST_ASSERT_EQUAL_INT(-1, result);
+    ring_free(r);
+}
+
+/* try_send with zero len is a no-op that returns 0 (ring unchanged) */
+void test_ring_try_send_zero_len_is_noop(void)
+{
+    ring_t *r = ring_create(64);
+    TEST_ASSERT_NOT_NULL(r);
+    uint8_t buf[4] = {0xAA};
+    int result = ring_try_send(r, buf, 0);
+    TEST_ASSERT_EQUAL_INT(0, result);
+    /* Ring is still empty: a blocking recv after close must return -1 immediately. */
+    ring_close(r);
+    uint8_t rx[4];
+    int got = ring_recv(r, rx, sizeof(rx));
+    TEST_ASSERT_EQUAL_INT(-1, got);
+    ring_free(r);
+}
+
+/* Wrap-around write with try_send: advance head to near end of buffer, then
+ * partially drain so the ring is partially full, and verify try_send writes
+ * exactly the available space via a wrapping path. */
+void test_ring_try_send_wrap_around(void)
+{
+    const size_t CAP = 8;
+    ring_t *r = ring_create(CAP);
+    TEST_ASSERT_NOT_NULL(r);
+
+    /* 1. Fill 6 bytes (head advances to 6, used=6). */
+    uint8_t fill[6];
+    memset(fill, 0x11, sizeof(fill));
+    TEST_ASSERT_EQUAL_INT(6, ring_send(r, fill, 6));
+
+    /* 2. Drain 4 bytes (tail advances to 4, used=2, space=6). */
+    uint8_t drain[4] = {0};
+    int got = 0;
+    while (got < 4) {
+        int n = ring_recv(r, drain + got, (size_t)(4 - got));
+        TEST_ASSERT_GREATER_THAN_INT(0, n);
+        got += n;
+    }
+    TEST_ASSERT_EACH_EQUAL_UINT8(0x11, drain, 4);
+
+    /* 3. try_send 2 more bytes to advance head to the last slot: head now 0
+     *    (after wrapping), used=4, space=4. */
+    uint8_t pre[2] = {0x22, 0x22};
+    int w1 = ring_try_send(r, pre, 2);
+    TEST_ASSERT_EQUAL_INT(2, w1);  /* exactly 2 written (advancing head to 8%8=0) */
+
+    /* 4. Now try_send 6 bytes: only 4 slots available -> must write exactly 4. */
+    uint8_t tx[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF};
+    int written = ring_try_send(r, tx, sizeof(tx));
+    TEST_ASSERT_EQUAL_INT(4, written);
+
+    /* Verify the ring now has 8 bytes and is full. */
+    uint8_t extra = 0x99;
+    int overflow = ring_try_send(r, &extra, 1);
+    TEST_ASSERT_EQUAL_INT(0, overflow);  /* ring is full */
+
+    ring_free(r);
+}
+
 /* ------------------------------------------------------------------ */
 int main(void)
 {
@@ -495,5 +596,13 @@ int main(void)
     /* extra ring_try_send tests */
     RUN_TEST(test_ring_try_send_partial_writes_exactly_remaining_space);
     RUN_TEST(test_ring_try_send_returns_quickly_under_contention);
+    /* NULL guard and edge-case tests */
+    RUN_TEST(test_ring_try_send_null_ring_returns_error);
+    RUN_TEST(test_ring_try_send_null_buf_returns_error);
+    RUN_TEST(test_ring_try_send_zero_len_is_noop);
+    RUN_TEST(test_ring_try_send_wrap_around);
+    /* ring_create edge cases */
+    RUN_TEST(test_ring_create_min_capacity);
+    RUN_TEST(test_ring_free_null_is_safe);
     return UNITY_END();
 }

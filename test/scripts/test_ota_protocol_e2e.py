@@ -289,3 +289,150 @@ def test_e2e_zero_plaintext_len_is_rejected():
     rc, device = _spawn(firmware, override_plaintext_len=0)
     assert rc == 4
     assert device.failure_reason == "bad plaintext length"
+
+
+# ---- run_ota_protocol() direct unit tests (no fake device needed) -----------
+
+class _Sink:
+    """Discard all output."""
+    def write(self, _):
+        pass
+
+
+def _make_pipe_protocol(hello_bytes, *, result_byte=b"\x00"):
+    """
+    Build sendall/recv callbacks that feed a fixed hello from a queue and
+    absorb all client writes, returning `result_byte` after the client sends
+    the firmware.  Used to test early-exit paths in run_ota_protocol() without
+    spinning up a full fake device.
+    """
+    import queue as _queue
+    from_device = _queue.SimpleQueue()
+    for b in [hello_bytes]:
+        from_device.put(b)
+    from_device.put(result_byte)  # final result byte
+
+    sent_chunks = []
+
+    def sendall(data):
+        sent_chunks.append(bytes(data))
+
+    # Accumulated inbound buffer.
+    buf = bytearray()
+
+    def recv_exact(n):
+        while len(buf) < n:
+            chunk = from_device.get(timeout=2)
+            buf.extend(chunk)
+        out = bytes(buf[:n])
+        del buf[:n]
+        return out
+
+    return sendall, recv_exact, sent_chunks
+
+
+def test_run_ota_protocol_empty_firmware_returns_2():
+    """run_ota_protocol with an empty firmware bytes object must return 2."""
+    sendall, recv_exact, _ = _make_pipe_protocol(b"")
+    rc = ota_send.run_ota_protocol(
+        sendall_fn=sendall,
+        recv_exact_fn=recv_exact,
+        firmware=b"",
+        stderr=_Sink(),
+        stdout=_Sink(),
+    )
+    assert rc == 2
+
+
+def test_run_ota_protocol_wrong_version_returns_3():
+    """A device hello with an unsupported version byte (e.g. 0x01) must cause exit 3."""
+    # Build a hello: [0x01][32 zero bytes] -- wrong version.
+    bad_hello = bytes([0x01]) + bytes(32)
+    sendall, recv_exact, _ = _make_pipe_protocol(bad_hello)
+    rc = ota_send.run_ota_protocol(
+        sendall_fn=sendall,
+        recv_exact_fn=recv_exact,
+        firmware=b"x" * 16,
+        stderr=_Sink(),
+        stdout=_Sink(),
+    )
+    assert rc == 3
+
+
+def test_run_ota_protocol_unexpected_result_byte_returns_6():
+    """An unexpected result byte (not 0x00 or 0xff) must cause exit 6."""
+    # Valid hello from a "device" but then send 0x42 as the result byte
+    # instead of 0x00 or 0xff.  We need a real device pub so key derivation
+    # succeeds; use a fixed 32-byte value (HKDF won't care what it contains
+    # for this test since we only check the exit code, not the decrypted data).
+    dev_priv = X25519PrivateKey.generate()
+    dev_pub = dev_priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    valid_hello = bytes([0x02]) + dev_pub
+
+    import queue as _queue
+    from_device = _queue.SimpleQueue()
+    from_device.put(valid_hello)
+    from_device.put(b"\x42")  # unexpected result byte
+
+    buf = bytearray()
+
+    def sendall(data):
+        pass
+
+    def recv_exact(n):
+        while len(buf) < n:
+            chunk = from_device.get(timeout=2)
+            buf.extend(chunk)
+        out = bytes(buf[:n])
+        del buf[:n]
+        return out
+
+    rc = ota_send.run_ota_protocol(
+        sendall_fn=sendall,
+        recv_exact_fn=recv_exact,
+        firmware=b"y" * 64,
+        stderr=_Sink(),
+        stdout=_Sink(),
+    )
+    assert rc == 6
+
+
+def test_run_ota_protocol_no_result_byte_returns_5():
+    """If the channel closes before the result byte arrives, exit code must be 5."""
+    dev_priv = X25519PrivateKey.generate()
+    dev_pub = dev_priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    valid_hello = bytes([0x02]) + dev_pub
+
+    import queue as _queue
+    from_device = _queue.SimpleQueue()
+    from_device.put(valid_hello)
+    # No result byte -- simulate EOF by putting a sentinel that raises IOError.
+
+    buf = bytearray()
+    eof_reached = [False]
+
+    def sendall(data):
+        pass
+
+    def recv_exact(n):
+        if eof_reached[0]:
+            raise IOError("channel closed")
+        while len(buf) < n:
+            try:
+                chunk = from_device.get(timeout=0.1)
+                buf.extend(chunk)
+            except _queue.Empty:
+                eof_reached[0] = True
+                raise IOError("channel closed")
+        out = bytes(buf[:n])
+        del buf[:n]
+        return out
+
+    rc = ota_send.run_ota_protocol(
+        sendall_fn=sendall,
+        recv_exact_fn=recv_exact,
+        firmware=b"z" * 64,
+        stderr=_Sink(),
+        stdout=_Sink(),
+    )
+    assert rc == 5

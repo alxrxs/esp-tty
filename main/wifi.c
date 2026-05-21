@@ -94,11 +94,11 @@
 #include "wifi_state.h"
 #endif
 
-/* Mutual exclusion: SCEP_NO_NTP_USE_ISSUANCE_TIME and OTA_NTP_BEFORE_EAPTLS
+/* Mutual exclusion: SCEP_NO_NTP_USE_ISSUANCE_TIME and NTP_BEFORE_EAPTLS
  * are fundamentally opposite strategies for handling the unsynced clock.
  * Defining both is a configuration error; catch it at compile time. */
-#if defined(SCEP_NO_NTP_USE_ISSUANCE_TIME) && defined(OTA_NTP_BEFORE_EAPTLS) && OTA_NTP_BEFORE_EAPTLS
-#error "SCEP_NO_NTP_USE_ISSUANCE_TIME and OTA_NTP_BEFORE_EAPTLS are mutually exclusive -- pick one"
+#if defined(SCEP_NO_NTP_USE_ISSUANCE_TIME) && defined(NTP_BEFORE_EAPTLS) && NTP_BEFORE_EAPTLS
+#error "SCEP_NO_NTP_USE_ISSUANCE_TIME and NTP_BEFORE_EAPTLS are mutually exclusive -- pick one"
 #endif
 
 #if !defined(BRIDGE_LOOPBACK) && defined(MDNS_ENABLE)
@@ -1118,20 +1118,20 @@ esp_err_t wifi_init_sta(void)
 #endif
 
 /* Seconds to wait for an IP in enterprise mode before declaring failure. */
-#ifndef EAPTLS_FALLBACK_TIMEOUT_SEC
-# define EAPTLS_FALLBACK_TIMEOUT_SEC  60
+#ifndef EAPTLS_HANDSHAKE_TIMEOUT_SEC
+# define EAPTLS_HANDSHAKE_TIMEOUT_SEC  60
 #endif
 
 /* Cert is considered "expired" when fewer than this many seconds remain.
  * Default 86400 = 24 hours (early renewal window so overnight expiry doesn't
  * bite).  Override in config.h if your CA issues short-lived certs. */
-#ifndef CERT_EXPIRY_WINDOW_SEC
-# define CERT_EXPIRY_WINDOW_SEC  86400
+#ifndef CERT_REENROLL_THRESHOLD_SEC
+# define CERT_REENROLL_THRESHOLD_SEC  86400
 #endif
 
 /* Seconds to wait for NTP sync on the bootstrap network. */
-#ifndef SMART_NTP_SYNC_TIMEOUT_SEC
-# define SMART_NTP_SYNC_TIMEOUT_SEC  30
+#ifndef BOOTSTRAP_NTP_SYNC_TIMEOUT_SEC
+# define BOOTSTRAP_NTP_SYNC_TIMEOUT_SEC  30
 #endif
 
 /* Minimum plausible epoch: 2020-01-01 00:00:00 UTC.
@@ -1209,13 +1209,13 @@ typedef struct {
     const cred_store_t *creds;
 } smart_enterprise_ctx_t;
 
-/* Synchronously wait for NTP sync up to SMART_NTP_SYNC_TIMEOUT_SEC.
+/* Synchronously wait for NTP sync up to BOOTSTRAP_NTP_SYNC_TIMEOUT_SEC.
  * Returns true if clock looks sane after the wait. */
 static bool smart_ntp_wait_sync(void)
 {
 #if !defined(BRIDGE_LOOPBACK) && defined(NTP_ENABLE)
     ESP_LOGI(TAG, "[smart] waiting up to %d s for NTP sync ...",
-             SMART_NTP_SYNC_TIMEOUT_SEC);
+             BOOTSTRAP_NTP_SYNC_TIMEOUT_SEC);
 
     /* If SNTP has not been inited yet, start it now. */
     const char *const servers[] = { NTP_SERVERS };
@@ -1246,7 +1246,7 @@ static bool smart_ntp_wait_sync(void)
     }
 
     TickType_t deadline = xTaskGetTickCount() +
-        pdMS_TO_TICKS((uint32_t)SMART_NTP_SYNC_TIMEOUT_SEC * 1000u);
+        pdMS_TO_TICKS((uint32_t)BOOTSTRAP_NTP_SYNC_TIMEOUT_SEC * 1000u);
     while (xTaskGetTickCount() < deadline) {
         if (esp_netif_sntp_sync_wait(pdMS_TO_TICKS(5000)) == ESP_OK) {
             break;
@@ -1303,7 +1303,7 @@ static esp_err_t smart_on_ip_full(void)
         time_t now = time(NULL);
         if (now >= MIN_PLAUSIBLE_EPOCH) {
             time_t expiry = (time_t)creds->not_after;
-            cert_expired = (expiry - now) < (time_t)CERT_EXPIRY_WINDOW_SEC;
+            cert_expired = (expiry - now) < (time_t)CERT_REENROLL_THRESHOLD_SEC;
             if (!cert_expired) {
                 /* Cert is still valid; RADIUS must have been a transient
                  * failure.  Return OK -- caller will retry enterprise. */
@@ -1634,7 +1634,7 @@ esp_err_t wifi_init_smart(void)
     bool cert_expired = false;
     if (cert_present && ntp_synced) {
         time_t expiry = (time_t)creds_p->not_after;
-        cert_expired = (expiry - now) < (time_t)CERT_EXPIRY_WINDOW_SEC;
+        cert_expired = (expiry - now) < (time_t)CERT_REENROLL_THRESHOLD_SEC;
         if (cert_expired) {
             ESP_LOGW(TAG, "[smart] cert expires in %lld s -- will re-enroll",
                      (long long)(expiry - now));
@@ -1644,10 +1644,10 @@ esp_err_t wifi_init_smart(void)
         }
     }
 
-#ifndef OTA_NTP_BEFORE_EAPTLS
-# define OTA_NTP_BEFORE_EAPTLS 0
+#ifndef NTP_BEFORE_EAPTLS
+# define NTP_BEFORE_EAPTLS 0
 #endif
-    bool ntp_req = (OTA_NTP_BEFORE_EAPTLS != 0);
+    bool ntp_req = (NTP_BEFORE_EAPTLS != 0);
 
 #ifdef SCEP_NO_NTP_USE_ISSUANCE_TIME
     bool no_ntp = true;
@@ -1673,7 +1673,7 @@ esp_err_t wifi_init_smart(void)
             enterprise_attempts++;
             esp_err_t rc = wifi_mode_enterprise(
                 WIFI_ENTERPRISE_SSID,
-                (uint32_t)EAPTLS_FALLBACK_TIMEOUT_SEC,
+                (uint32_t)EAPTLS_HANDSHAKE_TIMEOUT_SEC,
                 cert_present ? creds_p : NULL);
 
             if (rc == ESP_OK) {
@@ -1742,7 +1742,7 @@ esp_err_t wifi_init_smart(void)
             /* Re-check expiry now that time may be synced. */
             if (cert_present && ntp_synced) {
                 time_t expiry = (time_t)creds_p->not_after;
-                cert_expired = (expiry - now) < (time_t)CERT_EXPIRY_WINDOW_SEC;
+                cert_expired = (expiry - now) < (time_t)CERT_REENROLL_THRESHOLD_SEC;
             } else {
                 cert_expired = false;
             }

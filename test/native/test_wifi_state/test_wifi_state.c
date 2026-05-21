@@ -241,6 +241,40 @@ void test_no_ntp_mode_with_ntp_req_still_bootstrap_full(void)
     TEST_ASSERT_EQUAL_INT(WIFI_DECISION_BOOTSTRAP_FULL, d);
 }
 
+/* --- enterprise_attempts negative (-1): signed int < retry_max -> ENTERPRISE */
+void test_enterprise_attempts_negative_is_below_max(void)
+{
+    /* The parameter is typed int; -1 < 5, so rule 3 doesn't fire. */
+    wifi_decision_t d = decide(true, false, true, false, -1, 5);
+    TEST_ASSERT_EQUAL_INT(WIFI_DECISION_ENTERPRISE, d);
+}
+
+/* --- enterprise_attempts negative with retry_max == 0: 0 > 0 is false ->
+ *     skip rule 3 entirely -> ENTERPRISE.                                --- */
+void test_enterprise_attempts_negative_unlimited_retries(void)
+{
+    wifi_decision_t d = decide(true, false, true, false, -1, 0);
+    TEST_ASSERT_EQUAL_INT(WIFI_DECISION_ENTERPRISE, d);
+}
+
+/* --- NTP required but retry budget is exhausted: BOOTSTRAP_FULL wins -------- */
+void test_enterprise_at_max_overrides_ntp_only(void)
+{
+    /* Even though NTP is required and not synced (which normally gives
+     * BOOTSTRAP_NTP_ONLY), an exhausted retry budget takes priority (rule 3
+     * runs before rule 4). */
+    wifi_decision_t d = decide(true, false, false, true, 5, 5);
+    TEST_ASSERT_EQUAL_INT(WIFI_DECISION_BOOTSTRAP_FULL, d);
+}
+
+/* --- Cert present, expired, no_ntp_mode=false -> BOOTSTRAP_FULL despite
+ *     ntp_required=false and ntp_synced=false                            --- */
+void test_cert_expired_regardless_of_ntp_state(void)
+{
+    wifi_decision_t d = decide(true, true, false, false, 0, 5);
+    TEST_ASSERT_EQUAL_INT(WIFI_DECISION_BOOTSTRAP_FULL, d);
+}
+
 /* -------------------------------------------------------------------------- */
 int main(void)
 {
@@ -267,5 +301,10 @@ int main(void)
     RUN_TEST(test_no_ntp_mode_no_cert_bootstrap_full);
     RUN_TEST(test_no_ntp_mode_expired_cert_bootstrap_full);
     RUN_TEST(test_no_ntp_mode_with_ntp_req_still_bootstrap_full);
+    /* New edge-case tests */
+    RUN_TEST(test_enterprise_attempts_negative_is_below_max);
+    RUN_TEST(test_enterprise_attempts_negative_unlimited_retries);
+    RUN_TEST(test_enterprise_at_max_overrides_ntp_only);
+    RUN_TEST(test_cert_expired_regardless_of_ntp_state);
     return UNITY_END();
 }

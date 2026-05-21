@@ -204,3 +204,211 @@ def test_encrypt_firmware_tamper_detection():
     bad[len(bad) // 2] ^= 0x01
     with pytest.raises(Exception):
         AESGCM(aes_key).decrypt(iv, bytes(bad) + tag, None)
+
+
+def test_encrypt_firmware_zero_length():
+    """encrypt_firmware with empty plaintext still returns the right shapes."""
+    aes_key = os.urandom(32)
+    iv, tag, ciphertext = ota_send.encrypt_firmware(aes_key, b"")
+    assert len(iv) == 12
+    assert len(tag) == 16
+    assert len(ciphertext) == 0
+
+
+def test_encrypt_firmware_single_byte():
+    """One-byte plaintext: ciphertext is also one byte; decrypt round-trips."""
+    aes_key = os.urandom(32)
+    firmware = b"\xAB"
+    iv, tag, ciphertext = ota_send.encrypt_firmware(aes_key, firmware)
+    assert len(ciphertext) == 1
+    plain = AESGCM(aes_key).decrypt(iv, ciphertext + tag, None)
+    assert plain == firmware
+
+
+def test_encrypt_firmware_caller_supplied_iv_used():
+    """Caller-supplied IV is forwarded unchanged to AESGCM."""
+    aes_key = os.urandom(32)
+    my_iv = bytes(range(12))
+    iv, tag, _ = ota_send.encrypt_firmware(aes_key, b"hello", iv=my_iv)
+    assert iv == my_iv
+
+
+# ---- derive_key() edge-case tests -------------------------------------------
+
+def test_derive_key_with_low_order_peer_pub_raises():
+    """
+    A peer public key of all zeros is a low-order point that X25519 rejects.
+    The cryptography library raises ValueError for this input.  Document this
+    behaviour: run_ota_protocol() would never call derive_key with a zero pubkey
+    (the device sends a freshly generated ephemeral key), but we note the
+    exception contract here so future callers know it is not safe to pass
+    unchecked user input.
+    """
+    client_priv = X25519PrivateKey.generate()
+    zero_pub = bytes(32)
+    with pytest.raises((ValueError, Exception)):
+        ota_send.derive_key(client_priv, zero_pub)
+
+
+def test_derive_key_same_client_priv_deterministic():
+    """derive_key is deterministic: same inputs must produce same outputs."""
+    client_priv_bytes = bytes.fromhex(
+        "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a")
+    device_pub = bytes(range(32))
+
+    k1_pub, k1_key = ota_send.derive_key(
+        X25519PrivateKey.from_private_bytes(client_priv_bytes), device_pub)
+    k2_pub, k2_key = ota_send.derive_key(
+        X25519PrivateKey.from_private_bytes(client_priv_bytes), device_pub)
+
+    assert k1_pub == k2_pub
+    assert k1_key == k2_key
+
+
+# ---- Additional derive_key / encrypt_firmware edge cases -------------------
+
+def test_derive_key_client_pub_is_valid_x25519_point():
+    """client_pub returned by derive_key must be a valid X25519 public key."""
+    client_priv = X25519PrivateKey.generate()
+    device_priv = X25519PrivateKey.generate()
+    device_pub = device_priv.public_key().public_bytes(
+        Encoding.Raw, PublicFormat.Raw)
+
+    client_pub, _ = ota_send.derive_key(client_priv, device_pub)
+
+    # Must be parseable as an X25519 public key (32 raw bytes).
+    assert len(client_pub) == 32
+    # Should reconstruct without raising
+    X25519PublicKey.from_public_bytes(client_pub)
+
+
+def test_derive_key_aes_key_not_all_zeros():
+    """The derived AES key must not be the all-zeros value (sanity check)."""
+    client_priv = X25519PrivateKey.generate()
+    device_priv = X25519PrivateKey.generate()
+    device_pub = device_priv.public_key().public_bytes(
+        Encoding.Raw, PublicFormat.Raw)
+
+    _, aes_key = ota_send.derive_key(client_priv, device_pub)
+    assert aes_key != bytes(32)
+
+
+def test_encrypt_firmware_large_payload():
+    """encrypt_firmware handles a 1 MiB payload without raising."""
+    aes_key = os.urandom(32)
+    firmware = os.urandom(1024 * 1024)
+    iv, tag, ciphertext = ota_send.encrypt_firmware(aes_key, firmware)
+    assert len(ciphertext) == len(firmware)
+    assert len(iv) == 12
+    assert len(tag) == 16
+    # Verify round-trip.
+    plain = AESGCM(aes_key).decrypt(iv, ciphertext + tag, None)
+    assert plain == firmware
+
+
+def test_encrypt_firmware_different_keys_produce_different_output():
+    """Two different AES keys must produce different ciphertexts for the same firmware."""
+    firmware = b"hello esp-tty" * 50
+    key1 = os.urandom(32)
+    key2 = os.urandom(32)
+    fixed_iv = bytes(12)  # same IV so only the key differs
+
+    _, _, ct1 = ota_send.encrypt_firmware(key1, firmware, iv=fixed_iv)
+    _, _, ct2 = ota_send.encrypt_firmware(key2, firmware, iv=fixed_iv)
+    assert ct1 != ct2
+
+
+def test_encrypt_firmware_iv_length_always_12():
+    """Randomly-generated IVs must always be exactly 12 bytes (AES-GCM spec)."""
+    aes_key = os.urandom(32)
+    for _ in range(10):
+        iv, _, _ = ota_send.encrypt_firmware(aes_key, b"test payload")
+        assert len(iv) == 12
+
+
+def test_hkdf_salt_is_bytes_not_str():
+    """HKDF_SALT must be bytes, not str -- mbedTLS on the device uses a byte buffer."""
+    assert isinstance(ota_send.HKDF_SALT, bytes)
+
+
+def test_proto_version_is_single_byte():
+    """PROTO_VERSION must fit in a single unsigned byte (0x00..0xFF)."""
+    assert 0x00 <= ota_send.PROTO_VERSION <= 0xFF
+
+
+# ---- Additional edge-case tests -----------------------------------------------
+
+def test_derive_key_info_field_order_matters():
+    """HKDF info = client_pub || device_pub -- swapping roles must produce a
+    different key.  This guards against accidentally transposing the two halves
+    in ota_session.c or ota_send.py."""
+    client_priv = X25519PrivateKey.generate()
+    device_priv = X25519PrivateKey.generate()
+
+    client_pub_bytes = client_priv.public_key().public_bytes(
+        Encoding.Raw, PublicFormat.Raw)
+    device_pub_bytes = device_priv.public_key().public_bytes(
+        Encoding.Raw, PublicFormat.Raw)
+
+    shared = client_priv.exchange(
+        X25519PublicKey.from_public_bytes(device_pub_bytes))
+
+    # Correct order: client_pub || device_pub
+    key_correct = HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=ota_send.HKDF_SALT,
+        info=client_pub_bytes + device_pub_bytes,
+    ).derive(shared)
+
+    # Swapped order: device_pub || client_pub
+    key_swapped = HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=ota_send.HKDF_SALT,
+        info=device_pub_bytes + client_pub_bytes,
+    ).derive(shared)
+
+    assert key_correct != key_swapped, (
+        "HKDF with client||device must differ from device||client")
+
+    # And the function under test must produce the correct-order key.
+    _, got_key = ota_send.derive_key(client_priv, device_pub_bytes)
+    assert got_key == key_correct
+
+
+def test_encrypt_firmware_tag_is_not_all_zeros():
+    """AES-GCM tag for a non-trivial payload must never be the all-zeros value."""
+    aes_key = os.urandom(32)
+    firmware = b"esp32s3 ota payload" * 100
+    _, tag, _ = ota_send.encrypt_firmware(aes_key, firmware)
+    assert tag != bytes(16), "AES-GCM auth tag must not be all-zeros"
+
+
+def test_encrypt_firmware_tag_always_16_bytes():
+    """Tag length must be exactly 16 bytes regardless of payload size."""
+    aes_key = os.urandom(32)
+    for size in (1, 15, 16, 17, 255, 256, 1023, 1024):
+        _, tag, _ = ota_send.encrypt_firmware(aes_key, os.urandom(size))
+        assert len(tag) == 16, f"Expected 16-byte tag for {size}-byte payload, got {len(tag)}"
+
+
+def test_encrypt_firmware_minimum_payload_one_byte():
+    """encrypt_firmware must handle a single-byte firmware without error."""
+    aes_key = os.urandom(32)
+    iv, tag, ciphertext = ota_send.encrypt_firmware(aes_key, b"\xAB")
+    assert len(ciphertext) == 1
+    assert len(iv) == 12
+    assert len(tag) == 16
+    plain = AESGCM(aes_key).decrypt(iv, ciphertext + tag, None)
+    assert plain == b"\xAB"
+
+
+def test_derive_key_output_is_exactly_32_bytes():
+    """The AES key returned by derive_key must be exactly 32 bytes (AES-256)."""
+    for _ in range(5):
+        client_priv = X25519PrivateKey.generate()
+        device_pub = X25519PrivateKey.generate().public_key().public_bytes(
+            Encoding.Raw, PublicFormat.Raw)
+        _, aes_key = ota_send.derive_key(client_priv, device_pub)
+        assert len(aes_key) == 32, f"Expected 32-byte key, got {len(aes_key)}"

@@ -195,6 +195,66 @@ void test_large_window_triggers_renewal(void)
     TEST_ASSERT_EQUAL_INT(RENEWAL_DECISION_RENEW_NOW, d);
 }
 
+/* --------------------------------------------------------------------------
+ * Row 13: window_days == 0 means "never renew early" -- cert must expire
+ * before renewal is triggered (remaining_sec <= 0).
+ * -------------------------------------------------------------------------- */
+void test_window_zero_cert_still_valid_skips(void)
+{
+    time_t now = MIN_PLAUSIBLE_EPOCH + 1;
+    /* Even 1 second of remaining life is outside the 0-day window. */
+    renewal_decision_t d = cert_renewer_decide(
+        now,
+        (uint64_t)(now) + 1,
+        0);
+    TEST_ASSERT_EQUAL_INT(RENEWAL_DECISION_SKIP_VALID, d);
+}
+
+/* --------------------------------------------------------------------------
+ * Row 14: window_days == 0, cert expires exactly now -> remaining == 0 ->
+ * renews (remaining_sec <= window_sec == 0).
+ * -------------------------------------------------------------------------- */
+void test_window_zero_cert_expires_now_renews(void)
+{
+    time_t now = MIN_PLAUSIBLE_EPOCH + 1;
+    renewal_decision_t d = cert_renewer_decide(
+        now,
+        (uint64_t)now,
+        0);
+    TEST_ASSERT_EQUAL_INT(RENEWAL_DECISION_RENEW_NOW, d);
+}
+
+/* --------------------------------------------------------------------------
+ * Row 15: clock exactly one second below MIN_PLAUSIBLE_EPOCH -> SKIP_NO_CLOCK
+ * -------------------------------------------------------------------------- */
+void test_one_below_min_plausible_skips(void)
+{
+    renewal_decision_t d = cert_renewer_decide(
+        MIN_PLAUSIBLE_EPOCH - 1,
+        (uint64_t)MIN_PLAUSIBLE_EPOCH + 30 * DAY_SEC,
+        7);
+    TEST_ASSERT_EQUAL_INT(RENEWAL_DECISION_SKIP_NO_CLOCK, d);
+}
+
+/* --------------------------------------------------------------------------
+ * Row 16: window_days = UINT32_MAX / 86400 -- enormous window.
+ * If the cert has only 1 day remaining, it must still trigger renewal because
+ * 86400 seconds < UINT32_MAX * 86400 seconds (overflows int64?).  Check that
+ * the arithmetic saturates safely: window_sec = window_days * 86400LL.
+ * For window_days = UINT32_MAX, window_sec = 4294967295 * 86400 = ~3.7e14,
+ * which fits in int64_t (max ~9.2e18).  So a cert valid for only 1 day
+ * (86400 s) has remaining_sec < window_sec -> RENEW_NOW.
+ * -------------------------------------------------------------------------- */
+void test_very_large_window_days_safe(void)
+{
+    time_t now = MIN_PLAUSIBLE_EPOCH + 1;
+    renewal_decision_t d = cert_renewer_decide(
+        now,
+        (uint64_t)(now) + 1 * DAY_SEC,
+        (uint32_t)0xFFFFFFFFu);
+    TEST_ASSERT_EQUAL_INT(RENEWAL_DECISION_RENEW_NOW, d);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -210,5 +270,10 @@ int main(void)
     RUN_TEST(test_cert_1_day_out_window_1_renews);
     RUN_TEST(test_cert_2_days_out_window_1_skips);
     RUN_TEST(test_large_window_triggers_renewal);
+    /* New edge-case tests */
+    RUN_TEST(test_window_zero_cert_still_valid_skips);
+    RUN_TEST(test_window_zero_cert_expires_now_renews);
+    RUN_TEST(test_one_below_min_plausible_skips);
+    RUN_TEST(test_very_large_window_days_safe);
     return UNITY_END();
 }

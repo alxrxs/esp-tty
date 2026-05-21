@@ -58,7 +58,7 @@
  * Optional: set EAP_DISABLE_TIME_CHECK to 1 if the device has no SNTP/RTC
  * and cert expiry validation is failing at boot.
  * WARNING: this removes a security check; enable SNTP in production
- * instead, or use Mode C with OTA_NTP_BEFORE_EAPTLS=1.
+ * instead, or use Mode C with NTP_BEFORE_EAPTLS=1.
 
 #define EAP_DISABLE_TIME_CHECK  1
 
@@ -78,7 +78,7 @@
  *   BOOTSTRAP_FULL:   no cert, or cert expired -- join WIFI_SSID (PSK),
  *                     sync NTP, enroll via SCEP against SCEP_URL, reboot
  *                     into WIFI_ENTERPRISE_SSID.
- *   BOOTSTRAP_NTP_ONLY (requires OTA_NTP_BEFORE_EAPTLS=1):
+ *   BOOTSTRAP_NTP_ONLY (requires NTP_BEFORE_EAPTLS=1):
  *                     clock not yet synced -- join WIFI_SSID briefly to
  *                     sync NTP, then loop back for an ENTERPRISE attempt
  *                     (so RADIUS server-cert NotBefore/After can be
@@ -507,7 +507,7 @@
  *   3. ENTERPRISE: join WIFI_ENTERPRISE_SSID via EAP-TLS using the cert
  *      from NVS.  Normal operating mode.
  *   4. BOOTSTRAP_NTP_ONLY: join WIFI_SSID (PSK), sync NTP, drop, loop back
- *      to step 2.  Used when OTA_NTP_BEFORE_EAPTLS is set and the clock
+ *      to step 2.  Used when NTP_BEFORE_EAPTLS is set and the clock
  *      is unsynced (needed so RADIUS server-cert NotBefore/After can be
  *      validated on the next ENTERPRISE attempt).
  *   5. BOOTSTRAP_FULL: join WIFI_SSID (PSK), sync NTP, run SCEP enrollment
@@ -543,7 +543,7 @@
 
  * -------------------------------------------------------------------------- */
 
-/* OTA_NTP_BEFORE_EAPTLS: when defined (set to 1), the Wi-Fi state machine
+/* NTP_BEFORE_EAPTLS: when defined (set to 1), the Wi-Fi state machine
  * syncs NTP time before starting the EAP-TLS handshake.  This ensures the
  * device clock is correct for certificate validity checks.  Requires
  * NTP_ENABLE to also be defined.
@@ -554,7 +554,7 @@
  *
  * Define to enable (value 1 is conventional but any non-zero value works):
  */
-/* #define OTA_NTP_BEFORE_EAPTLS  1 */
+/* #define NTP_BEFORE_EAPTLS  1 */
 
 /* SCEP_NO_NTP_USE_ISSUANCE_TIME: "no-NTP, fresh-cert-every-boot" mode.
  *
@@ -591,7 +591,7 @@
  *     wall time across reboots.  Reboot frequently enough to keep the drift
  *     within the CA's clock-skew tolerance window (typically ±5 minutes for
  *     Kerberos-based RADIUS).
- *   - MUTUALLY EXCLUSIVE with OTA_NTP_BEFORE_EAPTLS.  Defining both is a
+ *   - MUTUALLY EXCLUSIVE with NTP_BEFORE_EAPTLS.  Defining both is a
  *     compile-time error (wifi.c #errors out).
  *
  * Implied settings when this macro is defined:
@@ -603,7 +603,7 @@
  */
 /* #define SCEP_NO_NTP_USE_ISSUANCE_TIME */
 
-/* EAPTLS_FALLBACK_TIMEOUT_SEC: seconds to wait for the EAP-TLS handshake
+/* EAPTLS_HANDSHAKE_TIMEOUT_SEC: seconds to wait for the EAP-TLS handshake
  * to complete before falling back (e.g. reverting to PSK or aborting).
  * The Wi-Fi state machine starts this timer when enterprise mode is active
  * and EAP_DISABLE_TIME_CHECK is not set.
@@ -611,7 +611,7 @@
  * Lower values catch a stuck RADIUS server faster but may fail on high-
  * latency links (VPN-connected RADIUS, intercontinental enterprise).
  * Default 60 s. Max practical: 300 (5 minutes). */
-#define EAPTLS_FALLBACK_TIMEOUT_SEC  60
+#define EAPTLS_HANDSHAKE_TIMEOUT_SEC  60
 
 /* -- Internal Mode-C tunables (defaults usually fine) --------------------- *
  * These all have #ifndef fallbacks in main/wifi.c; override only if you
@@ -626,17 +626,17 @@
  * only cert expiry triggers fallback).  Default 5. */
 /* #define WIFI_ENTERPRISE_RETRY_MAX        5 */
 
-/* SMART_NTP_SYNC_TIMEOUT_SEC: how long the BOOTSTRAP_NTP_ONLY and
+/* BOOTSTRAP_NTP_SYNC_TIMEOUT_SEC: how long the BOOTSTRAP_NTP_ONLY and
  * BOOTSTRAP_FULL paths wait for SNTP to deliver a synced time before
  * giving up and proceeding (with whatever clock the device has).  Default
  * 30 s.  Bump this if your NTP source is high-latency. */
-/* #define SMART_NTP_SYNC_TIMEOUT_SEC       30 */
+/* #define BOOTSTRAP_NTP_SYNC_TIMEOUT_SEC       30 */
 
-/* CERT_EXPIRY_WINDOW_SEC: stored cert is treated as "expired" when fewer
+/* CERT_REENROLL_THRESHOLD_SEC: stored cert is treated as "expired" when fewer
  * than this many seconds remain to NotAfter.  Triggers BOOTSTRAP_FULL on
  * the next boot decision.  Default 86400 (24 hours) so an overnight expiry
  * doesn't surprise you.  Bump higher for short-lived (hours-scale) certs. */
-/* #define CERT_EXPIRY_WINDOW_SEC           86400 */
+/* #define CERT_REENROLL_THRESHOLD_SEC           86400 */
 
 /* EAP_IDENTITY note (when WIFI_USE_ENTERPRISE or WIFI_ENTERPRISE_SSID is
  * defined):

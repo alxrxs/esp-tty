@@ -238,6 +238,191 @@ void test_compute_hash_accepts_exactly_512_byte_blob(void)
     TEST_ASSERT_EQUAL_MEMORY(EXPECTED_HASH_512, hash, 32);
 }
 
+/* ===================================================================
+ * pubkey_auth_check() tests
+ * =================================================================== */
+
+/*
+ * Build a presented key that is the raw decoded blob for TEST_PUBKEY, then
+ * use the hash already computed by pubkey_compute_hash for the acceptance
+ * path.  This exercises the full round-trip:
+ *
+ *   1. pubkey_compute_hash(line) -> expected_hash
+ *   2. Decode base64 -> raw_blob
+ *   3. pubkey_auth_check(raw_blob, blob_len, expected_hash) -> OK
+ */
+
+/* Decoded blob for TEST_PUBKEY's base64 field (51 bytes).  Pre-computed so
+ * the test doesn't need a base64 decoder stub at this layer. */
+static const uint8_t TEST_BLOB[51] = {
+    0x00, 0x00, 0x00, 0x0b,  /* uint32be(11): length of "ssh-ed25519" */
+    0x73, 0x73, 0x68, 0x2d, 0x65, 0x64, 0x32, 0x35, 0x35, 0x31, 0x39,
+    0x00, 0x00, 0x00, 0x20,  /* uint32be(32): length of key material */
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+    0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+    0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+};
+
+void test_auth_check_ok_for_matching_hash(void)
+{
+    /* Compute the expected hash from the known-good pubkey string. */
+    uint8_t expected[32];
+    bool ok = pubkey_compute_hash(TEST_PUBKEY, expected);
+    TEST_ASSERT_TRUE(ok);
+
+    /* The auth check against the raw blob must succeed. */
+    pubkey_auth_result_t r = pubkey_auth_check(TEST_BLOB, sizeof(TEST_BLOB),
+                                               expected);
+    TEST_ASSERT_EQUAL_INT(PUBKEY_AUTH_OK, r);
+}
+
+void test_auth_check_rejects_wrong_hash(void)
+{
+    uint8_t wrong_hash[32];
+    memset(wrong_hash, 0xAA, sizeof(wrong_hash));
+
+    pubkey_auth_result_t r = pubkey_auth_check(TEST_BLOB, sizeof(TEST_BLOB),
+                                               wrong_hash);
+    TEST_ASSERT_EQUAL_INT(PUBKEY_AUTH_REJECTED, r);
+}
+
+void test_auth_check_rejects_null_key(void)
+{
+    uint8_t hash[32];
+    memset(hash, 0, sizeof(hash));
+    pubkey_auth_result_t r = pubkey_auth_check(NULL, 16, hash);
+    TEST_ASSERT_EQUAL_INT(PUBKEY_AUTH_REJECTED, r);
+}
+
+void test_auth_check_rejects_zero_length_key(void)
+{
+    uint8_t hash[32];
+    memset(hash, 0, sizeof(hash));
+    pubkey_auth_result_t r = pubkey_auth_check(TEST_BLOB, 0, hash);
+    TEST_ASSERT_EQUAL_INT(PUBKEY_AUTH_REJECTED, r);
+}
+
+void test_auth_check_differs_for_different_blob(void)
+{
+    /* Two distinct blobs must produce different auth results for the same
+     * expected hash (i.e., the second must be rejected). */
+    uint8_t expected[32];
+    pubkey_compute_hash(TEST_PUBKEY, expected);
+
+    uint8_t other_blob[51];
+    memcpy(other_blob, TEST_BLOB, sizeof(other_blob));
+    other_blob[20] ^= 0xFF;  /* flip a byte -- different key material */
+
+    pubkey_auth_result_t r = pubkey_auth_check(other_blob, sizeof(other_blob),
+                                               expected);
+    TEST_ASSERT_EQUAL_INT(PUBKEY_AUTH_REJECTED, r);
+}
+
+void test_auth_check_single_bit_flip_rejected(void)
+{
+    /* Constant-time compare: flipping a single bit in the blob must be caught. */
+    uint8_t expected[32];
+    pubkey_compute_hash(TEST_PUBKEY, expected);
+
+    uint8_t bad_blob[51];
+    memcpy(bad_blob, TEST_BLOB, sizeof(bad_blob));
+    bad_blob[sizeof(bad_blob) - 1] ^= 0x01;  /* flip LSB of last byte */
+
+    pubkey_auth_result_t r = pubkey_auth_check(bad_blob, sizeof(bad_blob),
+                                               expected);
+    TEST_ASSERT_EQUAL_INT(PUBKEY_AUTH_REJECTED, r);
+}
+
+/* ===================================================================
+ * format_fingerprint() tests
+ * =================================================================== */
+
+void test_format_fingerprint_known_value(void)
+{
+    /* All-zeros digest -> "00:00:...:00" (32 bytes * 3 - 1 colon chars). */
+    uint8_t zeros[PUBKEY_HASH_SIZE];
+    memset(zeros, 0, sizeof(zeros));
+
+    char out[PUBKEY_HASH_SIZE * 3 + 1];
+    char *ret = format_fingerprint(zeros, out, sizeof(out));
+
+    TEST_ASSERT_NOT_NULL(ret);
+    TEST_ASSERT_EQUAL_PTR(out, ret);
+
+    /* First byte "00", colon, second byte "00", ..., last byte "00" (no colon). */
+    /* Verify first and last bytes are formatted correctly. */
+    TEST_ASSERT_EQUAL_UINT8('0', (uint8_t)out[0]);
+    TEST_ASSERT_EQUAL_UINT8('0', (uint8_t)out[1]);
+    TEST_ASSERT_EQUAL_UINT8(':', (uint8_t)out[2]);
+    /* Last three chars: "00\0" */
+    size_t total_len = PUBKEY_HASH_SIZE * 3 - 1;  /* 95 payload bytes */
+    TEST_ASSERT_EQUAL_UINT8('0', (uint8_t)out[total_len - 2]);
+    TEST_ASSERT_EQUAL_UINT8('0', (uint8_t)out[total_len - 1]);
+    TEST_ASSERT_EQUAL_UINT8('\0', (uint8_t)out[total_len]);
+}
+
+void test_format_fingerprint_all_ff(void)
+{
+    uint8_t all_ff[PUBKEY_HASH_SIZE];
+    memset(all_ff, 0xFF, sizeof(all_ff));
+
+    char out[PUBKEY_HASH_SIZE * 3 + 1];
+    char *ret = format_fingerprint(all_ff, out, sizeof(out));
+
+    TEST_ASSERT_NOT_NULL(ret);
+    /* First two chars must be "ff". */
+    TEST_ASSERT_EQUAL_UINT8('f', (uint8_t)out[0]);
+    TEST_ASSERT_EQUAL_UINT8('f', (uint8_t)out[1]);
+    TEST_ASSERT_EQUAL_UINT8(':', (uint8_t)out[2]);
+}
+
+void test_format_fingerprint_returns_null_for_small_buf(void)
+{
+    uint8_t digest[PUBKEY_HASH_SIZE];
+    memset(digest, 0x42, sizeof(digest));
+
+    /* Need at least PUBKEY_HASH_SIZE*3 bytes; pass one byte too few. */
+    char small[PUBKEY_HASH_SIZE * 3 - 1];
+    char *ret = format_fingerprint(digest, small, sizeof(small));
+    TEST_ASSERT_NULL(ret);
+}
+
+void test_format_fingerprint_null_digest_returns_null(void)
+{
+    char out[PUBKEY_HASH_SIZE * 3 + 1];
+    char *ret = format_fingerprint(NULL, out, sizeof(out));
+    TEST_ASSERT_NULL(ret);
+}
+
+void test_format_fingerprint_null_out_returns_null(void)
+{
+    uint8_t digest[PUBKEY_HASH_SIZE];
+    memset(digest, 0, sizeof(digest));
+    char *ret = format_fingerprint(digest, NULL, 96);
+    TEST_ASSERT_NULL(ret);
+}
+
+void test_format_fingerprint_incremental_byte(void)
+{
+    /* digest[0]=0x0b, digest[1]=0x0c, rest 0 -> starts with "0b:0c:" */
+    uint8_t digest[PUBKEY_HASH_SIZE];
+    memset(digest, 0, sizeof(digest));
+    digest[0] = 0x0b;
+    digest[1] = 0x0c;
+
+    char out[PUBKEY_HASH_SIZE * 3 + 1];
+    char *ret = format_fingerprint(digest, out, sizeof(out));
+
+    TEST_ASSERT_NOT_NULL(ret);
+    TEST_ASSERT_EQUAL_UINT8('0', (uint8_t)out[0]);
+    TEST_ASSERT_EQUAL_UINT8('b', (uint8_t)out[1]);
+    TEST_ASSERT_EQUAL_UINT8(':', (uint8_t)out[2]);
+    TEST_ASSERT_EQUAL_UINT8('0', (uint8_t)out[3]);
+    TEST_ASSERT_EQUAL_UINT8('c', (uint8_t)out[4]);
+    TEST_ASSERT_EQUAL_UINT8(':', (uint8_t)out[5]);
+}
+
 /* ------------------------------------------------------------------ */
 
 int main(void)
@@ -255,5 +440,19 @@ int main(void)
     RUN_TEST(test_compute_hash_comment_ignored);
     RUN_TEST(test_compute_hash_rejects_over_512_byte_blob);
     RUN_TEST(test_compute_hash_accepts_exactly_512_byte_blob);
+    /* pubkey_auth_check() tests */
+    RUN_TEST(test_auth_check_ok_for_matching_hash);
+    RUN_TEST(test_auth_check_rejects_wrong_hash);
+    RUN_TEST(test_auth_check_rejects_null_key);
+    RUN_TEST(test_auth_check_rejects_zero_length_key);
+    RUN_TEST(test_auth_check_differs_for_different_blob);
+    RUN_TEST(test_auth_check_single_bit_flip_rejected);
+    /* format_fingerprint() tests */
+    RUN_TEST(test_format_fingerprint_known_value);
+    RUN_TEST(test_format_fingerprint_all_ff);
+    RUN_TEST(test_format_fingerprint_returns_null_for_small_buf);
+    RUN_TEST(test_format_fingerprint_null_digest_returns_null);
+    RUN_TEST(test_format_fingerprint_null_out_returns_null);
+    RUN_TEST(test_format_fingerprint_incremental_byte);
     return UNITY_END();
 }

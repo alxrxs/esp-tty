@@ -107,6 +107,45 @@ static void test_resize_max_word32(void)
     TEST_ASSERT_EQUAL_STRING("\033[8;4294967295;4294967295t", buf);
 }
 
+/* -- out_sz == 1: only room for NUL -> cannot fit any payload -------------- */
+
+static void test_resize_out_sz_one_returns_zero(void)
+{
+    char buf[1] = {0x42};
+    int n = term_resize_format(80, 24, buf, 1);
+    TEST_ASSERT_EQUAL_INT(0, n);
+}
+
+/* -- out_sz == 0: trivially can't fit anything ----------------------------- */
+
+static void test_resize_out_sz_zero_returns_zero(void)
+{
+    /* NULL-safe: out is non-NULL but out_sz == 0 should return 0. */
+    char buf[8];
+    int n = term_resize_format(80, 24, buf, 0);
+    TEST_ASSERT_EQUAL_INT(0, n);
+}
+
+/* -- Only rows == 0 while cols is large: returns 0 ------------------------- */
+
+static void test_resize_zero_rows_large_cols_returns_zero(void)
+{
+    char buf[32];
+    int n = term_resize_format(999, 0, buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_INT(0, n);
+}
+
+/* -- Asymmetric: cols > rows ----------------------------------------------- */
+
+static void test_resize_wide_terminal(void)
+{
+    /* 220 cols x 50 rows -> "\033[8;50;220t" -- 11 bytes */
+    char buf[32];
+    int n = term_resize_format(220, 50, buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_INT(11, n);
+    TEST_ASSERT_EQUAL_STRING("\033[8;50;220t", buf);
+}
+
 /* -- Main ----------------------------------------------------------------- */
 
 int main(void)
@@ -122,5 +161,10 @@ int main(void)
     RUN_TEST(test_resize_buffer_too_small);
     RUN_TEST(test_resize_buffer_exact_fit);
     RUN_TEST(test_resize_max_word32);
+    /* New edge-case tests */
+    RUN_TEST(test_resize_out_sz_one_returns_zero);
+    RUN_TEST(test_resize_out_sz_zero_returns_zero);
+    RUN_TEST(test_resize_zero_rows_large_cols_returns_zero);
+    RUN_TEST(test_resize_wide_terminal);
     return UNITY_END();
 }

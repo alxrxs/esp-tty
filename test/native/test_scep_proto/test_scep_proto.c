@@ -581,6 +581,166 @@ void test_generate_keypair_null_rng_returns_error(void)
 }
 
 /* =========================================================================
+ * 11. scep_build_self_signed_cert -- additional error paths
+ * ======================================================================= */
+
+/* NULL key should return error */
+void test_self_signed_cert_null_key_returns_error(void)
+{
+    scep_subject_t subj = { .common_name = "test" };
+    uint8_t out[SCEP_MAX_CERT_DER];
+    size_t len = sizeof(out);
+    int rc = scep_build_self_signed_cert(&subj, NULL,
+                                         mbedtls_ctr_drbg_random, &g_ctr_drbg,
+                                         out, &len);
+    TEST_ASSERT_NOT_EQUAL(0, rc);
+}
+
+/* NULL subject should return error */
+void test_self_signed_cert_null_subject_returns_error(void)
+{
+    mbedtls_pk_context key;
+    gen_keypair_or_fail(&key);
+    uint8_t out[SCEP_MAX_CERT_DER];
+    size_t len = sizeof(out);
+    int rc = scep_build_self_signed_cert(NULL, &key,
+                                         mbedtls_ctr_drbg_random, &g_ctr_drbg,
+                                         out, &len);
+    TEST_ASSERT_NOT_EQUAL(0, rc);
+    mbedtls_pk_free(&key);
+}
+
+/* NULL out_der should return error */
+void test_self_signed_cert_null_out_returns_error(void)
+{
+    mbedtls_pk_context key;
+    gen_keypair_or_fail(&key);
+    scep_subject_t subj = { .common_name = "test" };
+    size_t len = 0;
+    int rc = scep_build_self_signed_cert(&subj, &key,
+                                         mbedtls_ctr_drbg_random, &g_ctr_drbg,
+                                         NULL, &len);
+    TEST_ASSERT_NOT_EQUAL(0, rc);
+    mbedtls_pk_free(&key);
+}
+
+/* All optional subject fields (O, OU, C, ST, L) present in generated cert */
+void test_self_signed_cert_optional_fields_present(void)
+{
+    mbedtls_pk_context key;
+    gen_keypair_or_fail(&key);
+
+    scep_subject_t subj = {
+        .common_name         = "cn-test",
+        .organization        = "TestOrg",
+        .organizational_unit = "TestOU",
+        .country             = "US",
+        .state               = "TestState",
+        .locality            = "TestCity",
+    };
+    uint8_t cert_der[SCEP_MAX_CERT_DER];
+    size_t cert_len = sizeof(cert_der);
+    int rc = scep_build_self_signed_cert(&subj, &key,
+                                         mbedtls_ctr_drbg_random, &g_ctr_drbg,
+                                         cert_der, &cert_len);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, rc, "scep_build_self_signed_cert with all fields");
+
+    /* Parse and verify all fields are present */
+    const unsigned char *p = cert_der;
+    X509 *x509 = d2i_X509(NULL, &p, (long)cert_len);
+    TEST_ASSERT_NOT_NULL(x509);
+
+    X509_NAME *name = X509_get_subject_name(x509);
+    char buf[128];
+
+    X509_NAME_get_text_by_NID(name, NID_commonName, buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_STRING("cn-test", buf);
+
+    X509_NAME_get_text_by_NID(name, NID_organizationName, buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_STRING("TestOrg", buf);
+
+    X509_free(x509);
+    mbedtls_pk_free(&key);
+}
+
+/* =========================================================================
+ * 12. scep_transaction_id -- edge cases
+ * ======================================================================= */
+
+/* All-zero SPKI: SHA-256 of zeros should still produce valid 64-char hex */
+void test_transaction_id_all_zero_spki(void)
+{
+    ensure_rng();
+    uint8_t zero_spki[32] = {0};
+    char buf[SCEP_TRANSACTION_ID_HEX_LEN + 1] = {0};
+    int rc = scep_transaction_id(zero_spki, sizeof(zero_spki), buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_INT(0, rc);
+    TEST_ASSERT_EQUAL_size_t(SCEP_TRANSACTION_ID_HEX_LEN, strlen(buf));
+    /* Verify all chars are hex */
+    for (size_t i = 0; i < SCEP_TRANSACTION_ID_HEX_LEN; i++) {
+        char c = buf[i];
+        TEST_ASSERT_TRUE((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'));
+    }
+}
+
+/* Buffer of exactly SCEP_TRANSACTION_ID_HEX_LEN (missing NUL) -> error */
+void test_transaction_id_exact_no_nul_buffer_fails(void)
+{
+    uint8_t dummy[32] = {0};
+    char buf[SCEP_TRANSACTION_ID_HEX_LEN];  /* no room for NUL */
+    int rc = scep_transaction_id(dummy, sizeof(dummy), buf, sizeof(buf));
+    TEST_ASSERT_NOT_EQUAL(0, rc);
+}
+
+/* =========================================================================
+ * 13. scep_build_csr -- additional error paths
+ * ======================================================================= */
+
+/* NULL RNG function */
+void test_csr_null_rng_fn_returns_error(void)
+{
+    mbedtls_pk_context key;
+    gen_keypair_or_fail(&key);
+
+    scep_subject_t subj = { .common_name = "test" };
+    uint8_t out[SCEP_MAX_CSR_DER];
+    size_t len = sizeof(out);
+    int rc = scep_build_csr(&subj, &key, "password",
+                             NULL, &g_ctr_drbg,
+                             out, &len);
+    TEST_ASSERT_NOT_EQUAL(0, rc);
+    mbedtls_pk_free(&key);
+}
+
+/* NULL key */
+void test_csr_null_key_returns_error(void)
+{
+    scep_subject_t subj = { .common_name = "test" };
+    uint8_t out[SCEP_MAX_CSR_DER];
+    size_t len = sizeof(out);
+    int rc = scep_build_csr(&subj, NULL, "password",
+                             mbedtls_ctr_drbg_random, &g_ctr_drbg,
+                             out, &len);
+    TEST_ASSERT_NOT_EQUAL(0, rc);
+}
+
+/* NULL challenge password */
+void test_csr_null_challenge_password_returns_error(void)
+{
+    mbedtls_pk_context key;
+    gen_keypair_or_fail(&key);
+
+    scep_subject_t subj = { .common_name = "test" };
+    uint8_t out[SCEP_MAX_CSR_DER];
+    size_t len = sizeof(out);
+    int rc = scep_build_csr(&subj, &key, NULL,
+                             mbedtls_ctr_drbg_random, &g_ctr_drbg,
+                             out, &len);
+    TEST_ASSERT_NOT_EQUAL(0, rc);
+    mbedtls_pk_free(&key);
+}
+
+/* =========================================================================
  * Main
  * ======================================================================= */
 
@@ -631,6 +791,21 @@ int main(void)
     /* scep_generate_keypair NULL inputs */
     RUN_TEST(test_generate_keypair_null_out_returns_error);
     RUN_TEST(test_generate_keypair_null_rng_returns_error);
+
+    /* scep_build_self_signed_cert additional error paths */
+    RUN_TEST(test_self_signed_cert_null_key_returns_error);
+    RUN_TEST(test_self_signed_cert_null_subject_returns_error);
+    RUN_TEST(test_self_signed_cert_null_out_returns_error);
+    RUN_TEST(test_self_signed_cert_optional_fields_present);
+
+    /* scep_transaction_id edge cases */
+    RUN_TEST(test_transaction_id_all_zero_spki);
+    RUN_TEST(test_transaction_id_exact_no_nul_buffer_fails);
+
+    /* scep_build_csr additional error paths */
+    RUN_TEST(test_csr_null_rng_fn_returns_error);
+    RUN_TEST(test_csr_null_key_returns_error);
+    RUN_TEST(test_csr_null_challenge_password_returns_error);
 
     /* Cleanup global RNG */
     if (g_rng_init) {

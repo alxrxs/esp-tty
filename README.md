@@ -308,7 +308,7 @@ state machine (`lib/wifi_state/wifi_state.c`) picks one of three paths:
 | Path | Condition | Action |
 |---|---|---|
 | **ENTERPRISE** | Cert in NVS; clock synced + valid, or unsynced | Join `WIFI_ENTERPRISE_SSID` via EAP-TLS |
-| **BOOTSTRAP_NTP_ONLY** | Cert in NVS; `OTA_NTP_BEFORE_EAPTLS=1`; clock not synced | Join `WIFI_SSID` (PSK) for SNTP only, then retry ENTERPRISE |
+| **BOOTSTRAP_NTP_ONLY** | Cert in NVS; `NTP_BEFORE_EAPTLS=1`; clock not synced | Join `WIFI_SSID` (PSK) for SNTP only, then retry ENTERPRISE |
 | **BOOTSTRAP_FULL** | No cert, cert known-expired, or too many EAP-TLS failures | Join `WIFI_SSID` (PSK), sync NTP, run SCEP, store cert, reboot |
 
 A full SCEP enrollment against real NDES takes ~9 s (mostly RSA-2048 keygen
@@ -319,7 +319,7 @@ with no NTP source. Every boot re-enrolls a fresh cert and uses its X.509
 NotBefore as the local-clock anchor. Trades ~9 s per boot and one NDES
 challenge password per reboot for a clock anchor without an NTP server.
 `cert_renewer` is disabled -- each reboot is the renewal. Mutually exclusive
-with `OTA_NTP_BEFORE_EAPTLS`.
+with `NTP_BEFORE_EAPTLS`.
 
 ### Configuration knobs
 
@@ -330,8 +330,8 @@ All in `main/config.h`:
 | `SCEP_URL` | Full URL to the NDES `mscep.dll` PKIOperation endpoint, e.g. `https://pki.example.com/certsrv/mscep/mscep.dll` |
 | `SCEP_CHALLENGE_PASSWORD` | One-time enrollment password from the NDES web UI |
 | `WIFI_ENTERPRISE_SSID` | SSID of the WPA3-Enterprise network; also the trigger that enables the full SCEP+EAP-TLS state machine |
-| `OTA_NTP_BEFORE_EAPTLS` | Set to `1` to require an NTP sync before attempting EAP-TLS (recommended for production) |
-| `EAPTLS_FALLBACK_TIMEOUT_SEC` | Seconds to wait for EAP-TLS association before falling back to bootstrap PSK |
+| `NTP_BEFORE_EAPTLS` | Set to `1` to require an NTP sync before attempting EAP-TLS (recommended for production) |
+| `EAPTLS_HANDSHAKE_TIMEOUT_SEC` | Seconds to wait for EAP-TLS association before falling back to bootstrap PSK |
 | `WIFI_ENTERPRISE_RETRY_MAX` | Consecutive EAP-TLS failures before forcing a re-enroll (0 = unlimited retries) |
 | `CERT_RENEWAL_WINDOW_DAYS` | Start renewing when fewer than this many days remain before cert expiry (default 7) |
 
