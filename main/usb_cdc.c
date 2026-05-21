@@ -142,7 +142,10 @@ esp_err_t usb_cdc_init(ring_t *usb_to_ssh, ring_t *ssh_to_usb,
 
     tinyusb_config_t tusb_cfg = TINYUSB_DEFAULT_CONFIG();
     tusb_cfg.descriptor.device       = &s_device_descriptor;
-    tusb_cfg.descriptor.string       = s_usb_strings;
+    /* TinyUSB's field type is `const char **`; our array is `const char *const []`.
+     * The cast acknowledges TinyUSB's looser const-annotation without dropping
+     * the inner constness on our side. */
+    tusb_cfg.descriptor.string       = (const char **)s_usb_strings;
     tusb_cfg.descriptor.string_count = sizeof(s_usb_strings) / sizeof(s_usb_strings[0]);
     ESP_ERROR_CHECK(tinyusb_driver_install(&tusb_cfg));
 
