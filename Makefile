@@ -12,12 +12,17 @@
 #   so the Makefile knows where to ship its OTA build.
 #
 #   `make ota alpha` finds main/config.alpha.h, reads MAKE-OTA-IP from it,
-#   copies it to main/config.h, builds, and uploads to that IP/host.
-#   `make flash alpha` does the same minus the OTA -- MAKE-OTA-IP is ignored.
+#   symlinks main/config.h -> config.alpha.h, builds, and uploads to that
+#   IP/host.  `make flash alpha` does the same minus the OTA.
+#
+#   The symlink means in-place edits to main/config.h flow through to
+#   main/config.<dev>.h transparently -- no separate "save" step needed.
+#   Switching devices (e.g. `make flash beta` after `make flash alpha`)
+#   just repoints the symlink to config.beta.h.
 #
 #   `make ota 192.168.1.42` (any string that doesn't name a config.<name>.h
 #   file) is treated as a raw IP/hostname: the currently materialized
-#   main/config.h is built and uploaded as-is, no config switch.
+#   main/config.h is built and uploaded as-is, no symlink change.
 #
 #   `make flash` and `make build` with no argument use the current
 #   main/config.h unchanged. `make flash <bogus>` errors out.
@@ -97,8 +102,8 @@ flash:
 	    exit 1; \
 	fi
 	@if [ -n "$(DEV_FILE)" ]; then \
-	    echo ">> selecting $(DEV_FILE)"; \
-	    cp $(DEV_FILE) main/config.h; \
+	    echo ">> selecting $(DEV_FILE) (symlink main/config.h -> config.$(DEV_ARG).h)"; \
+	    ln -sfn config.$(DEV_ARG).h main/config.h; \
 	fi
 	$(PIO) run -e $(ENV) --target upload $(UPLOAD_FLAGS)
 
@@ -117,8 +122,8 @@ ota:
 	    exit 1; \
 	fi
 	@if [ -n "$(DEV_FILE)" ]; then \
-	    echo ">> selecting $(DEV_FILE)  (OTA target: $(OTA_TARGET))"; \
-	    cp $(DEV_FILE) main/config.h; \
+	    echo ">> selecting $(DEV_FILE)  (symlink main/config.h -> config.$(DEV_ARG).h, OTA target: $(OTA_TARGET))"; \
+	    ln -sfn config.$(DEV_ARG).h main/config.h; \
 	fi
 	$(PIO) run -e $(ENV)
 	$(PYTHON) scripts/ota_send.py $(OTA_TARGET) $(FIRMWARE_BIN)
