@@ -1,42 +1,45 @@
 /*
- * udp_log.c -- UDP log mirror implementation
+ * udp_log.c -- UDP log mirror with coalescing + sequence numbers
  *
  * Only compiled when both UDP_LOG_HOST and UDP_LOG_PORT are defined.
  *
- * Design notes:
+ * Design
+ * ------
  *
- *   vprintf hook:
- *     esp_log_set_vprintf() lets us intercept every ESP_LOG* call.  The
- *     hook calls the previous vprintf first (keeping UART0 output intact),
- *     then formats the message into a ~512-byte stack buffer (truncating
- *     longer lines) and sends it as a single UDP datagram.
+ *   vprintf hook
+ *     esp_log_set_vprintf() lets us intercept every ESP_LOG* call.  The hook
+ *     calls the previous vprintf first (UART0 passthrough), then appends the
+ *     formatted line to a single-datagram accumulator.
  *
- *   No mutex inside the hook:
- *     ESP_LOG* can be called from any context including ISRs.  Taking a
- *     blocking mutex in the hook would risk deadlock.  The socket fd is
- *     published via an atomic store; lazy init uses a trylock and skips
- *     UDP send if init is already in progress on another context.
+ *   Coalescing
+ *     Per-line UDP send hit a per-second packet-rate ceiling during boot
+ *     bursts -- some lines were lost between the chip and the kernel.  We
+ *     buffer up to UDP_LOG_DGRAM_MAX bytes (default 1300, near a path MTU)
+ *     and emit one datagram either when the buffer is about to overflow OR
+ *     when a background task sees the buffer has been idle for
+ *     UDP_LOG_FLUSH_TIMEOUT_MS.
  *
- *   No dynamic allocation per log line:
- *     All per-call buffers are on the stack.  Lazy init allocates the
- *     socket once; that happens outside the hot path.
+ *   Sequence numbers
+ *     Each datagram is prefixed with "#<seq>\n".  Gaps in the sequence on
+ *     the receiver mean datagrams were lost in transit (Wi-Fi flap, kernel
+ *     queue overflow, etc.) -- you know to scroll the UART log for what is
+ *     missing.
  *
- *   Lazy socket creation:
- *     The UDP socket is created on the first log call after udp_log_init()
- *     installs the hook.  lwIP's socket layer is guaranteed ready by then
- *     (we are already past the Wi-Fi GOT_IP event).
+ *   Locking
+ *     A single mutex guards the accumulator.  The hook uses trylock and
+ *     drops the current line on contention (rare; only collides with the
+ *     flush task during its brief drain).  The flush task uses blocking
+ *     acquire.  No mutex is taken from ISR context -- ESP_LOG from an ISR
+ *     would skip via the trylock.
  *
- *   ANSI escape sequences:
- *     ESP-IDF colours log output with ANSI escape codes.  We send them
- *     as-is; any ANSI-capable terminal renders them correctly.  Strip with
- *     `sed 's/\x1B\[[0-9;]*m//g'` if you prefer plain text.
- *
- *   Wi-Fi guard:
- *     If Wi-Fi is not yet associated, sendto() fails with ENETUNREACH or
- *     similar.  We silently drop the datagram to avoid infinite recursion
- *     (logging the error would re-enter the hook).
+ *   Non-blocking send
+ *     The socket is O_NONBLOCK; sendto() returns instantly even when the
+ *     LwIP TX queue is full (drops on EAGAIN, same as UDP overflow).
  */
 
+/* Pull in UDP_LOG_HOST / UDP_LOG_PORT before the guard below; udp_log.h
+ * doesn't include config.h so the .c would otherwise compile as empty. */
+#include "config.h"
 #include "udp_log.h"
 
 #if defined(UDP_LOG_HOST) && defined(UDP_LOG_PORT)
@@ -45,9 +48,11 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdatomic.h>
+#include <fcntl.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 
 #include "esp_log.h"
 
@@ -55,13 +60,46 @@
 #include "lwip/netdb.h"
 
 /* --------------------------------------------------------------------------
- * Configuration
+ * Tunables (override in config.h if needed)
  * -------------------------------------------------------------------------- */
 
-/* Line buffer size.  Lines longer than this are truncated at
- * UDP_LOG_BUF_SIZE - 1 bytes before the NUL terminator. */
-#ifndef UDP_LOG_BUF_SIZE
-# define UDP_LOG_BUF_SIZE  512
+/* Per-line scratch buffer.  A single ESP_LOG line longer than this is
+ * truncated.  Stays on the stack inside the vprintf hook. */
+#ifndef UDP_LOG_LINE_MAX
+# define UDP_LOG_LINE_MAX  256
+#endif
+
+/* Datagram payload ceiling.  1300 leaves room for the IPv4+UDP header
+ * (28 B) and any tunnel overhead under a typical 1500-byte path MTU. */
+#ifndef UDP_LOG_DGRAM_MAX
+# define UDP_LOG_DGRAM_MAX  1300
+#endif
+
+/* Sequence-number header buffer ("#4294967295\n" = 12 chars + slack). */
+#define UDP_LOG_SEQ_HDR_MAX  16
+
+/* If the accumulator has been idle for this many ms with content in it,
+ * the flush task emits it as a datagram. */
+#ifndef UDP_LOG_FLUSH_TIMEOUT_MS
+# define UDP_LOG_FLUSH_TIMEOUT_MS  50
+#endif
+
+/* How often the flush task wakes to check the idle-timeout condition.
+ * Lower = more responsive, higher = less CPU wake.  25 ms is a good
+ * compromise for debug logging. */
+#ifndef UDP_LOG_POLL_MS
+# define UDP_LOG_POLL_MS  25
+#endif
+
+/* Flush task stack.  Holds the wire-stitch buffer (~1.3 KB) plus FreeRTOS
+ * bookkeeping; 4 KB is comfortable. */
+#ifndef UDP_LOG_FLUSH_STACK
+# define UDP_LOG_FLUSH_STACK  4096
+#endif
+
+/* Flush task priority.  Low so it never preempts real work. */
+#ifndef UDP_LOG_FLUSH_PRIO
+# define UDP_LOG_FLUSH_PRIO  3
 #endif
 
 /* --------------------------------------------------------------------------
@@ -71,48 +109,53 @@
 /* Previously installed vprintf handler (restored by udp_log_deinit). */
 static vprintf_like_t s_prev_vprintf = NULL;
 
-/* UDP socket fd.  -1 = not yet created.
- * Written once under s_init_mutex, then read-only from the hook. */
+/* UDP socket fd.  -1 = not yet created. */
 static atomic_int s_sock = ATOMIC_VAR_INIT(-1);
 
 /* Destination address, populated once during lazy init. */
 static struct sockaddr_in s_dest;
 
-/* Mutex protecting lazy socket creation.  Never taken inside the vprintf
- * hook to avoid blocking callers from interrupt context (see design notes). */
+/* Lazy-init mutex -- separate from the accumulator mutex so socket
+ * creation does not block log callsites. */
 static SemaphoreHandle_t s_init_mutex = NULL;
+
+/* Accumulator buffer + length.  Guarded by s_acc_mutex. */
+static char             s_acc_buf[UDP_LOG_DGRAM_MAX];
+static size_t           s_acc_len   = 0;
+static TickType_t       s_acc_last_add = 0;
+static uint32_t         s_seq       = 0;
+static SemaphoreHandle_t s_acc_mutex = NULL;
+
+/* Wire-stitch buffer used by flush_locked().  Accessed only while holding
+ * s_acc_mutex, so a single static instance is safe. */
+static char s_wire[UDP_LOG_SEQ_HDR_MAX + UDP_LOG_DGRAM_MAX];
+
+/* Flush task handle + running flag. */
+static TaskHandle_t s_flush_task = NULL;
+static volatile bool s_running   = false;
 
 /* True after udp_log_init() installs the hook. */
 static volatile bool s_installed = false;
 
 /* --------------------------------------------------------------------------
  * Lazy socket creation
- *
- * Called from the vprintf hook the first time it fires.  Any failure
- * leaves s_sock at -1 so subsequent calls silently skip the UDP send.
  * -------------------------------------------------------------------------- */
 static void udp_lazy_init(void)
 {
     if (!s_init_mutex) return;
-
-    /* Non-blocking trylock: if another context is already in here, skip
-     * init this time.  The hook will retry on the next log line. */
     if (xSemaphoreTake(s_init_mutex, 0) != pdTRUE) return;
 
-    /* Double-check after acquiring the lock. */
     if (atomic_load(&s_sock) != -1) {
         xSemaphoreGive(s_init_mutex);
         return;
     }
 
-    /* Create a non-blocking UDP socket. */
     int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (fd < 0) {
         xSemaphoreGive(s_init_mutex);
         return;
     }
 
-    /* Resolve destination address (IPv4 only, dotted-decimal string). */
     memset(&s_dest, 0, sizeof(s_dest));
     s_dest.sin_family = AF_INET;
     s_dest.sin_port   = htons((uint16_t)(UDP_LOG_PORT));
@@ -122,16 +165,48 @@ static void udp_lazy_init(void)
         return;
     }
 
-    /* Make the socket non-blocking so sendto() never stalls the log caller. */
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags >= 0) {
         fcntl(fd, F_SETFL, flags | O_NONBLOCK);
     }
 
-    /* Publish the fd atomically so the hook sees it immediately. */
     atomic_store(&s_sock, fd);
-
     xSemaphoreGive(s_init_mutex);
+}
+
+/* --------------------------------------------------------------------------
+ * Flush -- emit the current accumulator as one datagram, with sequence
+ * header.  Caller must hold s_acc_mutex.
+ * -------------------------------------------------------------------------- */
+static void flush_locked(void)
+{
+    if (s_acc_len == 0) return;
+
+    int fd = atomic_load(&s_sock);
+    if (fd == -1) {
+        /* Network not ready -- drop the accumulator rather than buffer
+         * unboundedly.  The sequence number still advances so the receiver
+         * sees the gap. */
+        s_acc_len = 0;
+        s_seq++;
+        return;
+    }
+
+    /* "#<seq>\n" prefix.  Capped at UDP_LOG_SEQ_HDR_MAX; any sane uint32
+     * decimal fits in 11 digits. */
+    int hdr_n = snprintf(s_wire, UDP_LOG_SEQ_HDR_MAX, "#%u\n",
+                         (unsigned)s_seq);
+    if (hdr_n < 0) hdr_n = 0;
+    if (hdr_n > UDP_LOG_SEQ_HDR_MAX) hdr_n = UDP_LOG_SEQ_HDR_MAX;
+
+    memcpy(s_wire + hdr_n, s_acc_buf, s_acc_len);
+    size_t total = (size_t)hdr_n + s_acc_len;
+
+    sendto(fd, s_wire, total, 0,
+           (struct sockaddr *)&s_dest, sizeof(s_dest));
+
+    s_acc_len = 0;
+    s_seq++;
 }
 
 /* --------------------------------------------------------------------------
@@ -139,9 +214,7 @@ static void udp_lazy_init(void)
  * -------------------------------------------------------------------------- */
 static int udp_log_vprintf_hook(const char *fmt, va_list args)
 {
-    /* 1. Call the previous vprintf FIRST so UART0 output is never gated on
-     *    network availability.  Use a copy of args; the original is needed
-     *    for vsnprintf below. */
+    /* 1. UART0 passthrough -- always, even if UDP is gated. */
     int ret = 0;
     if (s_prev_vprintf) {
         va_list args_uart;
@@ -150,43 +223,100 @@ static int udp_log_vprintf_hook(const char *fmt, va_list args)
         va_end(args_uart);
     }
 
-    /* 2. Format into a stack buffer for UDP.  Truncates at BUF_SIZE - 1. */
-    char buf[UDP_LOG_BUF_SIZE];
-    int  n = vsnprintf(buf, sizeof(buf), fmt, args);
+    /* 2. Format into a per-call stack buffer. */
+    char line[UDP_LOG_LINE_MAX];
+    int n = vsnprintf(line, sizeof(line), fmt, args);
     if (n < 0) n = 0;
-    size_t len = ((size_t)n < sizeof(buf)) ? (size_t)n : sizeof(buf) - 1;
+    size_t llen = ((size_t)n < sizeof(line)) ? (size_t)n : sizeof(line) - 1;
+    if (llen == 0) return ret;
 
-    /* 3. Lazy-init the socket (no-op after first successful creation). */
-    int fd = atomic_load(&s_sock);
-    if (fd == -1) {
+    /* 3. Lazy socket creation on first use. */
+    if (atomic_load(&s_sock) == -1) {
         udp_lazy_init();
-        fd = atomic_load(&s_sock);
+        if (atomic_load(&s_sock) == -1) return ret;
     }
 
-    /* 4. Best-effort UDP send.  Silently drop on any error (ENETUNREACH
-     *    before Wi-Fi is up, EAGAIN if the TX buffer is full, etc.). */
-    if (fd != -1 && len > 0) {
-        sendto(fd, buf, len, 0,
-               (struct sockaddr *)&s_dest, sizeof(s_dest));
+    if (!s_acc_mutex) return ret;
+
+    /* 4. Trylock the accumulator.  Contention is rare (only against the
+     *    flush task during its drain), and dropping a line on contention
+     *    is preferable to ever blocking a logging callsite. */
+    if (xSemaphoreTake(s_acc_mutex, 0) != pdTRUE) return ret;
+
+    /* If this line would overflow the accumulator, flush first. */
+    if (s_acc_len + llen > sizeof(s_acc_buf)) {
+        flush_locked();
     }
 
+    /* If a single line is bigger than the entire datagram, send it
+     * standalone (truncated).  This is a degenerate case -- long lines
+     * are rare and capped by UDP_LOG_LINE_MAX anyway. */
+    if (llen > sizeof(s_acc_buf)) {
+        memcpy(s_acc_buf, line, sizeof(s_acc_buf));
+        s_acc_len = sizeof(s_acc_buf);
+        flush_locked();
+    } else {
+        memcpy(s_acc_buf + s_acc_len, line, llen);
+        s_acc_len += llen;
+        s_acc_last_add = xTaskGetTickCount();
+    }
+
+    xSemaphoreGive(s_acc_mutex);
     return ret;
+}
+
+/* --------------------------------------------------------------------------
+ * Flush task -- drains the accumulator on the idle timer.
+ * -------------------------------------------------------------------------- */
+static void flush_task_fn(void *arg)
+{
+    (void)arg;
+    const TickType_t poll_ticks    = pdMS_TO_TICKS(UDP_LOG_POLL_MS);
+    const TickType_t timeout_ticks = pdMS_TO_TICKS(UDP_LOG_FLUSH_TIMEOUT_MS);
+
+    while (s_running) {
+        vTaskDelay(poll_ticks);
+        if (!s_acc_mutex) continue;
+        if (xSemaphoreTake(s_acc_mutex, portMAX_DELAY) != pdTRUE) continue;
+
+        if (s_acc_len > 0 &&
+            (xTaskGetTickCount() - s_acc_last_add) >= timeout_ticks) {
+            flush_locked();
+        }
+
+        xSemaphoreGive(s_acc_mutex);
+    }
+
+    s_flush_task = NULL;
+    vTaskDelete(NULL);
 }
 
 /* --------------------------------------------------------------------------
  * Public API
  * -------------------------------------------------------------------------- */
-
 esp_err_t udp_log_init(void)
 {
     if (s_installed) return ESP_OK;
 
     s_init_mutex = xSemaphoreCreateMutex();
-    if (!s_init_mutex) {
+    s_acc_mutex  = xSemaphoreCreateMutex();
+    if (!s_init_mutex || !s_acc_mutex) {
+        if (s_init_mutex) { vSemaphoreDelete(s_init_mutex); s_init_mutex = NULL; }
+        if (s_acc_mutex)  { vSemaphoreDelete(s_acc_mutex);  s_acc_mutex  = NULL; }
         return ESP_FAIL;
     }
 
-    /* Install the hook; save the previous handler for UART passthrough. */
+    s_running = true;
+    if (xTaskCreate(flush_task_fn, "udp_log", UDP_LOG_FLUSH_STACK, NULL,
+                    UDP_LOG_FLUSH_PRIO, &s_flush_task) != pdPASS) {
+        s_running = false;
+        vSemaphoreDelete(s_init_mutex);
+        vSemaphoreDelete(s_acc_mutex);
+        s_init_mutex = NULL;
+        s_acc_mutex  = NULL;
+        return ESP_FAIL;
+    }
+
     s_prev_vprintf = esp_log_set_vprintf(udp_log_vprintf_hook);
     s_installed    = true;
     return ESP_OK;
@@ -196,12 +326,13 @@ void udp_log_deinit(void)
 {
     if (!s_installed) return;
 
-    /* Restore the previous handler. */
     esp_log_set_vprintf(s_prev_vprintf);
     s_prev_vprintf = NULL;
     s_installed    = false;
 
-    /* Close the socket. */
+    /* Tell the flush task to exit; it will self-delete on the next tick. */
+    s_running = false;
+
     int fd = atomic_exchange(&s_sock, -1);
     if (fd >= 0) {
         close(fd);
@@ -210,6 +341,10 @@ void udp_log_deinit(void)
     if (s_init_mutex) {
         vSemaphoreDelete(s_init_mutex);
         s_init_mutex = NULL;
+    }
+    if (s_acc_mutex) {
+        vSemaphoreDelete(s_acc_mutex);
+        s_acc_mutex = NULL;
     }
 }
 
