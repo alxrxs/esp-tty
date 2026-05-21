@@ -58,6 +58,7 @@ at all.
 | [ssh_keepalive](ssh_keepalive/) | SSH-protocol-level keepalive: tracks idle time, dispatches `keepalive@openssh.com`, drops the session after N misses | `test/native/test_ssh_keepalive/` |
 | [term_resize](term_resize/) | Formats the xterm `\033[8;<rows>;<cols>t` CSI sequence for injection into the USB-bound ring on SSH window-change events | `test/native/test_term_resize/` |
 | [usb_cdc_drain](usb_cdc_drain/) | TinyUSB CDC RX drain loop; reads the FIFO to exhaustion 64 bytes at a time, forwarding to the ring and scrollback buffer | `test/native/test_cdc_drain/` |
+| [util](util/) | Shared utilities: `zeroize(volatile void *, size_t)` for wiping key material in a way the optimiser cannot elide | `test/native/test_util/` |
 | [wifi_state](wifi_state/) | Pure decision function for the bootstrap-PSK ↔ WPA3-Enterprise state machine: given cert / clock / retry-count state, returns ENTERPRISE / BOOTSTRAP_NTP_ONLY / BOOTSTRAP_FULL | `test/native/test_wifi_state/` |
 
 ## Further reading

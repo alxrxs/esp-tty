@@ -25,7 +25,7 @@ See `scep_proto.h` for full doc comments with RFC section references.
 | `scep_build_pkimessage_pkcsreq` | Build a PKCSReq pkiMessage: `SignedData(EnvelopedData(CSR))` |
 | `scep_parse_certrep` | Parse a CertRep response, decrypt the EnvelopedData, extract the issued cert DER, return pkiStatus / failInfo |
 | `scep_parse_getcacert` | Parse the degenerate-PKCS#7 GetCACert response into a CA + RA-sign + RA-encrypt bundle (pointers alias the input buffer) |
-| `scep_parse_pkimessage_pkcsreq_for_test` | Reverse of `scep_build_pkimessage_pkcsreq`, compiled only with `-DSCEP_PROTO_TEST_HELPERS` |
+| `scep_parse_pkimessage_pkcsreq_for_test` | Reverse of `scep_build_pkimessage_pkcsreq`.  Declared in the separate `scep_proto_test_helpers.h`, included only by tests built with `-DSCEP_PROTO_TEST_HELPERS` |
 
 EnvelopedData content encryption is AES-256-CBC; signatures and signed
 attributes follow CMS / PKCS#7. The library does no transport: callers
