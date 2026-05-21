@@ -4,6 +4,7 @@
 #   make build  [DEVNAME] [MODEL]   Compile firmware (no upload)
 #   make flash  [DEVNAME] [MODEL]   Compile + flash over USB
 #   make ota    <DEVNAME|HOST> [MODEL]  Compile + upload over Wi-Fi (SSH, X25519+AES-GCM)
+#   make clean  [MODEL]             Wipe .pio/build/<env>/ to force cmake reconfigure
 #
 # Per-device configs (multi-ESP32 setups):
 #   Keep one main/config.<DEVNAME>.h per device. Each one starts with the
@@ -84,7 +85,7 @@ KNOWN_MODELS   := s3 s3zero
 ENV_OF_s3      := esp32s3
 ENV_OF_s3zero  := esp32s3_zero
 
-POSITIONALS := $(filter-out ota flash build test test-py,$(MAKECMDGOALS))
+POSITIONALS := $(filter-out ota flash build clean test test-py,$(MAKECMDGOALS))
 
 # Pick the model positional (whichever positional matches KNOWN_MODELS).
 MODEL_ARG := $(strip $(foreach p,$(POSITIONALS),$(if $(filter $(p),$(KNOWN_MODELS)),$(p),)))
@@ -125,7 +126,7 @@ OTA_TARGET := $(strip $(if $(DEV_FILE),\
   $(shell sed -nE 's|^[[:space:]]*//[[:space:]]*MAKE-OTA-IP:[[:space:]]*([^[:space:]]+).*|\1|p' $(DEV_FILE) | head -n1),\
   $(DEV_ARG)))
 
-.PHONY: flash build ota test test-py
+.PHONY: flash build ota test test-py clean
 
 # If two positionals are given but neither is a known model, the second one
 # is a typo -- error rather than silently swallow it via the catch-all below.
@@ -137,6 +138,12 @@ endif
 
 build:
 	$(PIO) run -e $(ENV)
+
+# Wipe .pio/build/<env>/ so the next build re-runs cmake configure.  Use this
+# when a CMake-time dependency (e.g. main/certs/scep_ca.pem appearing for the
+# first time) wasn't picked up because the cmake cache predates the file.
+clean:
+	$(PIO) run -e $(ENV) --target fullclean
 
 # Pure-Python tests for scripts/: no hardware, no network, no SSH.
 # Covers scripts/apply_managed_patches_cmake.py and the OTA wire protocol
@@ -190,7 +197,7 @@ ota:
 # Catch-all to swallow positional arguments so make doesn't try to build
 # them as targets.  Scoped to the targets that accept positionals --
 # otherwise `make typo` would silently succeed instead of erroring.
-ifneq (,$(filter ota flash build,$(MAKECMDGOALS)))
+ifneq (,$(filter ota flash build clean,$(MAKECMDGOALS)))
 %:
 	@:
 endif

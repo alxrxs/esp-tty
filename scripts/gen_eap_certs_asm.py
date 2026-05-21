@@ -62,7 +62,7 @@ def _scep_cert_present():
     )
 
 
-def _generate_asm_for_files(file_list, src_dir):
+def _generate_asm_for_files(file_list, src_dir, label):
     """
     Run data_file_embed_asm.cmake for each file that is missing its .S.
     Called at script-eval time so the .S files exist before SCons builds the
@@ -81,7 +81,7 @@ def _generate_asm_for_files(file_list, src_dir):
         ):
             continue
 
-        print("esp-tty: generating assembly for EAP-TLS cert: %s" % asm_name)
+        print("esp-tty: generating assembly for %s: %s" % (label, asm_name))
         cmd = [
             CMAKE_BIN,
             "-DDATA_FILE=" + data_file,
@@ -102,9 +102,9 @@ def _generate_asm_for_files(file_list, src_dir):
 
 def _generate_cert_asm():
     if _all_certs_present():
-        _generate_asm_for_files(CERT_FILES, CERT_DIR)
+        _generate_asm_for_files(CERT_FILES, CERT_DIR, "EAP-TLS cert")
     if _scep_cert_present():
-        _generate_asm_for_files(SCEP_CERT_FILES, CERT_DIR)
+        _generate_asm_for_files(SCEP_CERT_FILES, CERT_DIR, "SCEP CA bundle")
 
 
 # Run immediately at script-evaluation time -- before SCons reads sources.
