@@ -2,7 +2,8 @@
 
 ```
 boards/
-  esp32-s3-devkitc-1-n16r8.json    ESP32-S3-DevKitC-1 with 16 MB flash + 8 MB PSRAM
+  esp32-s3-devkitc-1-n16r8.json    ESP32-S3-DevKitC-1 with 16 MB flash + 8 MB OPI PSRAM
+  esp32-s3-zero.json               Waveshare ESP32-S3-Zero with 4 MB flash + 2 MB QSPI PSRAM
 ```
 
 PlatformIO resolves `board = <name>` by looking in this folder first, then
@@ -25,6 +26,8 @@ correct values up front so the banner stops lying.
 
 ## What each manifest declares
 
+### esp32-s3-devkitc-1-n16r8.json
+
 | Field                          | Value (n16r8)            | Why                                                |
 |--------------------------------|--------------------------|----------------------------------------------------|
 | `build.mcu`                    | `esp32s3`                | Target SoC                                         |
@@ -39,6 +42,24 @@ correct values up front so the banner stops lying.
 
 `platformio.ini` references the manifest by name on both the `esp32s3` and
 `wokwi` environments (`board = esp32-s3-devkitc-1-n16r8`).
+
+### esp32-s3-zero.json
+
+| Field                          | Value (zero)             | Why                                                |
+|--------------------------------|--------------------------|----------------------------------------------------|
+| `build.mcu`                    | `esp32s3`                | Target SoC (ESP32-S3FH4R2)                         |
+| `build.memory_type`            | `qio_qspi`               | QIO flash + QSPI PSRAM bus modes                   |
+| `build.flash_mode`             | `qio`                    | Quad I/O flash                                     |
+| `build.flash_size`             | `4MB`                    | 4 MB embedded flash on FH4R2                       |
+| `build.psram_type`             | `qspi`                   | Quad SPI PSRAM (2 MB embedded on FH4R2)            |
+| `build.partitions`             | `default_4MB.csv`        | Matches the 4 MB flash size (overridden in `platformio.ini`) |
+| `upload.flash_size`            | `4MB`                    | Banner + esptool argument                          |
+| `upload.maximum_size`          | `2031616`                | Size of `ota_0` in `partitions_zero.csv` (0x1F0000) |
+| `upload.maximum_ram_size`      | `327680`                 | 320 KB internal SRAM (PSRAM is separate)           |
+| `frameworks`                   | `arduino`, `espidf`      | Both build frameworks supported                    |
+
+`platformio.ini` references the manifest in the `esp32s3_zero` environment
+(`board = esp32-s3-zero`).
 
 ## Adding a new board variant
 

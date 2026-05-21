@@ -1,9 +1,9 @@
 # esp-tty -- convenience Makefile around PlatformIO
 #
 # Targets:
-#   make build                Compile firmware (no upload)
-#   make flash [DEVNAME]      Compile + flash over USB
-#   make ota   <DEVNAME|HOST> Compile + upload over Wi-Fi (SSH, X25519+AES-GCM)
+#   make build  [DEVNAME] [MODEL]   Compile firmware (no upload)
+#   make flash  [DEVNAME] [MODEL]   Compile + flash over USB
+#   make ota    <DEVNAME|HOST> [MODEL]  Compile + upload over Wi-Fi (SSH, X25519+AES-GCM)
 #
 # Per-device configs (multi-ESP32 setups):
 #   Keep one main/config.<DEVNAME>.h per device. Each one starts with the
@@ -27,10 +27,40 @@
 #   `make flash` and `make build` with no argument use the current
 #   main/config.h unchanged. `make flash <bogus>` errors out.
 #
+# Board model positional (MODEL):
+#   Pass a board model name after DEVNAME (or alone if no DEVNAME) to select
+#   the PlatformIO environment.  Known models and their ENV mappings:
+#     s3      (default) ESP32-S3-DevKitC-1 N16R8 -> env:esp32s3
+#     s3zero            Waveshare ESP32-S3-Zero   -> env:esp32s3_zero
+#
+#   Examples:
+#     make flash dell             # devname=dell, model defaults to s3 (env esp32s3)
+#     make flash dell s3          # same as above
+#     make flash dell s3zero      # devname=dell, model=s3zero (env esp32s3_zero)
+#     make ota   dell s3zero      # OTA build+upload, env esp32s3_zero
+#     make build s3zero           # build only, env esp32s3_zero, no devname change
+#
+#   If only one positional is given it is auto-detected: if main/config.<arg>.h
+#   exists it is treated as DEVNAME; if it matches a known model name it is
+#   treated as MODEL.  Explicit ENV=... always wins over the positional.
+#
+# Board environments (ENV=):
+#   esp32s3       (default) ESP32-S3-DevKitC-1 N16R8 -- 16 MB flash, 8 MB PSRAM
+#   esp32s3_zero            Waveshare ESP32-S3-Zero  --  4 MB flash, 2 MB PSRAM
+#
+#   make build ENV=esp32s3_zero
+#   make flash ENV=esp32s3_zero dell     # see Zero flashing note below
+#   make ota   ENV=esp32s3_zero dell
+#
+# Flashing the Waveshare ESP32-S3-Zero (no CH340, no auto-reset):
+#   The Zero has no USB-UART bridge and no auto-reset circuit.  To enter
+#   download mode: hold the BOOT button, tap RESET, then release BOOT.
+#   The ROM bootloader enumerates as VID:PID 303a:1001 (USB JTAG/serial).
+#   scripts/detect_upload_port.sh detects this automatically when no CH340
+#   is present.  If port detection fails, override: PORT=/dev/ttyACM1
+#
 # Other overrides:
 #   make flash ENV=esp32s3 PORT=/dev/ttyACM1
-
-ENV  ?= esp32s3
 
 # Prefer the project-local venv if present, fall back to a system-wide `pio` on PATH.
 PIO := $(shell \
@@ -45,6 +75,33 @@ PYTHON := $(shell \
   test -x venv/bin/python  && echo venv/bin/python  || \
   echo python3)
 
+# Positional argument parsing.
+#
+# Anything in MAKECMDGOALS that isn't a known target is a positional.  Up to
+# two positionals are accepted, in either order: a per-device config name
+# (main/config.<x>.h exists) and a board model name (in $(KNOWN_MODELS)).
+KNOWN_MODELS   := s3 s3zero
+ENV_OF_s3      := esp32s3
+ENV_OF_s3zero  := esp32s3_zero
+
+POSITIONALS := $(filter-out ota flash build test test-py,$(MAKECMDGOALS))
+
+# Pick the model positional (whichever positional matches KNOWN_MODELS).
+MODEL_ARG := $(strip $(foreach p,$(POSITIONALS),$(if $(filter $(p),$(KNOWN_MODELS)),$(p),)))
+
+# The non-model positional, if any, is the devname (or raw IP for `ota`).
+DEV_ARG  := $(firstword $(filter-out $(KNOWN_MODELS),$(POSITIONALS)))
+DEV_FILE := $(wildcard main/config.$(DEV_ARG).h)
+
+# Resolve ENV: explicit `make ENV=...` wins; else model positional; else default.
+ifeq ($(origin ENV),command line)
+  # honor the override
+else ifneq ($(MODEL_ARG),)
+  ENV := $(ENV_OF_$(MODEL_ARG))
+else
+  ENV := esp32s3
+endif
+
 # Auto-detect the upload port by USB Vendor ID, not by device-name pattern.
 #
 # Why VID-based detection: this firmware exposes the ESP32-S3's native USB
@@ -52,20 +109,14 @@ PYTHON := $(shell \
 # macOS Big Sur+, that CDC interface enumerates with the SAME name pattern
 # (/dev/ttyACM*, /dev/cu.usbmodem*) as a USB-UART bridge -- so we can't tell
 # them apart by filename. The helper script asks the kernel which node
-# belongs to the CH340/CH343 bridge (VID 0x1A86) and prints that.
+# belongs to the CH340/CH343 bridge (VID 0x1A86) -- and on Zero-class boards
+# without a CH340, falls back to the ESP32-S3 ROM bootloader (303a:1001).
 #
-# Falls back to PlatformIO's own auto-detect when the helper finds nothing.
 # Override at any time with: make flash PORT=/dev/...
 PORT ?= $(shell scripts/detect_upload_port.sh)
 UPLOAD_FLAGS := $(if $(PORT),--upload-port $(PORT),)
 
 FIRMWARE_BIN := .pio/build/$(ENV)/firmware.bin
-
-# Positional argument: the first command-line goal that isn't a known target.
-# May name a per-device config (main/config.<DEV_ARG>.h exists) or, for `ota`
-# only, a raw IP/hostname.
-DEV_ARG  := $(firstword $(filter-out ota flash build test test-py,$(MAKECMDGOALS)))
-DEV_FILE := $(wildcard main/config.$(DEV_ARG).h)
 
 # OTA destination: parsed from MAKE-OTA-IP in the matched config file, or
 # DEV_ARG itself if no config file matched. Empty if no DEV_ARG was given,
@@ -75,6 +126,14 @@ OTA_TARGET := $(strip $(if $(DEV_FILE),\
   $(DEV_ARG)))
 
 .PHONY: flash build ota test test-py
+
+# If two positionals are given but neither is a known model, the second one
+# is a typo -- error rather than silently swallow it via the catch-all below.
+ifeq ($(words $(POSITIONALS)),2)
+  ifeq ($(MODEL_ARG),)
+    $(error two positional args given but neither is a known board model: '$(POSITIONALS)'. Known models: $(KNOWN_MODELS))
+  endif
+endif
 
 build:
 	$(PIO) run -e $(ENV)
@@ -128,10 +187,10 @@ ota:
 	$(PIO) run -e $(ENV)
 	$(PYTHON) scripts/ota_send.py $(OTA_TARGET) $(FIRMWARE_BIN)
 
-# Catch-all to swallow the positional argument so make doesn't try to build
-# it as a target. Scoped to `ota`/`flash` invocations only -- otherwise
-# `make typo` would silently succeed instead of erroring.
-ifneq (,$(filter ota flash,$(MAKECMDGOALS)))
+# Catch-all to swallow positional arguments so make doesn't try to build
+# them as targets.  Scoped to the targets that accept positionals --
+# otherwise `make typo` would silently succeed instead of erroring.
+ifneq (,$(filter ota flash build,$(MAKECMDGOALS)))
 %:
 	@:
 endif

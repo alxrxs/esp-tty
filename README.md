@@ -56,14 +56,25 @@ is rejected before any key material is inspected.
 
 ## Hardware
 
-Target: **Espressif ESP32-S3-DevKitC-1 N16R8** -- 16 MB QIO flash, 8 MB
-OPI PSRAM. PSRAM holds the ring buffers and scrollback; flash holds the
-A/B OTA partitions.
+Two boards are supported out of the box:
 
-Other ESP32-S3 modules work with adjustments to `partitions.csv`
-(currently sized for 16 MB) and `boards/esp32-s3-devkitc-1-n16r8.json`
-(PSRAM type). Boards without PSRAM need the ring sizes and scrollback
-capacity reduced to fit internal SRAM.
+| | ESP32-S3-DevKitC-1 N16R8 | Waveshare ESP32-S3-Zero |
+|---|---|---|
+| PlatformIO env | `esp32s3` (default) | `esp32s3_zero` |
+| Flash | 16 MB QIO external | 4 MB QIO embedded (FH4R2) |
+| PSRAM | 8 MB OPI (Octal) | 2 MB QSPI (Quad, embedded) |
+| OTA slot size | 4 MB each | ~1.94 MB each |
+| USB | CH340 UART + native USB | Native USB only |
+| Auto-reset | Yes | No -- hold BOOT, tap RESET |
+| Boot log | CH340 → `/dev/ttyACM0` | UART0 on GPIO43/44 pads |
+| Form factor | 51 × 28 mm devkit | 22 × 18 mm stamp module |
+
+The Zero is a good fit when size matters. The trade-offs are tighter OTA
+slots (~1.94 MB vs 4 MB), no USB-UART bridge (debug logs require an
+external USB-UART dongle clipped to GPIO43/44), and manual boot-mode entry
+for flashing (no transistor auto-reset circuit).
+
+### DevKitC-1 USB interfaces
 
 The DevKitC exposes two USB interfaces on the same cable:
 
@@ -82,6 +93,20 @@ circuit interprets as a reset pulse -- so `cat /dev/ttyACM0` reboots the
 chip. Use `picocom --noreset`, `pio device monitor`, or pyserial with
 `setRTS(False) / setDTR(False)` to read the console without resetting.
 `make flash` drives this circuit on purpose and works reliably.
+
+### ESP32-S3-Zero flashing
+
+The Zero has no CH340 and no auto-reset circuit. To enter download mode:
+hold the BOOT button, tap RESET, release BOOT. The ROM bootloader
+enumerates as `303a:1001` (USB JTAG/serial); `scripts/detect_upload_port.sh`
+detects it automatically when no CH340 is present. Flash with:
+
+```
+make flash ENV=esp32s3_zero
+```
+
+Debug logs (ESP-IDF `ESP_LOG*`) go to UART0 on GPIO43 (TX) and GPIO44 (RX)
+pads. Connect an external USB-UART dongle at 115200 baud to read them.
 
 ## Quick start
 
@@ -292,16 +317,20 @@ gitignored.
 
 | Env | Purpose | Build flag |
 |---|---|---|
-| `esp32s3` | real ESP32-S3 hardware | -- |
+| `esp32s3` | ESP32-S3-DevKitC-1 N16R8 hardware | -- |
+| `esp32s3_zero` | Waveshare ESP32-S3-Zero hardware | `-DESPTTY_BOARD_ZERO` |
 | `wokwi` | Wokwi simulator + QEMU smoke tests | `-DBRIDGE_LOOPBACK=1` (rings wired back-to-back, TinyUSB bypassed) |
 | `native` | host unit tests | `-DRING_NATIVE=1 -DUNIT_TEST` (plus stubs from `test/stubs/`) |
 
 ```
-make build              # esp32s3
-make flash              # esp32s3 + USB upload
-make ota <target>       # esp32s3 + OTA upload
-make test               # native unit tests + pytest scripts
-pio run -e wokwi        # Wokwi build (no flash)
+make build                          # esp32s3
+make build ENV=esp32s3_zero         # Zero build
+make flash                          # esp32s3 + USB upload
+make flash ENV=esp32s3_zero         # Zero: hold BOOT+RESET first
+make ota <target>                   # esp32s3 + OTA upload
+make ota ENV=esp32s3_zero <target>  # Zero OTA upload
+make test                           # native unit tests + pytest scripts
+pio run -e wokwi                    # Wokwi build (no flash)
 ```
 
 ## Tests
@@ -331,9 +360,11 @@ every library in `lib/` end-to-end plus the helpers extracted from
 | [`patches/`](patches/README.md) | Patches applied to `managed_components/` at cmake configure |
 | [`scripts/`](scripts/README.md) | Build hooks, OTA client, key generation, port detection |
 | [`test/`](test/README.md) | Native unit tests, QEMU/Wokwi configs, pytest scripts, stubs |
-| `partitions.csv` | 16 MB A/B OTA partition table |
+| `partitions.csv` | 16 MB A/B OTA partition table (DevKitC-1) |
+| `partitions_zero.csv` | 4 MB A/B OTA partition table (ESP32-S3-Zero) |
 | `platformio.ini` | Build environment definitions |
 | `sdkconfig.defaults` | Base ESP-IDF sdkconfig overrides |
+| `sdkconfig.zero.defaults` | Delta sdkconfig overrides for the Zero (4 MB flash, QSPI PSRAM) |
 | `Makefile` | `make build` / `make flash` / `make ota` wrappers around PlatformIO |
 | `requirements.txt` | Python dependencies (PlatformIO, paramiko, cryptography) |
 
