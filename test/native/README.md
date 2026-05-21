@@ -63,6 +63,8 @@ full description of what is exercised.
 | `test_cred_store_integration` | end-to-end: FakeNdesCA-issued cert -> parse -> save -> load |
 | `test_wifi_state` | `lib/wifi_state/` -- bootstrap state-machine truth table |
 | `test_cert_renewer` | `lib/cert_renewer/` -- clock + renewal-window decision |
+| `test_udp_log` | `lib/udp_log/` -- vprintf hook formatting, truncation, ANSI passthrough, UART chain order, fd-not-ready path |
+| `test_util` | `lib/util/` -- `zeroize()` clears buffer / zero-len no-op / single-byte |
 
 ## Conventions
 
