@@ -107,6 +107,8 @@ make flash ENV=esp32s3_zero
 
 Debug logs (ESP-IDF `ESP_LOG*`) go to UART0 on GPIO43 (TX) and GPIO44 (RX)
 pads. Connect an external USB-UART dongle at 115200 baud to read them.
+Set `UDP_LOG_HOST`/`UDP_LOG_PORT` in `config.h` to mirror ESP_LOG to UDP.
+Useful on the Zero, which lacks the CH340.
 
 ## Quick start
 
@@ -223,6 +225,8 @@ is synced. Each boot, the state machine picks one of three paths:
 | **ENTERPRISE** | Cert in NVS; clock synced + valid, or `EAP_DISABLE_TIME_CHECK` set | Join `WIFI_ENTERPRISE_SSID` via EAP-TLS |
 | **BOOTSTRAP_NTP_ONLY** | Cert in NVS; `NTP_BEFORE_EAPTLS` set; clock not synced | Join `WIFI_SSID` (PSK), sync NTP only, loop back to ENTERPRISE |
 | **BOOTSTRAP_FULL** | No cert, cert known-expired, or too many EAP-TLS failures (`WIFI_ENTERPRISE_RETRY_MAX`) | Join `WIFI_SSID` (PSK), sync NTP, run SCEP, store the new cert, reboot |
+
+Bootstrap PSK always uses DHCP regardless of `USE_STATIC_IPV4`. Static addressing applies only on the enterprise network.
 
 A successful SCEP exchange against real NDES takes ~9 s end-to-end
 (RSA-2048 keygen dominates).

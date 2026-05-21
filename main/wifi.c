@@ -67,6 +67,10 @@
 #include "config.h"   /* WIFI_SSID, WIFI_PASS, and optionally EAP_IDENTITY */
 #endif
 
+/* UDP log mirror -- included after config.h so UDP_LOG_HOST / UDP_LOG_PORT
+ * are visible.  The header provides no-op stubs when the macros are absent. */
+#include "udp_log.h"
+
 #ifdef WIFI_USE_ENTERPRISE
 #include "esp_eap_client.h"
 #endif
@@ -282,6 +286,22 @@ static int                s_retry_num = 0;
 /* Kept so the enterprise extension point can call esp_netif_get_ip_info()
  * from a task if needed. */
 static esp_netif_t *s_sta_netif = NULL;
+
+/* PSK bootstrap active flag (Mode B+ / C only).
+ *
+ * Set true in wifi_mode_psk() before esp_wifi_start() and cleared false in
+ * wifi_mode_enterprise() before esp_wifi_start().  The WIFI_EVENT_STA_CONNECTED
+ * handler uses this to choose between DHCP and static IPv4 when USE_STATIC_IPV4
+ * is defined: the bootstrap PSK network is transient (seconds) and may reside
+ * on a different subnet from the production enterprise network, so it always
+ * uses DHCP regardless of the USE_STATIC_IPV4 setting.  Static addressing
+ * applies only after the enterprise SSID is joined.
+ *
+ * Only compiled when WIFI_ENTERPRISE_SSID is defined (smart mode only); in
+ * Mode A/B this flag is unused and the compiler removes it entirely. */
+#ifdef WIFI_ENTERPRISE_SSID
+static bool s_psk_bootstrap_active = false;
+#endif
 
 /* DHCP watchdog: armed on STA_CONNECTED, disarmed on STA_GOT_IP.  If it
  * fires before an IP arrives, we kick the DHCP client and re-arm.
@@ -696,6 +716,24 @@ static void wifi_event_handler(void *arg,
 #endif
 
 #ifdef USE_STATIC_IPV4
+# ifdef WIFI_ENTERPRISE_SSID
+            if (s_psk_bootstrap_active) {
+                /* PSK bootstrap is transient and may be on a different subnet
+                 * from the production enterprise network -- use DHCP regardless
+                 * of the USE_STATIC_IPV4 setting.  Ensure the DHCP client is
+                 * running.
+                 *
+                 * E2E note: the expected behaviour (not testable without a real
+                 * two-subnet network) is that DHCP assigns a lease on the PSK
+                 * subnet, the on_ip() callback runs (NTP sync / SCEP), and then
+                 * wifi_mode_psk() calls esp_wifi_stop().  On the subsequent
+                 * wifi_mode_enterprise() call s_psk_bootstrap_active is false,
+                 * so apply_static_ipv4() runs normally for the enterprise
+                 * interface. */
+                esp_netif_dhcpc_start(s_sta_netif);
+                /* No IP yet -- let IP_EVENT_STA_GOT_IP fire later. */
+            } else {
+# endif /* WIFI_ENTERPRISE_SSID */
             /* Apply static address at L2-connect time so the routing table
              * is populated before we signal success. */
             apply_static_ipv4();
@@ -716,11 +754,26 @@ static void wifi_event_handler(void *arg,
 #if !defined(BRIDGE_LOOPBACK) && defined(NTP_ENABLE)
             ntp_dispatch_start();
 #endif
+#if defined(UDP_LOG_HOST) && defined(UDP_LOG_PORT)
+            udp_log_init();
+#endif
+# ifdef WIFI_ENTERPRISE_SSID
+            } /* end else (not psk_bootstrap_active) */
+# endif /* WIFI_ENTERPRISE_SSID */
 #endif /* USE_STATIC_IPV4 */
 
-            /* Bring up IPv6 (SLAAC / DHCPv6 / static) now that L2 is up. */
+            /* Bring up IPv6 (SLAAC / DHCPv6 / static) now that L2 is up.
+             * On the PSK bootstrap network (transient), skip static IPv6
+             * addressing -- it belongs to the production enterprise interface.
+             * SLAAC and DHCPv6 modes still bring up link-local normally. */
 #if IPV6_MODE != IPV6_MODE_DISABLED && defined(CONFIG_LWIP_IPV6)
+# if IPV6_MODE == IPV6_MODE_STATIC && defined(WIFI_ENTERPRISE_SSID)
+            if (!s_psk_bootstrap_active) {
+                ipv6_bring_up();
+            }
+# else
             ipv6_bring_up();
+# endif
 #endif
 
         } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
@@ -762,11 +815,25 @@ static void wifi_event_handler(void *arg,
     } else if (event_base == IP_EVENT) {
 
         if (event_id == IP_EVENT_STA_GOT_IP) {
-#ifndef USE_STATIC_IPV4
+#if !defined(USE_STATIC_IPV4) || defined(WIFI_ENTERPRISE_SSID)
             /* DHCPv4 path: print the assigned address and signal ready.
-             * Under static IP this event may still fire (esp-netif raises it
-             * when the netif IP changes), but we already logged and signalled
-             * in the STA_CONNECTED handler, so skip it to avoid duplicates. */
+             *
+             * When USE_STATIC_IPV4 is defined without WIFI_ENTERPRISE_SSID
+             * (Mode A/B static), this event may still fire when esp-netif
+             * raises it on netif IP change, but we already logged and
+             * signalled in the STA_CONNECTED handler, so skip it.
+             *
+             * When WIFI_ENTERPRISE_SSID is also defined (Mode B+/C smart),
+             * the PSK bootstrap path runs DHCP even if USE_STATIC_IPV4 is
+             * set (s_psk_bootstrap_active); in that case this event carries
+             * the DHCP-assigned bootstrap IP and must signal CONNECTED_BIT.
+             * The static-IP path in STA_CONNECTED already handles the
+             * enterprise interface (s_psk_bootstrap_active == false). */
+# if defined(USE_STATIC_IPV4) && defined(WIFI_ENTERPRISE_SSID)
+            /* Only process if we're on the PSK bootstrap DHCP path. */
+            if (!s_psk_bootstrap_active) goto ip_event_done;
+# endif
+            {
             ip_event_got_ip_t *ev = (ip_event_got_ip_t *)event_data;
 
             /* ----------------------------------------------------------------
@@ -777,7 +844,7 @@ static void wifi_event_handler(void *arg,
             ESP_LOGI(TAG, "Netmask    : " IPSTR, IP2STR(&ev->ip_info.netmask));
             ESP_LOGI(TAG, "Gateway    : " IPSTR, IP2STR(&ev->ip_info.gw));
 
-#if DHCP_RETRY_TIMEOUT_SEC > 0
+#if DHCP_RETRY_TIMEOUT_SEC > 0 && !defined(USE_STATIC_IPV4)
             /* DHCP succeeded -- disarm the watchdog. */
             if (s_dhcp_watchdog) xTimerStop(s_dhcp_watchdog, 0);
 #endif
@@ -790,7 +857,14 @@ static void wifi_event_handler(void *arg,
 #if !defined(BRIDGE_LOOPBACK) && defined(NTP_ENABLE)
             ntp_dispatch_start();
 #endif
-#endif /* !USE_STATIC_IPV4 */
+#if defined(UDP_LOG_HOST) && defined(UDP_LOG_PORT)
+            udp_log_init();
+#endif
+            }
+# if defined(USE_STATIC_IPV4) && defined(WIFI_ENTERPRISE_SSID)
+            ip_event_done: ;
+# endif
+#endif /* !USE_STATIC_IPV4 || WIFI_ENTERPRISE_SSID */
 
 #if IPV6_MODE != IPV6_MODE_DISABLED && defined(CONFIG_LWIP_IPV6)
         } else if (event_id == IP_EVENT_GOT_IP6) {
@@ -1203,6 +1277,12 @@ static esp_err_t wifi_mode_psk(const char *ssid,
                          WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
     s_retry_num = 0;
 
+    /* Mark PSK bootstrap as active BEFORE esp_wifi_start() so the event
+     * handler sees the flag when WIFI_EVENT_STA_CONNECTED fires.  This
+     * causes USE_STATIC_IPV4 builds to use DHCP on this transient network
+     * instead of trying to apply the production static address. */
+    s_psk_bootstrap_active = true;
+
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &cfg));
     ESP_ERROR_CHECK(esp_wifi_start());
@@ -1216,6 +1296,7 @@ static esp_err_t wifi_mode_psk(const char *ssid,
 
     if (!(bits & WIFI_CONNECTED_BIT)) {
         ESP_LOGE(TAG, "[smart] PSK connect to \"%s\" failed", ssid);
+        s_psk_bootstrap_active = false;
         esp_wifi_stop();
         return ESP_FAIL;
     }
@@ -1559,6 +1640,11 @@ static esp_err_t wifi_mode_enterprise(const char         *ssid,
     xEventGroupClearBits(s_wifi_event_group,
                          WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
     s_retry_num = 0;
+
+    /* Clear PSK-bootstrap flag BEFORE esp_wifi_start() so the event handler
+     * sees that we are now on the enterprise (production) network and applies
+     * USE_STATIC_IPV4 addressing if configured. */
+    s_psk_bootstrap_active = false;
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &cfg));

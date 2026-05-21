@@ -76,6 +76,7 @@ idf_component_register(
     SRCS
         "main.c"
         "wifi.c"
+        "${CMAKE_CURRENT_LIST_DIR}/../lib/udp_log/udp_log.c"
         "usb_cdc.c"
         "${CMAKE_CURRENT_LIST_DIR}/../lib/ring/ring.c"
         "${CMAKE_CURRENT_LIST_DIR}/../lib/bridge/bridge.c"
@@ -96,6 +97,7 @@ idf_component_register(
         "${CMAKE_CURRENT_LIST_DIR}/../lib/scep_transport/scep_transport.c"
     INCLUDE_DIRS
         "."
+        "${CMAKE_CURRENT_LIST_DIR}/../lib/udp_log"
         "${CMAKE_CURRENT_LIST_DIR}/../lib/ring"
         "${CMAKE_CURRENT_LIST_DIR}/../lib/bridge"
         "${CMAKE_CURRENT_LIST_DIR}/../lib/usb_cdc_drain"

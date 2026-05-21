@@ -240,6 +240,13 @@
  * Default (USE_STATIC_IPV4 undefined): DHCPv4 with watchdog.
  * Define USE_STATIC_IPV4 for a fixed address; then STATIC_IPV4_ADDRESS,
  * STATIC_IPV4_NETMASK and STATIC_IPV4_GATEWAY are required.
+ *
+ * Mode B+ / Mode C note: when WIFI_ENTERPRISE_SSID is also defined, the
+ * PSK bootstrap phase (WIFI_SSID) always uses DHCP even if USE_STATIC_IPV4
+ * is set.  The static address is applied only when joining the enterprise
+ * network.  This is intentional: the bootstrap PSK network is transient
+ * (seconds, used only for NTP sync / SCEP) and typically lives on a
+ * different subnet from the production enterprise network.
  * ========================================================================== */
 /*
 #define USE_STATIC_IPV4
@@ -295,6 +302,33 @@
  * than one entry. NTP_TIMEZONE is a POSIX TZ string; max 64 chars.
  * NTP_SYNC_TIMEOUT_SEC only controls log verbosity during the initial
  * connect window; the client keeps running afterwards. */
+
+/* ==========================================================================
+ * UDP log mirror (lib/udp_log/)
+ *
+ * When both macros are defined, every ESP_LOG* line is mirrored as a UDP
+ * datagram to the specified host/port in addition to the normal UART0
+ * output.  Useful on the Zero, which lacks the CH340 UART bridge, or any
+ * time tailing the serial console is inconvenient.
+ *
+ * Capture on a Linux/macOS laptop with:
+ *   nc -ul 5514
+ *
+ * UDP_LOG_HOST: destination IPv4 address (dotted-decimal string, required).
+ * UDP_LOG_PORT: destination UDP port (integer, required).
+ *
+ * Log lines produced before Wi-Fi gets an IP are never sent via UDP --
+ * they appear only on UART0.  After udp_log_init() is called (triggered
+ * automatically by the IP_EVENT_STA_GOT_IP event handler) all subsequent
+ * ESP_LOG* calls are mirrored.  Best-effort: if Wi-Fi drops, datagrams
+ * are silently discarded and UART0 output is unaffected.
+ *
+ * ANSI colour escape codes are forwarded verbatim.
+ * ========================================================================== */
+/*
+#define UDP_LOG_HOST  "10.57.16.10"
+#define UDP_LOG_PORT  5514
+*/
 
 /* ==========================================================================
  * mDNS / Bonjour
