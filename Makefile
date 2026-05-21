@@ -5,6 +5,7 @@
 #   make flash  [DEVNAME] [MODEL]   Compile + flash over USB
 #   make ota    <DEVNAME|HOST> [MODEL]  Compile + upload over Wi-Fi (SSH, X25519+AES-GCM)
 #   make clean  [MODEL]             Wipe .pio/build/<env>/ to force cmake reconfigure
+#                                   (no MODEL = clean every board env)
 #
 # Per-device configs (multi-ESP32 setups):
 #   Keep one main/config.<DEVNAME>.h per device. Each one starts with the
@@ -95,13 +96,20 @@ DEV_ARG  := $(firstword $(filter-out $(KNOWN_MODELS),$(POSITIONALS)))
 DEV_FILE := $(wildcard main/config.$(DEV_ARG).h)
 
 # Resolve ENV: explicit `make ENV=...` wins; else model positional; else default.
+# ENV_EXPLICIT records whether the user named a specific env -- used by `make
+# clean` to decide between cleaning one env or all of them.
+ENV_EXPLICIT := no
 ifeq ($(origin ENV),command line)
-  # honor the override
+  ENV_EXPLICIT := yes
 else ifneq ($(MODEL_ARG),)
+  ENV_EXPLICIT := yes
   ENV := $(ENV_OF_$(MODEL_ARG))
 else
   ENV := esp32s3
 endif
+
+# Full list of board envs, used by `make clean` when no env was specified.
+ALL_BOARD_ENVS := esp32s3 esp32s3_zero
 
 # Auto-detect the upload port by USB Vendor ID, not by device-name pattern.
 #
@@ -142,8 +150,19 @@ build:
 # Wipe .pio/build/<env>/ so the next build re-runs cmake configure.  Use this
 # when a CMake-time dependency (e.g. main/certs/scep_ca.pem appearing for the
 # first time) wasn't picked up because the cmake cache predates the file.
+#
+#   make clean              # cleans every board env
+#   make clean s3zero       # cleans only esp32s3_zero
+#   make clean ENV=esp32s3  # cleans only esp32s3 (explicit override)
 clean:
+ifeq ($(ENV_EXPLICIT),yes)
 	$(PIO) run -e $(ENV) --target fullclean
+else
+	@for env in $(ALL_BOARD_ENVS); do \
+	    echo ">> fullclean $$env"; \
+	    $(PIO) run -e $$env --target fullclean; \
+	done
+endif
 
 # Pure-Python tests for scripts/: no hardware, no network, no SSH.
 # Covers scripts/apply_managed_patches_cmake.py and the OTA wire protocol
