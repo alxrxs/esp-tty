@@ -228,12 +228,232 @@ void test_empty_format_no_send(void)
     TEST_ASSERT_EQUAL_INT(1, g_uart_calls);
 }
 
+/* ==========================================================================
+ * Accumulator harness -- mirrors the udp_log.c coalescing + sequence logic
+ * ==========================================================================
+ *
+ * The hook in the live code does roughly:
+ *   1. UART passthrough (covered by tests above)
+ *   2. format line into 256-byte stack buf
+ *   3. if line + acc_len > DGRAM_MAX: flush_locked()  -- inline overflow send
+ *   4. if line > DGRAM_MAX: truncate and send standalone
+ *   5. else: append to accumulator
+ *
+ * The flush task does:
+ *   - if acc_len > 0 and idle for >= FLUSH_TIMEOUT_MS: flush_locked()
+ *
+ * flush_locked():
+ *   - if acc_len == 0: return
+ *   - if fd == -1: drop buffer, bump seq anyway (gap visible on receiver)
+ *   - else: sendto("#<seq>\n" + acc_buf), bump seq, reset acc_len
+ * ========================================================================== */
+
+#define ACC_DGRAM_MAX  1300
+#define ACC_SEQ_HDR    16
+
+static char       g_acc_buf[ACC_DGRAM_MAX];
+static size_t     g_acc_len = 0;
+static uint32_t   g_acc_seq = 0;
+static int        g_acc_fd  = 3;  /* >=0 means "ready" */
+
+/* Captured datagrams (up to 16 entries). */
+#define DGRAM_CAP 16
+static struct {
+    char   data[ACC_SEQ_HDR + ACC_DGRAM_MAX + 1];
+    size_t len;
+} g_dgrams[DGRAM_CAP];
+static int g_dgram_count = 0;
+
+static void accum_reset(void)
+{
+    memset(g_acc_buf, 0, sizeof(g_acc_buf));
+    g_acc_len = 0;
+    g_acc_seq = 0;
+    g_acc_fd  = 3;
+    memset(g_dgrams, 0, sizeof(g_dgrams));
+    g_dgram_count = 0;
+}
+
+/* Mirrors flush_locked() in udp_log.c.  Bumps seq even when fd=-1 so the
+ * receiver-side gap detection works. */
+static void accum_flush_locked(void)
+{
+    if (g_acc_len == 0) return;
+    if (g_acc_fd == -1) {
+        g_acc_len = 0;
+        g_acc_seq++;
+        return;
+    }
+    if (g_dgram_count < DGRAM_CAP) {
+        int hdr_n = snprintf(g_dgrams[g_dgram_count].data, ACC_SEQ_HDR,
+                             "#%u\n", (unsigned)g_acc_seq);
+        if (hdr_n < 0) hdr_n = 0;
+        memcpy(g_dgrams[g_dgram_count].data + hdr_n, g_acc_buf, g_acc_len);
+        g_dgrams[g_dgram_count].len = (size_t)hdr_n + g_acc_len;
+        g_dgram_count++;
+    }
+    g_acc_len = 0;
+    g_acc_seq++;
+}
+
+/* Mirrors the hook's append logic (steps 3-5 above).  Caller provides
+ * the already-formatted line (we skip the vsnprintf part since the
+ * line-formatting half is covered by the tests further up). */
+static void accum_append(const char *line, size_t llen)
+{
+    if (llen == 0) return;
+
+    if (g_acc_len + llen > sizeof(g_acc_buf)) {
+        accum_flush_locked();
+    }
+
+    if (llen > sizeof(g_acc_buf)) {
+        memcpy(g_acc_buf, line, sizeof(g_acc_buf));
+        g_acc_len = sizeof(g_acc_buf);
+        accum_flush_locked();
+    } else {
+        memcpy(g_acc_buf + g_acc_len, line, llen);
+        g_acc_len += llen;
+    }
+}
+
+static void accum_flush_idle(void) /* what the flush task fires */
+{
+    accum_flush_locked();
+}
+
+/* --------------------------------------------------------------------------
+ * Tests for the accumulator / sequence-number logic
+ * -------------------------------------------------------------------------- */
+
+void test_accum_single_short_line_buffers_no_send(void)
+{
+    accum_reset();
+    accum_append("hello\n", 6);
+    TEST_ASSERT_EQUAL_INT(0, g_dgram_count);
+    TEST_ASSERT_EQUAL_size_t(6, g_acc_len);
+    TEST_ASSERT_EQUAL_UINT32(0, g_acc_seq);
+}
+
+void test_accum_idle_flush_emits_one_datagram_with_header(void)
+{
+    accum_reset();
+    accum_append("first line\n", 11);
+    accum_append("second line\n", 12);
+    accum_flush_idle();
+
+    TEST_ASSERT_EQUAL_INT(1, g_dgram_count);
+    TEST_ASSERT_TRUE(strncmp(g_dgrams[0].data, "#0\n", 3) == 0);
+    TEST_ASSERT_NOT_NULL(strstr(g_dgrams[0].data, "first line"));
+    TEST_ASSERT_NOT_NULL(strstr(g_dgrams[0].data, "second line"));
+    TEST_ASSERT_EQUAL_size_t(0, g_acc_len);
+    TEST_ASSERT_EQUAL_UINT32(1, g_acc_seq);
+}
+
+void test_accum_overflow_triggers_inline_flush(void)
+{
+    accum_reset();
+    /* Fill close to the cap with a single big line (under DGRAM_MAX). */
+    char big[1200];
+    memset(big, 'a', sizeof(big));
+    accum_append(big, sizeof(big));
+    TEST_ASSERT_EQUAL_INT(0, g_dgram_count);  /* still buffered */
+
+    /* Next 200-byte line would overflow 1300 -- triggers flush, then appends. */
+    char next[200];
+    memset(next, 'b', sizeof(next));
+    accum_append(next, sizeof(next));
+
+    TEST_ASSERT_EQUAL_INT(1, g_dgram_count);  /* one datagram emitted */
+    TEST_ASSERT_EQUAL_size_t(200, g_acc_len); /* new line in fresh buffer */
+    TEST_ASSERT_EQUAL_UINT32(1, g_acc_seq);
+}
+
+void test_accum_sequence_increments_across_datagrams(void)
+{
+    accum_reset();
+    /* Flush three full datagrams. */
+    char big[1200];
+    memset(big, 'x', sizeof(big));
+    for (int i = 0; i < 3; i++) {
+        accum_append(big, sizeof(big));
+        accum_flush_idle();
+    }
+    TEST_ASSERT_EQUAL_INT(3, g_dgram_count);
+    TEST_ASSERT_TRUE(strncmp(g_dgrams[0].data, "#0\n", 3) == 0);
+    TEST_ASSERT_TRUE(strncmp(g_dgrams[1].data, "#1\n", 3) == 0);
+    TEST_ASSERT_TRUE(strncmp(g_dgrams[2].data, "#2\n", 3) == 0);
+    TEST_ASSERT_EQUAL_UINT32(3, g_acc_seq);
+}
+
+void test_accum_empty_flush_is_noop(void)
+{
+    accum_reset();
+    accum_flush_idle();
+    TEST_ASSERT_EQUAL_INT(0, g_dgram_count);
+    TEST_ASSERT_EQUAL_UINT32(0, g_acc_seq);  /* no seq bump on empty */
+}
+
+void test_accum_fd_unavailable_still_bumps_seq(void)
+{
+    accum_reset();
+    g_acc_fd = -1;  /* simulate pre-Wi-Fi / socket gone */
+    accum_append("data we will never send\n", 24);
+    accum_flush_idle();
+
+    TEST_ASSERT_EQUAL_INT(0, g_dgram_count); /* nothing captured */
+    TEST_ASSERT_EQUAL_UINT32(1, g_acc_seq);  /* but seq advanced */
+    TEST_ASSERT_EQUAL_size_t(0, g_acc_len);  /* buffer dropped */
+}
+
+void test_accum_oversize_line_truncated_standalone(void)
+{
+    accum_reset();
+    /* Single "line" larger than DGRAM_MAX -- gets truncated and sent solo. */
+    char huge[2000];
+    memset(huge, 'z', sizeof(huge));
+    accum_append(huge, sizeof(huge));
+
+    TEST_ASSERT_EQUAL_INT(1, g_dgram_count);
+    TEST_ASSERT_TRUE(strncmp(g_dgrams[0].data, "#0\n", 3) == 0);
+    /* Truncated to exactly DGRAM_MAX; header adds ACC_SEQ_HDR-or-less. */
+    TEST_ASSERT_TRUE(g_dgrams[0].len >= ACC_DGRAM_MAX);
+    TEST_ASSERT_TRUE(g_dgrams[0].len <= ACC_DGRAM_MAX + ACC_SEQ_HDR);
+    TEST_ASSERT_EQUAL_size_t(0, g_acc_len);
+}
+
+void test_accum_overflow_followed_by_overflow_packs_two_dgrams(void)
+{
+    accum_reset();
+    /* Burst of 4000 bytes => 2 full datagrams + ~1400 left buffered. */
+    char chunk[700];
+    memset(chunk, 'p', sizeof(chunk));
+    for (int i = 0; i < 6; i++) {
+        accum_append(chunk, sizeof(chunk));
+    }
+    /* After 6 * 700 = 4200 bytes pushed through 1300-byte accumulator:
+     *   line 1 (700)  -> acc=700
+     *   line 2 (700)  -> 1400 > 1300, flush #0, acc=700
+     *   line 3 (700)  -> 1400 > 1300, flush #1, acc=700
+     *   line 4 (700)  -> 1400 > 1300, flush #2, acc=700
+     *   line 5 (700)  -> 1400 > 1300, flush #3, acc=700
+     *   line 6 (700)  -> 1400 > 1300, flush #4, acc=700
+     * => 5 datagrams emitted, 700 still buffered. */
+    TEST_ASSERT_EQUAL_INT(5, g_dgram_count);
+    TEST_ASSERT_EQUAL_size_t(700, g_acc_len);
+
+    accum_flush_idle();
+    TEST_ASSERT_EQUAL_INT(6, g_dgram_count); /* trailing partial drained */
+    TEST_ASSERT_TRUE(strncmp(g_dgrams[5].data, "#5\n", 3) == 0);
+}
+
 /* --------------------------------------------------------------------------
  * Test runner
  * -------------------------------------------------------------------------- */
 int main(void)
 {
     UNITY_BEGIN();
+    /* Original 8 -- per-line formatting / UART chain / fd-not-ready */
     RUN_TEST(test_short_line_formatted);
     RUN_TEST(test_long_line_truncated);
     RUN_TEST(test_ansi_escapes_verbatim);
@@ -242,5 +462,16 @@ int main(void)
     RUN_TEST(test_send_when_fd_ready);
     RUN_TEST(test_integer_formatting);
     RUN_TEST(test_empty_format_no_send);
+
+    /* New 8 -- accumulator coalescing + sequence numbers */
+    RUN_TEST(test_accum_single_short_line_buffers_no_send);
+    RUN_TEST(test_accum_idle_flush_emits_one_datagram_with_header);
+    RUN_TEST(test_accum_overflow_triggers_inline_flush);
+    RUN_TEST(test_accum_sequence_increments_across_datagrams);
+    RUN_TEST(test_accum_empty_flush_is_noop);
+    RUN_TEST(test_accum_fd_unavailable_still_bumps_seq);
+    RUN_TEST(test_accum_oversize_line_truncated_standalone);
+    RUN_TEST(test_accum_overflow_followed_by_overflow_packs_two_dgrams);
+
     return UNITY_END();
 }
