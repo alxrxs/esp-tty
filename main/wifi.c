@@ -1208,11 +1208,6 @@ static esp_err_t wifi_mode_psk(const char *ssid,
     return result;
 }
 
-/* Context passed to the on_ip callback for enterprise mode. */
-typedef struct {
-    const cred_store_t *creds;
-} smart_enterprise_ctx_t;
-
 /* Synchronously wait for NTP sync up to BOOTSTRAP_NTP_SYNC_TIMEOUT_SEC.
  * Returns true if clock looks sane after the wait. */
 static bool smart_ntp_wait_sync(void)
