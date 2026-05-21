@@ -275,6 +275,81 @@ void test_cert_expired_regardless_of_ntp_state(void)
     TEST_ASSERT_EQUAL_INT(WIFI_DECISION_BOOTSTRAP_FULL, d);
 }
 
+/* ==========================================================================
+ * Mode B+ (WIFI_USE_ENTERPRISE + WIFI_ENTERPRISE_SSID) decision scenarios.
+ *
+ * In Mode B+ the caller always passes cert_present=true and cert_expired=false
+ * (embedded certs never "expire" from the decision function's perspective -- a
+ * real cert may be stale but there is no SCEP renewer, so we always attempt
+ * enterprise).  The only interesting branch is NTP_BEFORE_EAPTLS.
+ *
+ * Truth table rows for Mode B+:
+ *
+ *  # | cert | expired | synced | ntp_req | attempts | max | expected
+ *  --|------|---------|--------|---------|----------|-----|----------
+ * 19 | yes  |   no    |  yes   |   no    |    0     |  5  | ENTERPRISE (normal, clock ok)
+ * 20 | yes  |   no    |   no   |   yes   |    0     |  5  | BOOTSTRAP_NTP_ONLY (clock unsynced, NTP required)
+ * 21 | yes  |   no    |  yes   |   yes   |    0     |  5  | ENTERPRISE (NTP required, already synced)
+ * 22 | yes  |   no    |   no   |   no    |    0     |  5  | ENTERPRISE (NTP not required, skip bootstrap)
+ * 23 | yes  |   no    |  yes   |   no    |    5     |  5  | BOOTSTRAP_FULL (budget exhausted; caller ignores and goes to enterprise)
+ * ========================================================================== */
+
+/* --- Row 19: Mode B+ normal path (synced, no NTP requirement) ------------- */
+void test_modebp_synced_no_ntp_req_returns_enterprise(void)
+{
+    wifi_decision_t d = decide(true, false, true, false, 0, 5);
+    TEST_ASSERT_EQUAL_INT(WIFI_DECISION_ENTERPRISE, d);
+}
+
+/* --- Row 20: Mode B+ unsynced clock, NTP required -> BOOTSTRAP_NTP_ONLY --- */
+void test_modebp_unsynced_ntp_req_returns_bootstrap_ntp_only(void)
+{
+    wifi_decision_t d = decide(true, false, false, true, 0, 5);
+    TEST_ASSERT_EQUAL_INT(WIFI_DECISION_BOOTSTRAP_NTP_ONLY, d);
+}
+
+/* --- Row 21: Mode B+ already synced, NTP required -> ENTERPRISE ----------- */
+void test_modebp_synced_ntp_req_returns_enterprise(void)
+{
+    wifi_decision_t d = decide(true, false, true, true, 0, 5);
+    TEST_ASSERT_EQUAL_INT(WIFI_DECISION_ENTERPRISE, d);
+}
+
+/* --- Row 22: Mode B+ unsynced but NTP not required -> ENTERPRISE directly - */
+void test_modebp_unsynced_no_ntp_req_returns_enterprise(void)
+{
+    wifi_decision_t d = decide(true, false, false, false, 0, 5);
+    TEST_ASSERT_EQUAL_INT(WIFI_DECISION_ENTERPRISE, d);
+}
+
+/* --- Row 23: Mode B+ budget exhausted -> BOOTSTRAP_FULL (caller maps to enterprise) */
+void test_modebp_budget_exhausted_returns_bootstrap_full(void)
+{
+    /* The decision function returns BOOTSTRAP_FULL when the enterprise retry
+     * budget is exhausted.  In Mode B+ wifi_init_enterprise_bootstrap()
+     * treats this as "proceed to enterprise anyway" since re-enrollment is
+     * not available.  The decision function itself is unaware of Mode B+ --
+     * it just applies rule 3.  This test confirms rule 3 still fires. */
+    wifi_decision_t d = decide(true, false, true, false, 5, 5);
+    TEST_ASSERT_EQUAL_INT(WIFI_DECISION_BOOTSTRAP_FULL, d);
+}
+
+/* --- Mode B+ with ntp_req, unsynced, budget partially used -> NTP_ONLY ---- */
+void test_modebp_partial_budget_ntp_req_unsynced_returns_ntp_only(void)
+{
+    /* 3 attempts out of 5, NTP required but not synced: NTP_ONLY (not FULL). */
+    wifi_decision_t d = decide(true, false, false, true, 3, 5);
+    TEST_ASSERT_EQUAL_INT(WIFI_DECISION_BOOTSTRAP_NTP_ONLY, d);
+}
+
+/* --- Mode B+ budget exhausted AND ntp required AND unsynced: FULL wins ----- */
+void test_modebp_budget_exhausted_overrides_ntp_only(void)
+{
+    /* Rule 3 (attempts >= max) fires before rule 4 (NTP required). */
+    wifi_decision_t d = decide(true, false, false, true, 5, 5);
+    TEST_ASSERT_EQUAL_INT(WIFI_DECISION_BOOTSTRAP_FULL, d);
+}
+
 /* -------------------------------------------------------------------------- */
 int main(void)
 {
@@ -306,5 +381,13 @@ int main(void)
     RUN_TEST(test_enterprise_attempts_negative_unlimited_retries);
     RUN_TEST(test_enterprise_at_max_overrides_ntp_only);
     RUN_TEST(test_cert_expired_regardless_of_ntp_state);
+    /* Mode B+ decision scenarios */
+    RUN_TEST(test_modebp_synced_no_ntp_req_returns_enterprise);
+    RUN_TEST(test_modebp_unsynced_ntp_req_returns_bootstrap_ntp_only);
+    RUN_TEST(test_modebp_synced_ntp_req_returns_enterprise);
+    RUN_TEST(test_modebp_unsynced_no_ntp_req_returns_enterprise);
+    RUN_TEST(test_modebp_budget_exhausted_returns_bootstrap_full);
+    RUN_TEST(test_modebp_partial_budget_ntp_req_unsynced_returns_ntp_only);
+    RUN_TEST(test_modebp_budget_exhausted_overrides_ntp_only);
     return UNITY_END();
 }

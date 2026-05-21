@@ -163,16 +163,18 @@ modes are mutually exclusive.
 |---|---|---|---|
 | **A** | `WIFI_SSID` + `WIFI_PASS` | WPA2/WPA3-Personal (PSK) | One network |
 | **B** | + `WIFI_USE_ENTERPRISE` | WPA2/WPA3-Enterprise EAP-TLS | One network; client cert + key embedded from `main/certs/` at build time |
+| **B+** | + `WIFI_USE_ENTERPRISE` + `WIFI_ENTERPRISE_SSID` | PSK bootstrap for NTP, then WPA3-Enterprise EAP-TLS | Two SSIDs; same embedded certs as Mode B; add `NTP_ENABLE` to sync the clock before EAP-TLS so cert NotBefore/After is validated correctly on cold boot |
 | **C** | + `WIFI_ENTERPRISE_SSID` + `SCEP_URL` + `SCEP_CHALLENGE_PASSWORD` + `EAP_IDENTITY` | PSK bootstrap, then WPA3-Enterprise EAP-TLS | Two SSIDs; client cert auto-enrolled via SCEP and stored in encrypted NVS |
 
-Mode B places its three PEMs (`ca.pem`, `client.crt`, `client.key`) in
-`main/certs/`; the build embeds them. See
+Mode B and Mode B+ place their three PEMs (`ca.pem`, `client.crt`,
+`client.key`) in `main/certs/`; the build embeds them. See
 [`main/certs/README.md`](main/certs/README.md).
 
-Mode C uses two distinct SSIDs because IEEE 802.11 ties each SSID to one
-auth mode at the AP. The bootstrap PSK network is only used for the
-initial NTP sync and SCEP enrollment (and for renewals if the enterprise
-side becomes unreachable). Production traffic runs on the enterprise SSID.
+Mode B+ and Mode C use two distinct SSIDs because IEEE 802.11 ties each
+SSID to one auth mode at the AP. In Mode B+ the bootstrap PSK network is
+used only for NTP sync; production traffic uses the enterprise SSID.
+In Mode C the bootstrap PSK network is additionally used for SCEP enrollment
+and renewals when the enterprise side is unreachable.
 
 ## SCEP auto-enrollment (Mode C)
 

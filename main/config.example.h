@@ -48,11 +48,13 @@
  * IEEE 802.11 locks each SSID to one auth mode at the AP, so PSK and
  * EAP-TLS are always separate networks.
  *
- *   Mode A: one PSK network only.
- *   Mode B: one EAP-TLS network only; client cert + key embedded at build.
- *   Mode C: PSK bootstrap network + EAP-TLS enterprise network, with the
- *           enterprise client cert auto-enrolled via SCEP on first boot
- *           and renewed in the background before expiry.
+ *   Mode A:  one PSK network only.
+ *   Mode B:  one EAP-TLS network only; client cert + key embedded at build.
+ *   Mode B+: like Mode B but with a PSK bootstrap network for NTP sync
+ *            before EAP-TLS; opt-in via WIFI_ENTERPRISE_SSID.
+ *   Mode C:  PSK bootstrap network + EAP-TLS enterprise network, with the
+ *            enterprise client cert auto-enrolled via SCEP on first boot
+ *            and renewed in the background before expiry.
  * ========================================================================== */
 
 /* -- Mode A: WPA2/WPA3-Personal (PSK) ------------------------------------- *
@@ -78,7 +80,7 @@
  *
  * EAP_DISABLE_TIME_CHECK: set to 1 ONLY if the device has no clock and
  * cert-expiry validation is failing at boot. Removes a security check;
- * prefer NTP_ENABLE or Mode C with NTP_BEFORE_EAPTLS.
+ * prefer NTP_ENABLE or Mode B+ / Mode C with NTP_BEFORE_EAPTLS.
  * -------------------------------------------------------------------------- */
 /*
 #define WIFI_USE_ENTERPRISE
@@ -88,6 +90,29 @@
 #define WIFI_PASS               ""
 #define EAP_IDENTITY            "anonymous@example.org"
 #define EAP_DISABLE_TIME_CHECK  1
+*/
+
+/* -- Mode B+: EAP-TLS with embedded certs + PSK bootstrap for NTP --------- *
+ * Like Mode B, but add WIFI_ENTERPRISE_SSID to enable a two-phase boot:
+ *   1. Join WIFI_SSID (PSK) to sync NTP.
+ *   2. Join WIFI_ENTERPRISE_SSID (EAP-TLS) with synced clock.
+ *
+ * Use this when the EAP-TLS AP's RADIUS server validates cert NotBefore/After
+ * and the device may have a stale RTC on a cold boot. No SCEP; certs are
+ * still build-embedded from main/certs/.
+ *
+ * NTP_BEFORE_EAPTLS defaults to 1 when NTP_ENABLE is defined; override to
+ * 0 if you want to skip the NTP bootstrap even in Mode B+.
+ * -------------------------------------------------------------------------- */
+/*
+#define WIFI_USE_ENTERPRISE
+#undef  WIFI_SSID
+#undef  WIFI_PASS
+#define WIFI_SSID               "your-psk-bootstrap-ssid"
+#define WIFI_PASS               "your-psk-password"
+#define WIFI_ENTERPRISE_SSID    "your-enterprise-ssid"
+#define EAP_IDENTITY            "anonymous@example.org"
+#define NTP_ENABLE
 */
 
 /* -- Mode C: PSK bootstrap + EAP-TLS enterprise with SCEP enrollment ------ *
@@ -114,19 +139,19 @@
 #define SCEP_CHALLENGE_PASSWORD  "replace-with-your-static-challenge"
 */
 
-/* Mode C clock handling -- pick ONE (or neither).
+/* Mode B+ / Mode C clock handling -- pick ONE (or neither).
  *
  *   NTP_BEFORE_EAPTLS:
  *     Sync NTP on the PSK bootstrap network before attempting EAP-TLS.
- *     Required if cert validity (NotBefore/NotAfter) must be checked on
- *     every join. Requires NTP_ENABLE.
+ *     Applicable to both Mode B+ and Mode C. Defaults to 1 when NTP_ENABLE
+ *     is defined; set to 0 to opt out.
  *
  *   SCEP_NO_NTP_USE_ISSUANCE_TIME:
- *     Air-gapped mode. Every boot re-enrolls a fresh cert and uses its
- *     X.509 NotBefore as the local-clock anchor. cert_renewer is disabled
- *     (each reboot is the renewal). Burns one challenge password and
- *     ~9 s per boot. Do not also define NTP_ENABLE if you want truly
- *     offline operation.
+ *     Mode C only / air-gapped. Every boot re-enrolls a fresh cert and uses
+ *     its X.509 NotBefore as the local-clock anchor. cert_renewer is
+ *     disabled (each reboot is the renewal). Burns one challenge password and
+ *     ~9 s per boot. Do not also define NTP_ENABLE if you want truly offline
+ *     operation.
  *
  * Defining BOTH is a compile-time error.
  */

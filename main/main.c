@@ -213,9 +213,12 @@ void app_main(void)
 #endif
 
     /* -- 4. Wi-Fi STA ---------------------------------------------- */
-#ifdef WIFI_ENTERPRISE_SSID
-    /* Smart two-network state machine: bootstrap PSK -> NTP -> SCEP -> enterprise.
-     * Only compiled/called when WIFI_ENTERPRISE_SSID is defined in config.h. */
+#if defined(WIFI_ENTERPRISE_SSID) && defined(WIFI_USE_ENTERPRISE)
+    /* Mode B+: embedded certs + PSK bootstrap for NTP sync before EAP-TLS.
+     * No SCEP; no cert renewer.  Only when both macros are defined. */
+    err = wifi_init_enterprise_bootstrap();
+#elif defined(WIFI_ENTERPRISE_SSID)
+    /* Mode C: PSK bootstrap + SCEP enrollment + EAP-TLS. */
     err = wifi_init_smart();
 #else
     err = wifi_init_sta();
@@ -237,11 +240,9 @@ void app_main(void)
     }
 #endif
 
-#ifdef WIFI_ENTERPRISE_SSID
-    /* Certificate renewal watchdog.  Polls the stored cert's NotAfter and
-       re-enrolls via SCEP when within CERT_RENEWAL_WINDOW_DAYS of expiry.
-       Runs indefinitely; retries on failure.  Independent of the smoke-test
-       task above. */
+#if defined(WIFI_ENTERPRISE_SSID) && !defined(WIFI_USE_ENTERPRISE)
+    /* Certificate renewal watchdog (Mode C only -- Mode B+ uses embedded
+       certs that cannot be renewed via SCEP). */
     if (err == ESP_OK) {
         esp_err_t renewer_err = cert_renewer_start();
         if (renewer_err != ESP_OK) {

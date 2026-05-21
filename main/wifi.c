@@ -89,9 +89,13 @@
 #include "esp_netif_sntp.h"
 #include "esp_sntp.h"
 #include <sys/time.h>
-#include "cred_store.h"
-#include "scep_enroll.h"
 #include "wifi_state.h"
+/* cred_store is used for the smart_configure_eaptls / wifi_mode_enterprise
+ * type signatures even in Mode B + bootstrap.  scep_enroll is Mode-C-only. */
+#include "cred_store.h"
+# ifndef WIFI_USE_ENTERPRISE
+#  include "scep_enroll.h"
+# endif
 #endif
 
 /* Mutual exclusion: SCEP_NO_NTP_USE_ISSUANCE_TIME and NTP_BEFORE_EAPTLS
@@ -1271,12 +1275,13 @@ static esp_err_t smart_on_ip_ntp_only(void)
     return ESP_OK;  /* Always return OK; caller checks time() afterwards. */
 }
 
-/* on_ip callback for bootstrap full pass: sync NTP (unless no-NTP mode),
- * check cert, enroll via SCEP.
+/* on_ip callback for bootstrap full pass (Mode C only): sync NTP (unless
+ * no-NTP mode), check cert, enroll via SCEP.
  *
  * In SCEP_NO_NTP_USE_ISSUANCE_TIME mode NTP is skipped entirely; after a
  * successful enrollment the issued cert's NotBefore field is used to set the
  * local clock before rebooting into enterprise mode. */
+#ifndef WIFI_USE_ENTERPRISE
 static esp_err_t smart_on_ip_full(void)
 {
 #ifdef SCEP_NO_NTP_USE_ISSUANCE_TIME
@@ -1382,6 +1387,7 @@ static esp_err_t smart_on_ip_full(void)
 #endif
     return ESP_OK;
 }
+#endif /* !WIFI_USE_ENTERPRISE -- end of smart_on_ip_full (Mode C only) */
 
 /* Configure and start EAP-TLS.
  *
@@ -1456,16 +1462,10 @@ static esp_err_t smart_configure_eaptls(const cred_store_t *creds)
 
 /* Push new EAP-TLS credentials into the supplicant while already connected.
  *
- * Called by cert_renewer.c after a successful SCEP re-enrollment to update
- * the supplicant's cert+key buffers.  The caller is responsible for calling
- * esp_wifi_disconnect() afterwards to trigger 802.1X re-auth.
- *
- * Only sets CA cert and client cert+key; identity and method flags are
- * already configured from the initial smart_configure_eaptls() call.
- *
- * Returns ESP_OK on success, ESP_FAIL if any ESP-IDF call fails.
- *
- * Only available when WIFI_ENTERPRISE_SSID is defined. */
+ * Called by cert_renewer.c after a successful SCEP re-enrollment.
+ * Only available for Mode C (WIFI_ENTERPRISE_SSID without WIFI_USE_ENTERPRISE).
+ * Mode B+ uses embedded certs and has no cert renewer. */
+#ifndef WIFI_USE_ENTERPRISE
 esp_err_t smart_eap_apply_creds(const cred_store_t *creds)
 {
     if (!creds || creds->ca_chain_len == 0 ||
@@ -1499,6 +1499,7 @@ esp_err_t smart_eap_apply_creds(const cred_store_t *creds)
 
     return ESP_OK;
 }
+#endif /* !WIFI_USE_ENTERPRISE -- end of smart_eap_apply_creds (Mode C only) */
 
 /* Bring up the enterprise (EAP-TLS) network, wait up to timeout_sec for an IP.
  *
@@ -1556,9 +1557,11 @@ static esp_err_t wifi_mode_enterprise(const char         *ssid,
 }
 
 /* --------------------------------------------------------------------------
- * Public entry point
+ * Public entry points
  * -------------------------------------------------------------------------- */
 
+/* wifi_init_smart -- Mode C (SCEP/NVS, no embedded enterprise certs) */
+#ifndef WIFI_USE_ENTERPRISE
 esp_err_t wifi_init_smart(void)
 {
     /* 1. Create shared resources (event group, DHCP watchdog). */
@@ -1644,8 +1647,16 @@ esp_err_t wifi_init_smart(void)
         }
     }
 
+/* Default NTP_BEFORE_EAPTLS to 1 when NTP_ENABLE is set and a bootstrap PSK
+ * network is available (WIFI_SSID + WIFI_PASS); otherwise keep 0 so existing
+ * Mode C configs that have not explicitly set the macro are unaffected unless
+ * they also define NTP_ENABLE.  Users can override to 0 to opt out. */
 #ifndef NTP_BEFORE_EAPTLS
-# define NTP_BEFORE_EAPTLS 0
+# if defined(NTP_ENABLE) && defined(WIFI_SSID) && defined(WIFI_PASS)
+#  define NTP_BEFORE_EAPTLS 1
+# else
+#  define NTP_BEFORE_EAPTLS 0
+# endif
 #endif
     bool ntp_req = (NTP_BEFORE_EAPTLS != 0);
 
@@ -1756,5 +1767,158 @@ esp_err_t wifi_init_smart(void)
     heap_caps_free(creds_p);
     return ESP_FAIL;
 }
+#endif /* !WIFI_USE_ENTERPRISE -- end of wifi_init_smart (Mode C only) */
+
+/* --------------------------------------------------------------------------
+ * wifi_init_enterprise_bootstrap -- Mode B+ (embedded certs + PSK bootstrap)
+ *
+ * Available only when BOTH WIFI_USE_ENTERPRISE and WIFI_ENTERPRISE_SSID are
+ * defined.  Like Mode C's wifi_init_smart() but without SCEP or cred_store:
+ *   - Build-embedded ca.pem / client.crt / client.key are always used.
+ *   - WIFI_SSID / WIFI_PASS is the PSK bootstrap network used only for NTP.
+ *   - WIFI_ENTERPRISE_SSID is the EAP-TLS production network.
+ *   - The decision function only ever returns BOOTSTRAP_NTP_ONLY or ENTERPRISE
+ *     (cert_present=true, cert_expired=false always -- embedded certs are
+ *     static).  BOOTSTRAP_FULL cannot happen because cert_present is always
+ *     true and the retry-budget-exhausted path would be a runaway loop; to
+ *     guard against it we just proceed to ENTERPRISE on that branch too.
+ * -------------------------------------------------------------------------- */
+#ifdef WIFI_USE_ENTERPRISE
+esp_err_t wifi_init_enterprise_bootstrap(void)
+{
+    /* 1. Shared resources. */
+    s_wifi_event_group = xEventGroupCreate();
+    configASSERT(s_wifi_event_group);
+
+#if DHCP_RETRY_TIMEOUT_SEC > 0 && !defined(USE_STATIC_IPV4)
+    s_dhcp_watchdog = xTimerCreate(
+        "dhcp_wd",
+        pdMS_TO_TICKS(DHCP_RETRY_TIMEOUT_SEC * 1000),
+        pdFALSE, NULL, dhcp_watchdog_cb);
+    if (!s_dhcp_watchdog) {
+        ESP_LOGW(TAG, "[b+] DHCP watchdog timer creation failed");
+    }
+#endif
+
+    /* 2. TCP/IP stack + netif. */
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    s_sta_netif = esp_netif_create_default_wifi_sta();
+    configASSERT(s_sta_netif);
+
+    esp_err_t herr = esp_netif_set_hostname(s_sta_netif, DEVICE_HOSTNAME);
+    if (herr != ESP_OK) {
+        ESP_LOGW(TAG, "[b+] set_hostname failed: %s", esp_err_to_name(herr));
+    }
+
+    /* 3. WiFi driver init (once). */
+    wifi_init_config_t driver_cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&driver_cfg));
+
+    /* 4. Persistent event handlers. */
+    esp_event_handler_instance_t inst_wifi;
+    esp_event_handler_instance_t inst_ip;
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(
+        WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, &inst_wifi));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(
+        IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, &inst_ip));
+
+#if IPV6_MODE != IPV6_MODE_DISABLED && defined(CONFIG_LWIP_IPV6)
+    esp_event_handler_instance_t inst_ip6;
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(
+        IP_EVENT, IP_EVENT_GOT_IP6, &wifi_event_handler, NULL, &inst_ip6));
+    (void)inst_ip6;
+#endif
+
+    /* 5. Embedded certs sanity-check.  Cert is always "present" and treated as
+     *    non-expired (we cannot evaluate NotAfter without a synced clock and
+     *    without parsing the cert -- NTP bootstrap is the mechanism for that). */
+    configASSERT((eap_ca_pem_end  - eap_ca_pem_start)        >= EAP_CA_MIN_BYTES);
+    configASSERT((eap_client_crt_end - eap_client_crt_start)  >= EAP_CRT_MIN_BYTES);
+    configASSERT((eap_client_key_end - eap_client_key_start)  >= EAP_KEY_MIN_BYTES);
+
+    const bool cert_present  = true;
+    const bool cert_expired  = false;
+
+    /* 6. Evaluate clock. */
+    time_t now = time(NULL);
+    bool ntp_synced = (now >= MIN_PLAUSIBLE_EPOCH);
+
+/* Default NTP_BEFORE_EAPTLS to 1 when NTP_ENABLE and bootstrap are available. */
+#ifndef NTP_BEFORE_EAPTLS
+# if defined(NTP_ENABLE) && defined(WIFI_SSID) && defined(WIFI_PASS)
+#  define NTP_BEFORE_EAPTLS 1
+# else
+#  define NTP_BEFORE_EAPTLS 0
+# endif
+#endif
+    bool ntp_req = (NTP_BEFORE_EAPTLS != 0);
+
+    int enterprise_attempts = 0;
+
+    /* 7. Main loop. */
+    for (;;) {
+        wifi_decision_t decision = wifi_decide_next_step(
+            cert_present, cert_expired, ntp_synced,
+            ntp_req, false /* no_ntp_mode */,
+            enterprise_attempts, WIFI_ENTERPRISE_RETRY_MAX);
+
+        ESP_LOGI(TAG, "[b+] decision=%d (synced=%d ntp_req=%d attempts=%d max=%d)",
+                 (int)decision, (int)ntp_synced, (int)ntp_req,
+                 enterprise_attempts, WIFI_ENTERPRISE_RETRY_MAX);
+
+        if (decision == WIFI_DECISION_ENTERPRISE ||
+            decision == WIFI_DECISION_BOOTSTRAP_FULL) {
+            /* BOOTSTRAP_FULL cannot normally happen for Mode B+ (cert_present is
+             * always true and cert_expired is always false).  The only way to
+             * reach it is if the enterprise retry budget is exhausted, which
+             * means the RADIUS server is persistently refusing the cert.  Log a
+             * warning and attempt enterprise anyway rather than looping forever. */
+            if (decision == WIFI_DECISION_BOOTSTRAP_FULL) {
+                ESP_LOGW(TAG, "[b+] enterprise retry budget exhausted -- "
+                              "proceeding to enterprise (cert is embedded, "
+                              "no re-enrollment available for Mode B+)");
+            }
+            enterprise_attempts++;
+            esp_err_t rc = wifi_mode_enterprise(
+                WIFI_ENTERPRISE_SSID,
+                (uint32_t)EAPTLS_HANDSHAKE_TIMEOUT_SEC,
+                NULL /* creds -- always use embedded path */);
+
+            if (rc == ESP_OK) {
+                esp_event_handler_instance_unregister(
+                    IP_EVENT, IP_EVENT_STA_GOT_IP, inst_ip);
+                esp_event_handler_instance_unregister(
+                    WIFI_EVENT, ESP_EVENT_ANY_ID, inst_wifi);
+#if !defined(BRIDGE_LOOPBACK) && defined(MDNS_ENABLE)
+                mdns_dispatch_start();
+#endif
+#if !defined(BRIDGE_LOOPBACK) && defined(NTP_ENABLE)
+                ntp_dispatch_start();
+#endif
+                return ESP_OK;
+            }
+
+            ESP_LOGW(TAG, "[b+] enterprise attempt %d failed -- re-evaluating",
+                     enterprise_attempts);
+            continue;
+
+        } else { /* WIFI_DECISION_BOOTSTRAP_NTP_ONLY */
+            ESP_LOGI(TAG, "[b+] bootstrap NTP-only pass on \"%s\"", WIFI_SSID);
+            esp_err_t rc = wifi_mode_psk(WIFI_SSID, WIFI_PASS,
+                                          smart_on_ip_ntp_only);
+            if (rc != ESP_OK) {
+                ESP_LOGW(TAG, "[b+] bootstrap PSK connect failed");
+            }
+            now = time(NULL);
+            ntp_synced = (now >= MIN_PLAUSIBLE_EPOCH);
+            continue;
+        }
+    }
+
+    /* Unreachable. */
+    return ESP_FAIL;
+}
+#endif /* WIFI_USE_ENTERPRISE -- end of wifi_init_enterprise_bootstrap (Mode B+) */
 
 #endif /* WIFI_ENTERPRISE_SSID */
