@@ -22,6 +22,7 @@ main/certs/*.key
 sdkconfig
 sdkconfig.*
 !sdkconfig.defaults
+!sdkconfig.zero.defaults
 
 # ESP-IDF managed components cache
 managed_components/

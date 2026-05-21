@@ -1,0 +1,31 @@
+# sdkconfig.zero.defaults -- delta overrides for the Waveshare ESP32-S3-Zero
+# Applied on top of sdkconfig.defaults via:
+#   -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.zero.defaults"
+#
+# The Zero carries the ESP32-S3FH4R2: 4 MB embedded QIO flash + 2 MB embedded
+# QSPI PSRAM.  These settings override the N16R8-specific values in
+# sdkconfig.defaults.
+
+# -- Flash (4 MB, QIO) -------------------------------------------------------
+# Override: sdkconfig.defaults sets CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+# Flash mode and frequency are the same as N16R8 -- no override needed.
+
+# -- Partition table ---------------------------------------------------------
+# ESP-IDF requires CONFIG_PARTITION_TABLE_CUSTOM=y before the filename key
+# takes effect.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_zero.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions_zero.csv"
+
+# -- PSRAM (2 MB Quad QSPI) --------------------------------------------------
+# Override: sdkconfig.defaults sets CONFIG_SPIRAM_MODE_OCT=y for 8 MB OPI PSRAM.
+# The Zero has a 2 MB QSPI part (in-package on FH4R2); use Quad mode instead.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=n
+CONFIG_SPIRAM_MODE_QUAD=y
+# Speed: the embedded QSPI PSRAM on FH4R2 is rated for 80 MHz as well.
+# CONFIG_SPIRAM_SPEED_80M is already set in sdkconfig.defaults; no override.
+
+# Quad PSRAM type: auto-detect covers the embedded 2 MB part.
+CONFIG_SPIRAM_TYPE_AUTO=y
