@@ -68,10 +68,10 @@ live bridge pump tasks.
 `scrollback_count_newlines` and `scrollback_format_header` have no platform
 dependencies and are compiled identically on both targets.  The circular-buffer
 operations use the `pthread`-backed native implementation under `UNIT_TEST`.
-`test/native/test_scrollback/test_scrollback.c` exercises all three layers with
-26 Unity cases: basic construction, empty-buffer semantics, push-then-get
-round-trips, wrap-around overflow, backward line scanning, cross-boundary line
-retrieval, zero-`max_lines` edge case, multi-push accumulation, newline counting
-across NULL/empty/binary/CRLF inputs, header formatting for valid and invalid
-inputs (negative count, NULL output pointer, undersized buffer, exact-fit
-boundary), and the `SCROLLBACK_FOOTER` string value.
+`test/native/test_scrollback/test_scrollback.c` exercises all three layers:
+basic construction, empty-buffer semantics, push-then-get round-trips,
+wrap-around overflow, backward line scanning, cross-boundary line
+retrieval, zero-`max_lines` edge case, multi-push accumulation, newline
+counting across NULL/empty/binary/CRLF inputs, header formatting for valid
+and invalid inputs (negative count, NULL output pointer, undersized buffer,
+exact-fit boundary), and the `SCROLLBACK_FOOTER` string value.

@@ -67,6 +67,6 @@ does not disturb data in flight.
 
 ## Tests
 
-17 cases in `test/native/test_ring/`. Covers FIFO ordering, wrap-around,
+`test/native/test_ring/` covers FIFO ordering, wrap-around,
 close-unblocks-reader, backpressure losslessness, `ring_try_send` partial
 writes and contention behaviour, and all `ring_reopen` paths.

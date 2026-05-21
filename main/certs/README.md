@@ -1,9 +1,22 @@
-# EAP-TLS Certificates
+# main/certs -- Embedded PEM Trust Material
 
-This directory holds the three PEM files that authenticate the device to a
-WPA2-Enterprise (EAP-TLS) network. They are only required when
-`WIFI_USE_ENTERPRISE` is defined in `config.h`. Without that define the
-directory is ignored entirely and the firmware uses ordinary WPA2-PSK.
+This directory holds the PEM files that `main/CMakeLists.txt` embeds into the
+firmware binary via the `EMBED_TXTFILES` mechanism. Two independent groups
+live here:
+
+| Group | Files | Required for | Linker symbols |
+|---|---|---|---|
+| EAP-TLS bootstrap credentials | `ca.pem`, `client.crt`, `client.key` | `WIFI_USE_ENTERPRISE` builds (Mode B -- static EAP-TLS) | `_binary_ca_pem_start/_end`, `_binary_client_crt_start/_end`, `_binary_client_key_start/_end` |
+| SCEP server TLS trust anchor | `scep_ca.pem` | SCEP enrolment (Mode C -- on-device auto-enrolment) | `_binary_scep_ca_pem_start/_end` |
+
+For every real file there is a tracked `.pem.example` / `.crt.example` /
+`.key.example` placeholder. The real files (`ca.pem`, `client.crt`,
+`client.key`, `scep_ca.pem`) are gitignored via the
+`main/certs/*.pem` / `*.crt` / `*.key` rules in the root `.gitignore`, with
+`!main/certs/*.example` preserving the placeholders. Never commit real key
+material.
+
+## EAP-TLS files
 
 | File | Content |
 |---|---|
@@ -11,18 +24,12 @@ directory is ignored entirely and the firmware uses ordinary WPA2-PSK.
 | `client.crt` | Client certificate issued by the same CA, identifying this device |
 | `client.key` | Unencrypted client private key (PKCS#8 PEM) |
 
-Three `.example` placeholder files (`ca.pem.example`, `client.crt.example`,
-`client.key.example`) are tracked in git and show the expected PEM structure.
-The real files -- `ca.pem`, `client.crt`, and `client.key` -- are gitignored via
-the `main/certs/*.pem`, `main/certs/*.crt`, and `main/certs/*.key` rules in
-`.gitignore`, with `!main/certs/*.example` preserving the stubs. Never commit
-real key material.
+These are read by `main/wifi.c` and handed to ESP-IDF's EAP supplicant when
+the firmware switches the STA into WPA2/WPA3-Enterprise mode. They are only
+needed when `WIFI_USE_ENTERPRISE` is defined in `config.h`; otherwise the
+directory is ignored and the firmware uses WPA2/WPA3-Personal.
 
-## Generating a self-signed test CA and client cert
-
-The commands below produce a minimal EAP-TLS credential set suitable for a lab
-RADIUS server. Use ed25519 keys for small PEM size; substitute `rsa:2048` if
-your RADIUS server does not support EdDSA.
+### Generating a self-signed lab CA + client cert
 
 ```sh
 # 1. Create a CA (valid 10 years)
@@ -45,33 +52,36 @@ openssl x509 -req -days 365 -in client.csr \
 ```
 
 Install `ca.pem` on the RADIUS server as a trusted CA and configure it to
-accept the CN `nanoconsole` as a valid EAP identity. For production use,
-generate the client certificate from your existing PKI instead of this
-self-signed CA.
+accept the CN `nanoconsole` as a valid EAP identity. Substitute `rsa:2048`
+for `ed25519` if your RADIUS server does not support EdDSA.
+
+## SCEP file
+
+`scep_ca.pem` is the TLS trust anchor for HTTPS connections to the SCEP
+server (`SCEP_URL`). It must contain the full chain from the SCEP server's
+TLS leaf certificate up to and including the root CA, in PEM format. It is
+consumed by `lib/scep_transport/` via `esp_http_client` and is independent
+of the CA that signs the issued device certificate.
+
+Copy `scep_ca.pem.example` to `scep_ca.pem` and paste in the real chain
+before building. If the file is absent, `main/CMakeLists.txt` skips the
+embed and prints `SCEP transport disabled`; the SCEP enrolment path then
+cannot run.
 
 ## How the files reach the firmware
 
-`main/CMakeLists.txt` checks at CMake configure time whether all three real
-cert files are present. When they are, it passes them to the
-`EMBED_TXTFILES` directive of `idf_component_register`, which causes the
-ESP-IDF build system to assemble each file into a read-only data section and
-expose linker symbols of the form `_binary_<name>_start` /
-`_binary_<name>_end`. The symbols consumed in `wifi.c` are:
+`main/CMakeLists.txt` checks at CMake configure time whether the real files
+are present and passes the ones that exist to `EMBED_TXTFILES` in
+`idf_component_register`. ESP-IDF assembles each file into a read-only data
+section and exposes the linker symbols listed in the table above. The cert
+paths are registered as `CMAKE_CONFIGURE_DEPENDS` entries, so adding or
+removing a file automatically triggers a CMake reconfigure on the next
+`pio run`.
 
-```
-_binary_ca_pem_start    / _binary_ca_pem_end
-_binary_client_crt_start / _binary_client_crt_end
-_binary_client_key_start / _binary_client_key_end
-```
-
-CMake registers the cert paths as `CMAKE_CONFIGURE_DEPENDS` entries, so
-adding or removing the files automatically triggers a CMake reconfigure on
-the next `pio run` -- a single build invocation is always sufficient.
-
-## Certificate time validation
+## Certificate time validation (EAP-TLS)
 
 The ESP32 EAP supplicant validates certificate expiry against the system
-clock. If the device has not yet completed an SNTP sync at boot and
+clock. If the device has not completed an SNTP sync at boot and
 authentication fails with a time-related error, set
 `#define EAP_DISABLE_TIME_CHECK 1` in `config.h` temporarily. Remove it once
 SNTP is configured and the RTC is kept accurate.

@@ -12,6 +12,9 @@ loudly rather than silently corrupt state.
 | `apply_managed_patches.py` | (not wired; reference only) | Alternate SCons entry point for the same patch logic |
 | `detect_upload_port.sh` | `make flash` / `make monitor` | Finds the CH340 USB-UART bridge by VID for flashing |
 | `ota_send.py` | Developer, each OTA release | Streams an encrypted firmware image to a running device over SSH |
+| `test_mdns_build_matrix.sh` | Developer (manual) | Builds the firmware with `MDNS_ENABLE` off then on and checks symbol presence in the ELF |
+| `test_ntp_build_matrix.sh` | Developer (manual) | Builds twice over `NTP_ENABLE` and checks `esp_netif_sntp_init` symbol presence |
+| `test_ssh_keepalive_build_matrix.sh` | Developer (manual) | Builds three times over `SSH_KEEPALIVE_INTERVAL_SEC` (default / 0 / 5) and checks `wolfSSH_global_request` symbol presence |
 
 ## fetch_managed_components.py
 
@@ -104,3 +107,14 @@ Test hooks (used by the test plan in CLAUDE.md):
 - `--truncate N` announces the full plaintext length but only sends `N` bytes
   of ciphertext, then closes the channel; verifies the device handles
   truncated transfers without partially flashing the new slot.
+
+## Build-flag matrix scripts
+
+`test_mdns_build_matrix.sh`, `test_ntp_build_matrix.sh`, and
+`test_ssh_keepalive_build_matrix.sh` each build the firmware multiple times
+under different compile-time flag combinations and use `xtensa-esp32s3-elf-nm`
+to confirm that the relevant ESP-IDF / wolfSSH symbols appear (or do not
+appear) in the resulting ELF. They are developer-run manual smoke tests --
+not wired into PlatformIO or pytest -- and each takes a few minutes since
+they invoke a full `pio run` per case. Each script patches `main/config.h`
+in place and restores the original on exit.

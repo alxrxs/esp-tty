@@ -52,11 +52,11 @@ to `usb_cdc_drain` along with the `usb_to_ssh` ring and the global scrollback.
 
 ## Tests
 
-Six cases in `test/native/test_cdc_drain/test_cdc_drain.c`, compiled with
-`-DRING_NATIVE -DUNIT_TEST`. The test suite uses a scripted stub (`scripted_read_cb`)
-that returns a preset sequence of chunk sizes or errors, and verifies: clean
+`test/native/test_cdc_drain/test_cdc_drain.c`, compiled with
+`-DRING_NATIVE -DUNIT_TEST`, uses a scripted stub (`scripted_read_cb`) that
+returns a preset sequence of chunk sizes or errors, and verifies: clean
 multi-chunk drain with correct byte counts in ring and scrollback; single
 sub-64-byte chunk; termination on read error with pre-error bytes preserved;
 continued draining when the ring is full (partial write); continued draining
-when the ring is already closed; and immediate termination when the first call
-returns zero bytes.
+when the ring is already closed; and immediate termination when the first
+call returns zero bytes.

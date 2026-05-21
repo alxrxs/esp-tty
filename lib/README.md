@@ -1,6 +1,6 @@
 # lib/ -- Platform-Agnostic Component Libraries
 
-This directory holds the 14 C libraries that are shared between the ESP32-S3
+This directory holds the C libraries that are shared between the ESP32-S3
 firmware and the native host test suite.  Most are a single `.c`/`.h` pair
 with no compile-time dependency on FreeRTOS, wolfSSH, or ESP-IDF headers
 except where those dependencies are guarded by an `#ifdef`.  The same source
@@ -32,10 +32,11 @@ and stubs are declared in the `[env:native]` section of `platformio.ini`:
   ESP-IDF header.
 
 Crypto stubs live in `test/stubs/wolfssl/wolfcrypt/` (OpenSSL-backed shims
-for ECC + SHA-256 + a small CSR-reparse helper).  Cryptographic libraries
-that use mbedTLS (`scep_proto`, `cred_store`) link against the system
-`libmbedtls` / `libmbedcrypto` / `libmbedx509` on the host via
-`test/scripts/native_link_openssl.py`.  Libraries that have no platform
+for the wolfCrypt SHA-256, base64, RNG, RSA, ECC, ASN, and PKCS#7 surfaces
+that the firmware uses outside SCEP). Libraries that drive mbedTLS
+directly (`scep_proto`, `cred_store`) include the real mbedTLS headers and
+link against the host's system `libmbedcrypto` / `libmbedx509` / `libmbedtls`
+via `test/scripts/native_link_openssl.py`. Libraries that have no platform
 dependencies -- `bridge`, `term_resize`, `rollback_decision`, `wifi_state`,
 `cert_renewer/cert_renewer_decide` -- compile on the host without any stubs
 at all.

@@ -82,16 +82,17 @@ active without storing the raw public key material in flash or logs.
 ## Native testability
 
 The module has no direct dependency on ESP-IDF or FreeRTOS outside the
-`ESP_LOG*` calls, which are stubbed for native builds. Three Unity test suites
-exercise it on the host:
+`ESP_LOG*` calls, which are stubbed for native builds. Three Unity test
+suites exercise it on the host:
 
-- `test/native/test_pubkey_auth/` -- 12 cases covering `pubkey_parse_b64` and
-  `pubkey_compute_hash`, including a golden-value SHA-256 check, comment-field
-  independence, and boundary conditions for the 512-byte internal blob buffer.
-- `test/native/test_auth_check/` -- 10 cases covering `pubkey_auth_check`,
-  including accept, single-byte-difference rejection, length-prefix rejection,
-  multi-key iteration semantics, and a behavioural witness that the XOR
-  accumulator inspects all 32 bytes rather than stopping early.
-- `test/native/test_user_class/` -- 23 cases covering `pubkey_classify_user`,
-  including exact matches, case variants, whitespace padding, embedded NUL bytes,
-  Unicode byte sequences, and very long inputs.
+- `test/native/test_pubkey_auth/` -- covers `pubkey_parse_b64` and
+  `pubkey_compute_hash`, including a golden-value SHA-256 check,
+  comment-field independence, and boundary conditions for the 512-byte
+  internal blob buffer.
+- `test/native/test_auth_check/` -- covers `pubkey_auth_check`: accept,
+  single-byte-difference rejection, length-prefix rejection, multi-key
+  iteration semantics, and a behavioural witness that the XOR accumulator
+  inspects all 32 bytes rather than stopping early.
+- `test/native/test_user_class/` -- covers `pubkey_classify_user`: exact
+  matches, case variants, whitespace padding, embedded NUL bytes, Unicode
+  byte sequences, and very long inputs.

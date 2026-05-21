@@ -34,7 +34,8 @@ without touching the OTA state.
 - **rollback_decision.c** -- implementation (one `if` statement; no platform
   calls).
 
-The library was extracted from `main.c` specifically to make the decision
-testable on the host. `test/native/test_rollback_decision/test_rollback_decision.c`
-covers all six `esp_ota_img_states_t` variants using Unity, compiled with
+The library lives in `lib/` (instead of `main/`) specifically to make the
+decision testable on the host.
+`test/native/test_rollback_decision/test_rollback_decision.c` covers every
+`esp_ota_img_states_t` variant using Unity, compiled with
 `-DROLLBACK_DECISION_NATIVE_TEST`.

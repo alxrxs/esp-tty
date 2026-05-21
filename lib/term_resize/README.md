@@ -35,8 +35,8 @@ arise in practice, and 64 bytes accommodates the maximum `uint32_t` case.
 
 ## Tests
 
-10 cases in `test/native/test_term_resize/test_term_resize.c`.  Covers the
-typical 80x24 case (exact byte string), the 1x1 minimum, a 500x200 large
-terminal, all three zero-dimension early returns, a NULL-pointer guard, an
-undersized buffer, exact-fit boundary (payload length versus payload+1), and the
-maximum `UINT32_MAX` values.
+`test/native/test_term_resize/test_term_resize.c` covers the typical 80x24
+case (exact byte string), the 1x1 minimum, a 500x200 large terminal, all
+three zero-dimension early returns, a NULL-pointer guard, an undersized
+buffer, exact-fit boundary (payload length versus payload+1), and the
+`UINT32_MAX` extreme.

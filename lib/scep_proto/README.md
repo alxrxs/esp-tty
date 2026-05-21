@@ -1,34 +1,52 @@
 # lib/scep_proto -- SCEP wire-protocol primitives
 
-SCEP (RFC 8894) certificate enrolment library for esp-tty.
+SCEP (RFC 8894) certificate enrolment library for esp-tty. Pure C, no ESP-IDF
+or FreeRTOS dependencies, no network I/O -- everything is in-memory build /
+parse of DER bytes. All crypto goes through mbedTLS (`mbedtls_pk`,
+`mbedtls_rsa`, `mbedtls_x509write_*`, `mbedtls_aes`, `mbedtls_asn1*`,
+`mbedtls_sha256`). The same source compiles on-device (ESP-IDF ships mbedTLS)
+and against system mbedTLS for native unit tests.
 
-Target CA: Microsoft NDES (`/certsrv/mscep/mscep.dll`).
+Target CA: Microsoft NDES (`/certsrv/mscep/mscep.dll`) in legacy CryptoAPI /
+CSP mode, end-to-end tested. Key algorithm is RSA-2048 with SHA-256 (PKCS#1
+v1.5); NDES legacy mode rejects ECDSA-signed pkiMessages with
+`failInfo=badMessageCheck`.
 
-No ESP-IDF dependencies, no network I/O. All crypto via wolfSSL.
-
-## API
+## Public API
 
 See `scep_proto.h` for full doc comments with RFC section references.
 
 | Function | Purpose |
 |---|---|
-| `scep_generate_keypair` | Generate ECDSA P-256 key |
-| `scep_build_csr` | Build PKCS#10 CSR with challengePassword |
-| `scep_build_self_signed_cert` | Build transient signer cert |
-| `scep_transaction_id` | Derive hex(SHA-256(SPKI)) transaction ID |
-| `scep_build_pkimessage_pkcsreq` | Build PKCSReq pkiMessage |
-| `scep_parse_certrep` | Parse CertRep, decrypt issued cert |
-| `scep_parse_getcacert` | Parse GetCACert degenerate P7 |
-| `scep_parse_pkimessage_pkcsreq_for_test` | Test-only reverse path (`-DSCEP_PROTO_TEST_HELPERS`) |
+| `scep_generate_keypair` | Generate an RSA-2048 key pair into a `mbedtls_pk_context` |
+| `scep_build_csr` | Build a PKCS#10 CSR with the SCEP `challengePassword` attribute |
+| `scep_build_self_signed_cert` | Build the transient signer cert used in the pkiMessage SignerInfo |
+| `scep_transaction_id` | Derive `hex(SHA-256(SPKI))` per RFC 8894 §3.1 |
+| `scep_build_pkimessage_pkcsreq` | Build a PKCSReq pkiMessage: `SignedData(EnvelopedData(CSR))` |
+| `scep_parse_certrep` | Parse a CertRep response, decrypt the EnvelopedData, extract the issued cert DER, return pkiStatus / failInfo |
+| `scep_parse_getcacert` | Parse the degenerate-PKCS#7 GetCACert response into a CA + RA-sign + RA-encrypt bundle (pointers alias the input buffer) |
+| `scep_parse_pkimessage_pkcsreq_for_test` | Reverse of `scep_build_pkimessage_pkcsreq`, compiled only with `-DSCEP_PROTO_TEST_HELPERS` |
 
-## wolfSSL user_settings.h additions required
+EnvelopedData content encryption is AES-256-CBC; signatures and signed
+attributes follow CMS / PKCS#7. The library does no transport: callers
+combine it with `lib/scep_transport/` (HTTPS via `esp_http_client`) and
+`lib/cred_store/` (NVS persistence) -- `main/scep_enroll.c` is the
+orchestrator.
 
-```c
-/* SCEP wire-protocol support */
-#define HAVE_PKCS7          /* wc_PKCS7_* API (SignedData + EnvelopedData) */
-#define WOLFSSL_CERT_GEN    /* wc_MakeCert, wc_InitCert, wc_MakeSelfCert  */
-#define WOLFSSL_CERT_REQ    /* wc_MakeCertReq + Cert.challengePw field     */
-#define HAVE_AES_CBC        /* AES-256-CBC for EnvelopedData content enc   */
-```
+## Callers
 
-`HAVE_ECC`, `WOLFSSL_SHA256` are already present from the SSH host-key config.
+- `main/scep_enroll.c` -- one-shot enrolment on first boot.
+- `main/cert_renewer.c` -- background task that re-enrols before the stored
+  cert's `NotAfter` falls inside `CERT_RENEWAL_WINDOW_DAYS`.
+
+## Tests
+
+- `test/native/test_scep_proto/` -- builds + reparses CSRs and pkiMessages,
+  exercises the transaction-ID derivation, error / NULL guards, and the
+  single- vs multi-cert GetCACert bundle paths against an in-process
+  mbedTLS CA.
+- `test/scripts/test_scep_protocol_e2e.py` -- end-to-end roundtrip against
+  the in-process `FakeNdesCA` Python fixture (success, failure, pending,
+  malformed CertRep, single- and multi-cert bundle responses).
+- `test/embedded/test_scep_proto_smoke/` -- on-device smoke (gated on a
+  build flag; not run in normal CI).

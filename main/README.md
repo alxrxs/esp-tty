@@ -1,84 +1,61 @@
 # main/ -- Firmware Entry Point and ESP32-S3-Specific Code
 
-This directory is the ESP-IDF application component and the top-level firmware
-entry point. PlatformIO treats it as the `src_dir` (see `platformio.ini`). All
-source files here link against wolfSSH, TinyUSB, and ESP-IDF, and they depend on
-FreeRTOS, the ESP32-S3 hardware peripherals, and NVS flash. None of them can be
-compiled or unit-tested natively. Logic that does not require ESP-IDF has been
-extracted to `lib/`, where it is covered by the native test suite under
-`test/native/`.
+This directory is the ESP-IDF application component and the top-level
+firmware entry point. PlatformIO treats it as the `src_dir` (see
+`platformio.ini`). Every source file here links against wolfSSH, TinyUSB, or
+ESP-IDF and depends on FreeRTOS, the ESP32-S3 hardware peripherals, NVS, or
+mbedTLS. None of them compile or run natively; platform-agnostic logic is
+extracted into `lib/` where it is covered by the host test suite.
 
-`app_main` (in `main.c`) is the single firmware entry point. It initialises NVS
-encryption, allocates the PSRAM-backed ring buffers and scrollback buffer, and
-starts the USB CDC, Wi-Fi, and SSH server subsystems in order. It does not run
-its own loop; all blocking work runs in FreeRTOS tasks spawned by the subsystems
-it initialises. After starting the SSH server, `app_main` arms a one-shot
-FreeRTOS timer (default 30 seconds). When the timer fires, `rollback_timer_cb`
-calls `rollback_decide` and, if the running image is still in
-`ESP_OTA_IMG_PENDING_VERIFY` state, calls `esp_ota_mark_app_valid_cancel_rollback`
-to confirm the image and cancel any pending bootloader rollback. If the timer
-cannot be created due to memory exhaustion, the mark-valid call is made
-immediately as a fail-safe.
-
-The SSH server (`ssh_server.c`) listens on `SSH_PORT` (default 22) and handles
-all authentication and session management. Compile-time cipher hardening is
-applied via `wolfssh_options.h`: AES-CBC, AES-192, SHA-1 MACs, and DH key
-exchange are all disabled. The host key is an Ed25519 keypair generated once on
-first boot and persisted in encrypted NVS; it is loaded or generated at server
-start by `host_key.c`. When a second SSH client connects while a session is
-active, the old session is torn down via a semaphore-coordinated shutdown of the
-bridge pump tasks before `wolfSSH_free` is called, eliminating the use-after-free
-race documented in commit `d2edfbe`. Authentication is public-key only; the OTA
-username routes to `ota_session_run` instead of the bridge pump.
-
-The USB CDC driver (`usb_cdc.c`) registers a TinyUSB CDC ACM device on the
-ESP32-S3 native USB port. A `usb_tx_task` FreeRTOS task drains the `ssh_to_usb`
-ring into `tud_cdc_write`; the TinyUSB `tud_cdc_rx_cb` callback pushes received
-bytes non-blocking into `usb_to_ssh`. When `BRIDGE_LOOPBACK` is defined (Wokwi
-and QEMU builds), `usb_cdc.c` is not compiled and the two rings are wired
-directly together by the bridge pump, enabling loopback testing without USB
-hardware.
-
-`config.h` is the compile-time configuration file and is gitignored. It must be
-created before the first build by copying `config.example.h` and filling in the
-values specific to your deployment. The example file is extensively commented and
-covers Wi-Fi credentials, SSH public keys, USB descriptor strings, network
-identity, and operational tuning knobs such as ring buffer sizes, scrollback
-capacity, TCP keepalive parameters, and the OTA rollback delay. Enterprise Wi-Fi
-(WPA2/WPA3 EAP-TLS) is an opt-in compile-time feature enabled by defining
-`WIFI_USE_ENTERPRISE` in `config.h`; the required PEM certificates belong in
-`main/certs/` (see `main/certs/README.md` for setup instructions and the
-`EMBED_TXTFILES` mechanism that assembles them into the firmware binary).
+`app_main` (in `main.c`) is the single firmware entry point. It initialises
+NVS encryption, allocates the PSRAM-backed ring buffers and scrollback
+buffer, brings up Wi-Fi (PSK or SCEP-driven WPA3-Enterprise) and the USB
+CDC interface, starts the SSH server, and arms a one-shot rollback timer.
+After the timer fires it calls `rollback_decide` and, if the running image
+is still `ESP_OTA_IMG_PENDING_VERIFY`, calls
+`esp_ota_mark_app_valid_cancel_rollback`. Once `app_main` returns the
+spawned FreeRTOS tasks keep running.
 
 ## Source files
 
 | File | Role |
 |---|---|
 | `main.c` | `app_main`: NVS AES-XTS-256 init, ring + scrollback allocation in PSRAM, subsystem start sequence, OTA rollback timer |
-| `wifi.c` | Wi-Fi STA setup (WPA2/WPA3-Personal or EAP-TLS), event-driven reconnect, DHCP watchdog timer, static IPv4, IPv6 SLAAC/DHCPv6/static, optional MAC address override |
-| `usb_cdc.c` | TinyUSB CDC ACM driver, custom USB device descriptors, `usb_tx_task`, RX callback into ring |
-| `ssh_server.c` | wolfSSH accept loop, single-session takeover with semaphore synchronisation, pubkey auth dispatch, bridge pump tasks |
-| `ota_session.c` | OTA SSH channel handler: streaming receive, `ota_verify_feed` loop, ECDSA+AES-GCM verification, partition switch and reboot |
-| `host_key.c` | ED25519 host key generation (wolfCrypt RNG) and NVS persistence; SHA-256 fingerprint printed to UART on every boot |
-| `config.example.h` | Compile-time configuration template; copy to `config.h` (gitignored) before building |
+| `wifi.c` / `wifi.h` | Wi-Fi STA driver: PSK / smart bootstrap (PSK -> NTP -> SCEP -> EAP-TLS) / static-EAP-TLS modes, event-driven reconnect, DHCP watchdog, IPv4/IPv6 config, optional MAC override |
+| `usb_cdc.c` / `usb_cdc.h` | TinyUSB CDC ACM driver, custom USB descriptors, `usb_tx_task`, RX callback into ring (skipped when `BRIDGE_LOOPBACK` is defined) |
+| `ssh_server.c` / `ssh_server.h` | wolfSSH accept loop, single-session takeover via semaphore, pubkey auth, bridge pump tasks, terminal-resize callback |
+| `ota_session.c` / `ota_session.h` | `ota@` SSH channel handler: ephemeral X25519 / HKDF / AES-256-GCM via wolfCrypt, streaming decrypt into the inactive OTA partition, partition switch + reboot |
+| `host_key.c` / `host_key.h` | Ed25519 host-key generation (wolfCrypt RNG) and NVS persistence; SHA-256 fingerprint printed at every boot |
+| `scep_enroll.c` / `scep_enroll.h` | One-shot SCEP enrolment orchestrator: `GetCACert` -> keygen -> CSR + self-signed signer -> PKCSReq -> CertRep parse -> `cred_store_save` |
+| `cert_renewer.c` / `cert_renewer.h` | Background FreeRTOS task that polls the stored cert's `NotAfter` and re-enrols via SCEP when inside `CERT_RENEWAL_WINDOW_DAYS`, then pushes the new credentials into the EAP supplicant |
 | `wolfssh_options.h` | wolfSSH compile-time feature flags: disables AES-CBC, AES-192, SHA-1 MACs, and DH key exchange |
-| `CMakeLists.txt` | ESP-IDF component registration; conditionally embeds EAP-TLS certs via `EMBED_TXTFILES` when present in `certs/` |
-| `idf_component.yml` | IDF component manager manifest (wolfSSL, wolfSSH, TinyUSB versions) |
+| `config.example.h` | Compile-time configuration template; copy to `config.h` (gitignored) before building |
+| `config.h` | Active per-build configuration (gitignored) |
+| `config.<dev>.h` | Per-device overlays selected by `make flash DEV=<dev>` / `make ota <dev>` |
+| `idf_component.yml` | IDF Component Manager manifest (wolfSSL, wolfSSH, TinyUSB, mDNS versions) |
+| `CMakeLists.txt` | Registers the IDF component; pulls in selected `lib/` sources and conditionally embeds `certs/ca.pem`, `client.crt`, `client.key`, `scep_ca.pem` via `EMBED_TXTFILES` |
+
+The component also compiles selected `lib/` sources directly via
+`CMakeLists.txt` (`ring`, `bridge`, `usb_cdc_drain`, `term_resize`,
+`pubkey_auth`, `mdns_dispatch`, `ssh_keepalive`, `cert_renewer_decide`,
+`scep_proto`, `cred_store`, `scep_transport`).
 
 ## Boot sequence
 
 ```mermaid
 flowchart TB
     start(["app_main()"])
-    nvs["1. NVS flash init (AES-XTS-256)<br/>nvs_flash_read_security_cfg<br/>nvs_flash_generate_keys on first boot<br/>nvs_flash_secure_init_partition(&quot;nvs&quot;)"]
-    rings["2. Ring buffers + scrollback (PSRAM)<br/>ring_create(RING_BUFFER_BYTES) x 2<br/>scrollback_create(SCROLLBACK_BUFFER_BYTES)"]
-    usb["3. USB CDC ACM<br/>usb_cdc_init(...)<br/>usb_tx_task FreeRTOS task<br/><i>skipped when BRIDGE_LOOPBACK is defined</i>"]
-    wifi["4. Wi-Fi STA<br/>wifi_init_sta()"]
-    ssh["5. SSH server<br/>ssh_server_start(...)<br/>-> host_key_load_or_generate()<br/>-> ssh_server_task listens TCP/22"]
-    rollback["6. Rollback self-test timer<br/>xTimerCreate one-shot<br/>OTA_ROLLBACK_DELAY_MS<br/>-> rollback_decide() + mark_app_valid"]
-    done(["app_main returns;<br/>tasks keep running"])
+    nvs["1. NVS flash init (AES-XTS-256)"]
+    rings["2. Ring buffers + scrollback (PSRAM)"]
+    usb["3. USB CDC ACM<br/><i>skipped when BRIDGE_LOOPBACK is defined</i>"]
+    wifi["4. Wi-Fi STA (PSK, smart, or static EAP-TLS)"]
+    scep["5. SCEP enrol on first boot<br/>(only in smart-bootstrap mode)"]
+    ssh["6. SSH server (TCP/22)"]
+    renew["7. cert_renewer task<br/>(only when WIFI_ENTERPRISE_SSID is defined)"]
+    rollback["8. Rollback self-test timer<br/>OTA_ROLLBACK_DELAY_MS"]
+    done(["app_main returns"])
 
-    start --> nvs --> rings --> usb --> wifi --> ssh --> rollback --> done
+    start --> nvs --> rings --> usb --> wifi --> scep --> ssh --> renew --> rollback --> done
 ```
 
 ## Configuration
@@ -89,54 +66,60 @@ Before building, copy `config.example.h` to `config.h` and edit it:
 cp main/config.example.h main/config.h
 ```
 
-`config.h` is gitignored and must never be committed. Key knobs:
+`config.h` is gitignored and must never be committed. `config.example.h` is
+extensively commented and describes the three Wi-Fi modes (A = PSK,
+B = static EAP-TLS, C = smart-bootstrap PSK->SCEP->EAP-TLS), all timing
+macros, and the per-device override mechanism. Key knobs:
 
 | Macro | Purpose |
 |---|---|
-| `WIFI_SSID` / `WIFI_PASS` | WPA2/WPA3-Personal credentials |
-| `WIFI_USE_ENTERPRISE` | Define to switch to EAP-TLS (see `certs/`) |
+| `WIFI_SSID` / `WIFI_PASS` | WPA2/WPA3-Personal credentials (Mode A bootstrap) |
+| `WIFI_USE_ENTERPRISE` | Define to switch to static EAP-TLS (Mode B) using `certs/ca.pem` + `client.crt` + `client.key` |
+| `WIFI_ENTERPRISE_SSID` | Define to enable Mode C smart bootstrap (PSK + SCEP -> WPA3-Enterprise) |
 | `EAP_IDENTITY` | Outer identity for EAP-TLS Phase 1 |
 | `EAP_DISABLE_TIME_CHECK` | Bypass cert-expiry check if SNTP is not yet synced |
-| `AUTHORIZED_PUBKEYS` | Comma-separated ED25519 public keys for `tty` sessions (up to `MAX_TTY_KEYS`) |
-| `OTA_AUTHORIZED_PUBKEY` | Single ED25519 public key for `ota` sessions |
+| `NTP_ENABLE` / `NTP_SERVER_LIST` / `NTP_TIMEZONE_POSIX` | SNTP client config |
+| `NTP_BEFORE_EAPTLS` | In Mode C, sync NTP before attempting the EAP-TLS join (cert validity check) |
+| `BOOTSTRAP_NTP_SYNC_TIMEOUT_SEC` | Max seconds to wait for SNTP during bootstrap |
+| `EAPTLS_HANDSHAKE_TIMEOUT_SEC` | Drop the EAP attempt if no `WIFI_EVENT_STA_CONNECTED` within this window |
+| `SCEP_URL` / `SCEP_CHALLENGE_PASSWORD` / `SCEP_SUBJECT_O` etc. | SCEP server endpoint and CSR fields |
+| `SCEP_NO_NTP_USE_ISSUANCE_TIME` | Use the issued cert's `NotBefore` as the time source when NTP is unavailable |
+| `CERT_RENEWAL_WINDOW_DAYS` | Re-enrol when the stored cert expires within this many days |
+| `CERT_REENROLL_THRESHOLD_SEC` | Minimum age before a renewal attempt is allowed (rate-limit) |
+| `AUTHORIZED_PUBKEYS` / `OTA_AUTHORIZED_PUBKEY` | Ed25519 keys for `tty` and `ota` SSH sessions |
 | `SSH_PORT` | TCP port for the SSH server (default 22) |
-| `USB_VID` / `USB_PID` | TinyUSB device descriptor VID and PID |
-| `USB_MANUFACTURER_STRING` / `USB_PRODUCT_STRING` | USB string descriptors |
-| `DEVICE_HOSTNAME` | DHCP hostname (shows in router lease table) |
+| `USB_VID` / `USB_PID` / `USB_MANUFACTURER_STRING` / `USB_PRODUCT_STRING` | TinyUSB device descriptors |
+| `DEVICE_HOSTNAME` | DHCP hostname |
 | `WIFI_MAC_BYTES` | Optional locally-administered MAC override |
-| `USE_STATIC_IPV4` | Define to use a fixed IPv4 address instead of DHCP |
-| `STATIC_IPV4_ADDRESS` / `STATIC_IPV4_NETMASK` / `STATIC_IPV4_GATEWAY` | Required when `USE_STATIC_IPV4` is defined |
-| `STATIC_IPV4_DNS_PRIMARY` / `STATIC_IPV4_DNS_SECONDARY` | Optional static DNS servers (IPv4) |
-| `IPV6_MODE` | IPv6 mode: `IPV6_MODE_DISABLED`, `IPV6_MODE_SLAAC` (default), `IPV6_MODE_SLAAC_STATELESS_DHCPV6`, `IPV6_MODE_STATEFUL_DHCPV6`, `IPV6_MODE_STATIC` |
-| `STATIC_IPV6_ADDRESS` / `STATIC_IPV6_PREFIX_LEN` / `STATIC_IPV6_GATEWAY` | Required when `IPV6_MODE` is `IPV6_MODE_STATIC` |
-| `STATIC_IPV6_DNS_PRIMARY` / `STATIC_IPV6_DNS_SECONDARY` | Optional static DNS servers (IPv6) |
-| `WIFI_MAX_RETRY` | Reconnect attempt limit (0 = unlimited) |
-| `DHCP_RETRY_TIMEOUT_SEC` | DHCP watchdog timeout in seconds (disabled automatically when `USE_STATIC_IPV4` is defined) |
-| `SSH_HANDSHAKE_TIMEOUT_SEC` | Drop clients that do not complete auth within this window |
-| `TCP_KEEPALIVE_IDLE_SEC` / `TCP_KEEPALIVE_INTVL_SEC` / `TCP_KEEPALIVE_COUNT` | TCP keepalive parameters |
+| `USE_STATIC_IPV4` / `STATIC_IPV4_*` | Optional fixed IPv4 config |
+| `IPV6_MODE` / `STATIC_IPV6_*` | IPv6 mode and optional static address |
+| `WIFI_MAX_RETRY` / `DHCP_RETRY_TIMEOUT_SEC` | Reconnect / DHCP watchdog tuning |
+| `SSH_HANDSHAKE_TIMEOUT_SEC` | Drop SSH clients that do not complete auth in time |
+| `TCP_KEEPALIVE_IDLE_SEC` / `TCP_KEEPALIVE_INTVL_SEC` / `TCP_KEEPALIVE_COUNT` | TCP keepalive |
 | `OTA_ROLLBACK_DELAY_MS` | Milliseconds after boot before the new image is marked valid |
-| `RING_BUFFER_BYTES` | Per-direction ring buffer size (default 16 KB, PSRAM) |
-| `SCROLLBACK_BUFFER_BYTES` | Scrollback history capacity (default 128 KB, PSRAM) |
-| `SCROLLBACK_REPLAY_LINES` | Lines of scrollback replayed to a newly connected SSH client |
+| `RING_BUFFER_BYTES` / `SCROLLBACK_BUFFER_BYTES` / `SCROLLBACK_REPLAY_LINES` | PSRAM-backed buffer sizing |
 
-## EAP-TLS certificates
+## Embedded PEM material
 
-When `WIFI_USE_ENTERPRISE` is defined, three PEM files must be placed in
-`main/certs/` before building. The real files are gitignored; placeholder
-`.example` stubs are tracked in git. See `main/certs/README.md` for the full
-setup procedure, including how `CMakeLists.txt` detects the files at configure
-time and embeds them via `EMBED_TXTFILES`.
+`main/certs/` holds the trust material that `main/CMakeLists.txt` embeds via
+`EMBED_TXTFILES`. See [`main/certs/README.md`](certs/README.md) for the file
+layout (Mode B EAP-TLS triple + Mode C `scep_ca.pem` trust anchor), how the
+files reach the firmware, and how to generate test material.
 
 ## Relationship to lib/
 
-The subsystems in this directory depend on helper libraries in `lib/` that
-contain no ESP-IDF dependencies and are covered by native unit tests:
+The subsystems in this directory rely on platform-agnostic helpers from
+`lib/` that carry their own native test suites:
 
 | lib/ module | Used by |
 |---|---|
 | `ring` | `main.c`, `usb_cdc.c`, `ssh_server.c` |
 | `scrollback` | `main.c`, `ssh_server.c` |
-| `pubkey_auth` | `ssh_server.c` (auth check + user classification) |
-| `ota_verify` / `ota_stream` | `ota_session.c` |
-| `rollback_decision` | `main.c` (rollback timer callback) |
+| `pubkey_auth` | `ssh_server.c` |
 | `bridge` / `usb_cdc_drain` / `term_resize` | `ssh_server.c` bridge pump |
+| `rollback_decision` | `main.c` rollback timer |
+| `mdns_dispatch` | `main.c` |
+| `ssh_keepalive` | `ssh_server.c` |
+| `scep_proto` / `scep_transport` / `cred_store` | `scep_enroll.c`, `cert_renewer.c` |
+| `cert_renewer` (decide) | `cert_renewer.c` |
+| `wifi_state` | `wifi.c` (Mode C state machine) |
