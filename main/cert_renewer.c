@@ -33,6 +33,8 @@
 #include "esp_wifi.h"
 #include "nvs.h"      /* ESP_ERR_NVS_NOT_FOUND */
 
+#include "esp_heap_caps.h"
+
 #include "cred_store.h"
 #include "scep_enroll.h"
 #include "wifi.h"     /* smart_eap_apply_creds() */
@@ -75,11 +77,27 @@ static void cert_renewer_task(void *arg)
              CERT_RENEWAL_CHECK_INTERVAL_SEC,
              CERT_RENEWAL_RETRY_INTERVAL_SEC);
 
+    /* cred_store_t is ~14 KB (dev_key[2048] + dev_cert[4096] + ca_chain[8192]
+     * + metadata).  The 32 KB task stack also has to accommodate RSA scratch
+     * (~4-8 KB) during scep_enroll().  Heap-allocate both stores in internal
+     * RAM (same reason as wifi_init_smart -- accessible from any context). */
+    cred_store_t *creds_p = heap_caps_calloc(1, sizeof(cred_store_t),
+                                              MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+    cred_store_t *new_creds_p = heap_caps_calloc(1, sizeof(cred_store_t),
+                                                  MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+    if (!creds_p || !new_creds_p) {
+        ESP_LOGE(TAG, "failed to allocate cred_store_t -- exiting renewal task");
+        heap_caps_free(creds_p);
+        heap_caps_free(new_creds_p);
+        s_task_running = false;
+        vTaskDelete(NULL);
+        return;
+    }
+
     for (;;) {
         /* -- 1. Load current credentials from NVS. */
-        cred_store_t creds;
-        memset(&creds, 0, sizeof(creds));
-        esp_err_t load_err = cred_store_load(&creds);
+        memset(creds_p, 0, sizeof(*creds_p));
+        esp_err_t load_err = cred_store_load(creds_p);
 
         if (load_err == ESP_ERR_NVS_NOT_FOUND) {
             /* Device was never enrolled.  This should not happen because
@@ -103,7 +121,7 @@ static void cert_renewer_task(void *arg)
         /* -- 2. Decide whether renewal is needed. */
         time_t now = time(NULL);
         renewal_decision_t decision = cert_renewer_decide(
-            now, creds.not_after, CERT_RENEWAL_WINDOW_DAYS);
+            now, creds_p->not_after, CERT_RENEWAL_WINDOW_DAYS);
 
         switch (decision) {
         case RENEWAL_DECISION_SKIP_NO_CLOCK:
@@ -115,7 +133,7 @@ static void cert_renewer_task(void *arg)
             continue;
 
         case RENEWAL_DECISION_SKIP_VALID: {
-            int64_t remaining = (int64_t)creds.not_after - (int64_t)now;
+            int64_t remaining = (int64_t)creds_p->not_after - (int64_t)now;
             ESP_LOGI(TAG, "cert valid, %lld s remaining (%.1f days) -- "
                           "next check in %d s",
                      (long long)remaining,
@@ -131,8 +149,8 @@ static void cert_renewer_task(void *arg)
         }
 
         /* -- 3. Renewal needed. */
-        int64_t remaining = (int64_t)creds.not_after - (int64_t)now;
-        if (creds.not_after == 0) {
+        int64_t remaining = (int64_t)creds_p->not_after - (int64_t)now;
+        if (creds_p->not_after == 0) {
             ESP_LOGW(TAG, "not_after=0 sentinel -- cert may be corrupt; "
                           "attempting re-enrollment");
         } else {
@@ -165,9 +183,8 @@ static void cert_renewer_task(void *arg)
                  (unsigned)elapsed_ms);
 
         /* -- 4. Reload freshly written credentials. */
-        cred_store_t new_creds;
-        memset(&new_creds, 0, sizeof(new_creds));
-        esp_err_t reload_err = cred_store_load(&new_creds);
+        memset(new_creds_p, 0, sizeof(*new_creds_p));
+        esp_err_t reload_err = cred_store_load(new_creds_p);
         if (reload_err != ESP_OK) {
             ESP_LOGE(TAG, "cred_store_load after successful enrollment "
                           "returned %s -- retrying in %d s",
@@ -179,7 +196,7 @@ static void cert_renewer_task(void *arg)
         }
 
         /* -- 5. Push new credentials into the EAP supplicant. */
-        esp_err_t apply_err = smart_eap_apply_creds(&new_creds);
+        esp_err_t apply_err = smart_eap_apply_creds(new_creds_p);
         if (apply_err != ESP_OK) {
             ESP_LOGE(TAG, "smart_eap_apply_creds failed (%s) -- "
                           "retrying in %d s",
@@ -207,6 +224,8 @@ static void cert_renewer_task(void *arg)
     }
 
 task_done:
+    heap_caps_free(creds_p);
+    heap_caps_free(new_creds_p);
     s_task_running = false;
     vTaskDelete(NULL);
 }

@@ -264,35 +264,6 @@ int scep_parse_getcacert(const uint8_t       *p7,
                          size_t               p7_len,
                          scep_cacert_bundle_t *out);
 
-/* -----------------------------------------------------------------------
- * Test-only mirror: parse a PKCSReq pkiMessage (reverse of build)
- * Only compiled when SCEP_PROTO_TEST_HELPERS is defined.
- * --------------------------------------------------------------------- */
-
-#ifdef SCEP_PROTO_TEST_HELPERS
-
-typedef struct {
-    uint8_t  csr_der[SCEP_MAX_CSR_DER];
-    size_t   csr_len;
-    char     message_type[8];       /* e.g. "19" */
-    char     transaction_id[SCEP_TRANSACTION_ID_HEX_LEN + 1];
-    uint8_t  sender_nonce[SCEP_NONCE_LEN];
-} scep_pkcsreq_unpacked_t;
-
-/**
- * scep_parse_pkimessage_pkcsreq_for_test() -- reverse of scep_build_pkimessage_pkcsreq.
- */
-int scep_parse_pkimessage_pkcsreq_for_test(const uint8_t             *p7,
-                                           size_t                     p7_len,
-                                           mbedtls_pk_context        *ra_priv_key,
-                                           const uint8_t             *ra_cert_der,
-                                           size_t                     ra_cert_len,
-                                           int (*f_rng)(void *, unsigned char *, size_t),
-                                           void                      *p_rng,
-                                           scep_pkcsreq_unpacked_t   *out);
-
-#endif /* SCEP_PROTO_TEST_HELPERS */
-
 #ifdef __cplusplus
 }
 #endif

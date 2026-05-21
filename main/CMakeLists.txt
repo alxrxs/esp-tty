@@ -90,6 +90,7 @@ idf_component_register(
         "scep_enroll.c"
         "cert_renewer.c"
         "${CMAKE_CURRENT_LIST_DIR}/../lib/cert_renewer/cert_renewer_decide.c"
+        "${CMAKE_CURRENT_LIST_DIR}/../lib/util/zeroize.c"
         "${CMAKE_CURRENT_LIST_DIR}/../lib/scep_proto/scep_proto.c"
         "${CMAKE_CURRENT_LIST_DIR}/../lib/cred_store/cred_store.c"
         "${CMAKE_CURRENT_LIST_DIR}/../lib/scep_transport/scep_transport.c"
@@ -106,6 +107,7 @@ idf_component_register(
         "${CMAKE_CURRENT_LIST_DIR}/../lib/scep_transport"
         "${CMAKE_CURRENT_LIST_DIR}/../lib/scep_proto"
         "${CMAKE_CURRENT_LIST_DIR}/../lib/cert_renewer"
+        "${CMAKE_CURRENT_LIST_DIR}/../lib/util"
     REQUIRES
         wolfssl
         wolfssl__wolfssh

@@ -35,9 +35,7 @@
 
 #include "unity.h"
 #include "cert_renewer_decide.h"
-
-/* Matches the constant in cert_renewer_decide.c and wifi.c */
-#define MIN_PLAUSIBLE_EPOCH  ((time_t)1577836800)   /* 2020-01-01 00:00:00 UTC */
+#include "wifi_state.h"   /* MIN_PLAUSIBLE_EPOCH */
 
 #define DAY_SEC  ((uint64_t)86400)
 

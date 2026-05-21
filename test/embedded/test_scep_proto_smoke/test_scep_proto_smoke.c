@@ -36,6 +36,9 @@
 
 #include "unity.h"
 #include "scep_proto.h"
+#ifdef SCEP_PROTO_TEST_HELPERS
+# include "scep_proto_test_helpers.h"
+#endif
 
 #include <string.h>
 #include <stdio.h>

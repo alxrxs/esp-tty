@@ -1138,9 +1138,19 @@ esp_err_t wifi_init_sta(void)
 # define BOOTSTRAP_NTP_SYNC_TIMEOUT_SEC  30
 #endif
 
-/* Minimum plausible epoch: 2020-01-01 00:00:00 UTC.
- * Used to detect an unsynced clock still at reset (0 or 1970). */
-#define MIN_PLAUSIBLE_EPOCH  ((time_t)1577836800)
+/* Default NTP_BEFORE_EAPTLS to 1 when NTP_ENABLE is set and a bootstrap PSK
+ * network is available (WIFI_SSID + WIFI_PASS); otherwise keep 0 so existing
+ * Mode C/B+ configs that have not explicitly set the macro are unaffected
+ * unless they also define NTP_ENABLE.  Users can override to 0 to opt out. */
+#ifndef NTP_BEFORE_EAPTLS
+# if defined(NTP_ENABLE) && defined(WIFI_SSID) && defined(WIFI_PASS)
+#  define NTP_BEFORE_EAPTLS 1
+# else
+#  define NTP_BEFORE_EAPTLS 0
+# endif
+#endif
+
+/* MIN_PLAUSIBLE_EPOCH is defined in wifi_state.h (already included above). */
 
 /* --------------------------------------------------------------------------
  * forward declaration for ntp_dispatch_start used in smart mode below.
@@ -1384,6 +1394,35 @@ static esp_err_t smart_on_ip_full(void)
 }
 #endif /* !WIFI_USE_ENTERPRISE -- end of smart_on_ip_full (Mode C only) */
 
+/* Push CA cert and device cert+key from creds into the EAP supplicant.
+ *
+ * Used by both smart_configure_eaptls (NVS path) and smart_eap_apply_creds
+ * (cert renewal path).  Does NOT call esp_wifi_sta_enterprise_enable() --
+ * only smart_configure_eaptls does that so cert_renewer can update
+ * credentials on a live connection without toggling the supplicant. */
+static esp_err_t eap_push_nvs_creds(const cred_store_t *creds)
+{
+    esp_err_t err = esp_eap_client_set_ca_cert(
+        creds->ca_chain, creds->ca_chain_len);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "[smart] set_ca_cert failed: %s",
+                 esp_err_to_name(err));
+        return ESP_FAIL;
+    }
+
+    err = esp_eap_client_set_certificate_and_key(
+        creds->dev_cert, creds->dev_cert_len,
+        creds->dev_key,  creds->dev_key_len,
+        NULL, 0);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "[smart] set_certificate_and_key failed: %s",
+                 esp_err_to_name(err));
+        return ESP_FAIL;
+    }
+
+    return ESP_OK;
+}
+
 /* Configure and start EAP-TLS.
  *
  * Feeds creds from NVS into the EAP supplicant if available; otherwise falls
@@ -1404,22 +1443,9 @@ static esp_err_t smart_configure_eaptls(const cred_store_t *creds)
                  (unsigned)creds->dev_cert_len,
                  (unsigned)creds->dev_key_len);
 
-        esp_err_t err = esp_eap_client_set_ca_cert(
-            creds->ca_chain, creds->ca_chain_len);
+        esp_err_t err = eap_push_nvs_creds(creds);
         if (err != ESP_OK) {
-            ESP_LOGE(TAG, "[smart] set_ca_cert failed: %s",
-                     esp_err_to_name(err));
-            return ESP_FAIL;
-        }
-
-        err = esp_eap_client_set_certificate_and_key(
-            creds->dev_cert, creds->dev_cert_len,
-            creds->dev_key,  creds->dev_key_len,
-            NULL, 0);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "[smart] set_certificate_and_key failed: %s",
-                     esp_err_to_name(err));
-            return ESP_FAIL;
+            return err;
         }
     } else {
         /* Fallback: compile-time embedded certs (EMBED_TXTFILES path).
@@ -1475,24 +1501,7 @@ esp_err_t smart_eap_apply_creds(const cred_store_t *creds)
              (unsigned)creds->dev_cert_len,
              (unsigned)creds->dev_key_len);
 
-    esp_err_t err = esp_eap_client_set_ca_cert(
-        creds->ca_chain, creds->ca_chain_len);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "[smart] set_ca_cert failed: %s", esp_err_to_name(err));
-        return ESP_FAIL;
-    }
-
-    err = esp_eap_client_set_certificate_and_key(
-        creds->dev_cert, creds->dev_cert_len,
-        creds->dev_key,  creds->dev_key_len,
-        NULL, 0);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "[smart] set_certificate_and_key failed: %s",
-                 esp_err_to_name(err));
-        return ESP_FAIL;
-    }
-
-    return ESP_OK;
+    return eap_push_nvs_creds(creds);
 }
 #endif /* !WIFI_USE_ENTERPRISE -- end of smart_eap_apply_creds (Mode C only) */
 
@@ -1555,11 +1564,22 @@ static esp_err_t wifi_mode_enterprise(const char         *ssid,
  * Public entry points
  * -------------------------------------------------------------------------- */
 
-/* wifi_init_smart -- Mode C (SCEP/NVS, no embedded enterprise certs) */
-#ifndef WIFI_USE_ENTERPRISE
-esp_err_t wifi_init_smart(void)
+/* wifi_smart_init_common -- shared preamble for wifi_init_smart (Mode C) and
+ * wifi_init_enterprise_bootstrap (Mode B+).
+ *
+ * Creates the event group, DHCP watchdog, TCP/IP stack, netif, WiFi driver,
+ * and persistent event handler registrations that both entry points need.
+ * Writes the two handler instance handles to *out_inst_wifi / *out_inst_ip
+ * so callers can unregister them once the enterprise connection is established.
+ *
+ * Returns ESP_OK on success; aborts via configASSERT / ESP_ERROR_CHECK on any
+ * unrecoverable setup failure (same behaviour as the original per-function
+ * code). */
+static esp_err_t wifi_smart_init_common(
+    esp_event_handler_instance_t *out_inst_wifi,
+    esp_event_handler_instance_t *out_inst_ip)
 {
-    /* 1. Create shared resources (event group, DHCP watchdog). */
+    /* 1. Shared resources (event group, DHCP watchdog). */
     s_wifi_event_group = xEventGroupCreate();
     configASSERT(s_wifi_event_group);
 
@@ -1590,15 +1610,13 @@ esp_err_t wifi_init_smart(void)
     wifi_init_config_t driver_cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&driver_cfg));
 
-    /* 4. Register persistent event handlers (reconnect + IP logging). */
-    esp_event_handler_instance_t inst_wifi;
-    esp_event_handler_instance_t inst_ip;
+    /* 4. Persistent event handlers (reconnect + IP logging). */
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
         WIFI_EVENT, ESP_EVENT_ANY_ID,
-        &wifi_event_handler, NULL, &inst_wifi));
+        &wifi_event_handler, NULL, out_inst_wifi));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
         IP_EVENT, IP_EVENT_STA_GOT_IP,
-        &wifi_event_handler, NULL, &inst_ip));
+        &wifi_event_handler, NULL, out_inst_ip));
 
 #if IPV6_MODE != IPV6_MODE_DISABLED && defined(CONFIG_LWIP_IPV6)
     esp_event_handler_instance_t inst_ip6;
@@ -1607,6 +1625,17 @@ esp_err_t wifi_init_smart(void)
         &wifi_event_handler, NULL, &inst_ip6));
     (void)inst_ip6;
 #endif
+
+    return ESP_OK;
+}
+
+/* wifi_init_smart -- Mode C (SCEP/NVS, no embedded enterprise certs) */
+#ifndef WIFI_USE_ENTERPRISE
+esp_err_t wifi_init_smart(void)
+{
+    esp_event_handler_instance_t inst_wifi;
+    esp_event_handler_instance_t inst_ip;
+    wifi_smart_init_common(&inst_wifi, &inst_ip);
 
     /* 5. Load stored credentials.
      *
@@ -1642,17 +1671,6 @@ esp_err_t wifi_init_smart(void)
         }
     }
 
-/* Default NTP_BEFORE_EAPTLS to 1 when NTP_ENABLE is set and a bootstrap PSK
- * network is available (WIFI_SSID + WIFI_PASS); otherwise keep 0 so existing
- * Mode C configs that have not explicitly set the macro are unaffected unless
- * they also define NTP_ENABLE.  Users can override to 0 to opt out. */
-#ifndef NTP_BEFORE_EAPTLS
-# if defined(NTP_ENABLE) && defined(WIFI_SSID) && defined(WIFI_PASS)
-#  define NTP_BEFORE_EAPTLS 1
-# else
-#  define NTP_BEFORE_EAPTLS 0
-# endif
-#endif
     bool ntp_req = (NTP_BEFORE_EAPTLS != 0);
 
 #ifdef SCEP_NO_NTP_USE_ISSUANCE_TIME
@@ -1781,49 +1799,9 @@ esp_err_t wifi_init_smart(void)
 #ifdef WIFI_USE_ENTERPRISE
 esp_err_t wifi_init_enterprise_bootstrap(void)
 {
-    /* 1. Shared resources. */
-    s_wifi_event_group = xEventGroupCreate();
-    configASSERT(s_wifi_event_group);
-
-#if DHCP_RETRY_TIMEOUT_SEC > 0 && !defined(USE_STATIC_IPV4)
-    s_dhcp_watchdog = xTimerCreate(
-        "dhcp_wd",
-        pdMS_TO_TICKS(DHCP_RETRY_TIMEOUT_SEC * 1000),
-        pdFALSE, NULL, dhcp_watchdog_cb);
-    if (!s_dhcp_watchdog) {
-        ESP_LOGW(TAG, "[b+] DHCP watchdog timer creation failed");
-    }
-#endif
-
-    /* 2. TCP/IP stack + netif. */
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-    s_sta_netif = esp_netif_create_default_wifi_sta();
-    configASSERT(s_sta_netif);
-
-    esp_err_t herr = esp_netif_set_hostname(s_sta_netif, DEVICE_HOSTNAME);
-    if (herr != ESP_OK) {
-        ESP_LOGW(TAG, "[b+] set_hostname failed: %s", esp_err_to_name(herr));
-    }
-
-    /* 3. WiFi driver init (once). */
-    wifi_init_config_t driver_cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&driver_cfg));
-
-    /* 4. Persistent event handlers. */
     esp_event_handler_instance_t inst_wifi;
     esp_event_handler_instance_t inst_ip;
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(
-        WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, &inst_wifi));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(
-        IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, &inst_ip));
-
-#if IPV6_MODE != IPV6_MODE_DISABLED && defined(CONFIG_LWIP_IPV6)
-    esp_event_handler_instance_t inst_ip6;
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(
-        IP_EVENT, IP_EVENT_GOT_IP6, &wifi_event_handler, NULL, &inst_ip6));
-    (void)inst_ip6;
-#endif
+    wifi_smart_init_common(&inst_wifi, &inst_ip);
 
     /* 5. Embedded certs sanity-check.  Cert is always "present" and treated as
      *    non-expired (we cannot evaluate NotAfter without a synced clock and
@@ -1839,14 +1817,6 @@ esp_err_t wifi_init_enterprise_bootstrap(void)
     time_t now = time(NULL);
     bool ntp_synced = (now >= MIN_PLAUSIBLE_EPOCH);
 
-/* Default NTP_BEFORE_EAPTLS to 1 when NTP_ENABLE and bootstrap are available. */
-#ifndef NTP_BEFORE_EAPTLS
-# if defined(NTP_ENABLE) && defined(WIFI_SSID) && defined(WIFI_PASS)
-#  define NTP_BEFORE_EAPTLS 1
-# else
-#  define NTP_BEFORE_EAPTLS 0
-# endif
-#endif
     bool ntp_req = (NTP_BEFORE_EAPTLS != 0);
 
     int enterprise_attempts = 0;

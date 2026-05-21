@@ -6,7 +6,7 @@
  * logic (cred_store_parse_not_after, cred_store_parse_not_before) to be tested
  * natively without ESP-IDF NVS.
  *
- * Key material is wiped with force_zero() on every exit path.
+ * Key material is wiped with zeroize() on every exit path.
  *
  * mbedTLS API used for date extraction:
  *   mbedtls_x509_crt_parse_der -- one-shot DER parse
@@ -15,19 +15,14 @@
  */
 
 #include "cred_store.h"
+#include "zeroize.h"
 
+#include <stdbool.h>
 #include <string.h>
 #include <stdint.h>
 #include <time.h>
 
 #include "esp_log.h"
-
-/* force_zero: volatile write to prevent dead-store elimination of key material. */
-static void force_zero(void *mem, size_t len)
-{
-    volatile unsigned char *p = (volatile unsigned char *)mem;
-    while (len--) *p++ = 0;
-}
 
 static const char *TAG = "cred_store";
 
@@ -74,14 +69,17 @@ static esp_err_t x509_time_to_epoch(const mbedtls_x509_time *xt,
 }
 
 /* --------------------------------------------------------------------------
- * cred_store_parse_not_after -- pure function, native-testable
+ * parse_x509_time -- shared implementation for not_after / not_before
+ *
+ * use_not_before=false reads crt.valid_to (NotAfter).
+ * use_not_before=true  reads crt.valid_from (NotBefore).
  * -------------------------------------------------------------------------- */
-
-esp_err_t cred_store_parse_not_after(const uint8_t *cert_der,
-                                     size_t         cert_len,
-                                     uint64_t      *out_epoch)
+static esp_err_t parse_x509_time(const uint8_t *cert_der,
+                                  size_t         cert_len,
+                                  bool           use_not_before,
+                                  uint64_t      *out)
 {
-    if (!cert_der || cert_len == 0 || !out_epoch) {
+    if (!cert_der || cert_len == 0 || !out) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -95,13 +93,26 @@ esp_err_t cred_store_parse_not_after(const uint8_t *cert_der,
         return ESP_FAIL;
     }
 
-    esp_err_t err = x509_time_to_epoch(&crt.valid_to, out_epoch);
+    const mbedtls_x509_time *xt = use_not_before ? &crt.valid_from : &crt.valid_to;
+    esp_err_t err = x509_time_to_epoch(xt, out);
     mbedtls_x509_crt_free(&crt);
 
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "epoch conversion failed for NotAfter");
+        ESP_LOGE(TAG, "epoch conversion failed for %s",
+                 use_not_before ? "NotBefore" : "NotAfter");
     }
     return err;
+}
+
+/* --------------------------------------------------------------------------
+ * cred_store_parse_not_after -- pure function, native-testable
+ * -------------------------------------------------------------------------- */
+
+esp_err_t cred_store_parse_not_after(const uint8_t *cert_der,
+                                     size_t         cert_len,
+                                     uint64_t      *out_epoch)
+{
+    return parse_x509_time(cert_der, cert_len, false, out_epoch);
 }
 
 /* --------------------------------------------------------------------------
@@ -115,27 +126,7 @@ esp_err_t cred_store_parse_not_before(const uint8_t *cert_der,
                                       size_t         cert_len,
                                       uint64_t      *out_epoch)
 {
-    if (!cert_der || cert_len == 0 || !out_epoch) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    mbedtls_x509_crt crt;
-    mbedtls_x509_crt_init(&crt);
-    int ret = mbedtls_x509_crt_parse_der(&crt, cert_der, cert_len);
-    if (ret != 0) {
-        ESP_LOGE(TAG, "mbedtls_x509_crt_parse_der failed: -0x%04x",
-                 (unsigned)(-ret));
-        mbedtls_x509_crt_free(&crt);
-        return ESP_FAIL;
-    }
-
-    esp_err_t err = x509_time_to_epoch(&crt.valid_from, out_epoch);
-    mbedtls_x509_crt_free(&crt);
-
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "epoch conversion failed for NotBefore");
-    }
-    return err;
+    return parse_x509_time(cert_der, cert_len, true, out_epoch);
 }
 
 /* ==========================================================================
@@ -202,7 +193,7 @@ esp_err_t cred_store_load(cred_store_t *out)
 
 not_found:
     nvs_close(h);
-    force_zero(out, sizeof(*out));
+    zeroize(out, sizeof(*out));
     return ESP_ERR_NVS_NOT_FOUND;
 }
 
@@ -309,7 +300,7 @@ esp_err_t cred_store_save(const cred_store_t *in)
 
 esp_err_t cred_store_clear(void)
 {
-    force_zero(&s_mem_store, sizeof(s_mem_store));
+    zeroize(&s_mem_store, sizeof(s_mem_store));
     s_mem_present = 0;
     return ESP_OK;
 }

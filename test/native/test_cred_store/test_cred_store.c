@@ -414,6 +414,33 @@ static void test_parse_not_before_is_earlier_than_not_after(void)
 }
 
 /* --------------------------------------------------------------------------
+ * Test: parse_x509_time routes correctly
+ *
+ * parse_x509_time(use_not_before=false) -> valid_to  -> NotAfter epoch
+ * parse_x509_time(use_not_before=true)  -> valid_from -> NotBefore epoch
+ *
+ * Verify that both public wrappers extract *different* fields from the same
+ * cert.  This would fail if the use_not_before flag were ignored.
+ * -------------------------------------------------------------------------- */
+static void test_parse_x509_time_not_after_ne_not_before(void)
+{
+    uint64_t not_after  = 0;
+    uint64_t not_before = 0;
+
+    TEST_ASSERT_EQUAL_INT(ESP_OK,
+        cred_store_parse_not_after(fixture_cert_der, fixture_cert_der_len, &not_after));
+    TEST_ASSERT_EQUAL_INT(ESP_OK,
+        cred_store_parse_not_before(fixture_cert_der, fixture_cert_der_len, &not_before));
+
+    /* The two fields must differ; if they are equal the flag is being ignored. */
+    TEST_ASSERT_NOT_EQUAL(not_after, not_before);
+    /* Sanity: not_after must equal the known fixture value. */
+    TEST_ASSERT_EQUAL_UINT64(FIXTURE_NOT_AFTER_EPOCH, not_after);
+    /* Sanity: not_before must equal the known fixture value. */
+    TEST_ASSERT_EQUAL_UINT64(FIXTURE_NOT_BEFORE_EPOCH, not_before);
+}
+
+/* --------------------------------------------------------------------------
  * main
  * -------------------------------------------------------------------------- */
 int main(void)
@@ -439,5 +466,7 @@ int main(void)
     RUN_TEST(test_parse_not_before_null_out_returns_invalid_arg);
     RUN_TEST(test_parse_not_before_corrupted_der_returns_fail);
     RUN_TEST(test_parse_not_before_is_earlier_than_not_after);
+    /* parse_x509_time routing */
+    RUN_TEST(test_parse_x509_time_not_after_ne_not_before);
     return UNITY_END();
 }

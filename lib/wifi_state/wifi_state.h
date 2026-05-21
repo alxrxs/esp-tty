@@ -13,10 +13,17 @@
 #pragma once
 
 #include <stdbool.h>
+#include <time.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* Minimum plausible Unix epoch: 2020-01-01 00:00:00 UTC.
+ * A clock value below this threshold is almost certainly un-synced (reset
+ * state is 0 or some early epoch).  Shared across wifi.c, cert_renewer_decide.c,
+ * and the native test suite. */
+#define MIN_PLAUSIBLE_EPOCH  ((time_t)1577836800UL)
 
 /* --------------------------------------------------------------------------
  * Decision enum

@@ -5,12 +5,7 @@
  */
 
 #include "cert_renewer_decide.h"
-
-/* Minimum plausible Unix epoch: 2020-01-01 00:00:00 UTC.
- * Below this value the clock is almost certainly un-synced (reset state is 0
- * or some early epoch).  Matches MIN_PLAUSIBLE_EPOCH in main/wifi.c.
- * TODO: share by promoting MIN_PLAUSIBLE_EPOCH to wifi.h.            */
-#define MIN_PLAUSIBLE_EPOCH  ((time_t)1577836800)
+#include "wifi_state.h"   /* MIN_PLAUSIBLE_EPOCH */
 
 renewal_decision_t cert_renewer_decide(time_t   now,
                                        uint64_t not_after,

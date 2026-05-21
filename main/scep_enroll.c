@@ -44,6 +44,7 @@
 /* This agent's libraries */
 #include "scep_transport.h"
 #include "cred_store.h"
+#include "zeroize.h"
 
 /* mbedTLS for key operations */
 #include "mbedtls/pk.h"
@@ -52,15 +53,6 @@
 #include "mbedtls/ctr_drbg.h"
 
 static const char *TAG = "scep_enroll";
-
-/* --------------------------------------------------------------------------
- * force_zero: volatile write to wipe key material from stack buffers.
- * -------------------------------------------------------------------------- */
-static void force_zero(void *mem, size_t len)
-{
-    volatile unsigned char *p = (volatile unsigned char *)mem;
-    while (len--) *p++ = 0;
-}
 
 /* --------------------------------------------------------------------------
  * PSRAM allocator shim for scep_transport.
@@ -141,6 +133,41 @@ esp_err_t scep_enroll(const char *scep_url,
     }
     ESP_LOGI(TAG, "SCEP enrollment starting: URL=%s CN=%s", scep_url, common_name);
 
+    /* -- Heap-allocate working buffers in internal RAM.
+     *
+     * These were formerly `static` which pinned ~14 KB of BSS permanently and
+     * made the function non-reentrant.  Heap allocation costs nothing during
+     * boot and frees the BSS.  Credential material (dev_key_der, issued_cert)
+     * goes to internal RAM; the cert snapshot copies (ra/ca) can be 8-bit
+     * addressable internal RAM as well since mbedTLS accesses them directly. */
+    uint8_t *ra_cert_copy   = NULL;
+    uint8_t *ca_cert_copy   = NULL;
+    uint8_t *dev_key_der    = NULL;
+    uint8_t *self_cert_der  = NULL;
+    uint8_t *csr_der        = NULL;
+    uint8_t *spki_der       = NULL;
+    uint8_t *p7_req         = NULL;
+    uint8_t *issued_cert_der = NULL;
+
+#define ALLOC_BUF(ptr, sz) do { \
+    (ptr) = heap_caps_calloc(1, (sz), MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL); \
+    if (!(ptr)) { \
+        ESP_LOGE(TAG, "scep_enroll: failed to allocate %zu B for " #ptr, (size_t)(sz)); \
+        goto done; \
+    } \
+} while (0)
+
+    ALLOC_BUF(ra_cert_copy,    SCEP_MAX_CA_BUNDLE_CERT_DER);
+    ALLOC_BUF(ca_cert_copy,    SCEP_MAX_CA_BUNDLE_CERT_DER);
+    ALLOC_BUF(dev_key_der,     CRED_DEV_KEY_MAX);
+    ALLOC_BUF(self_cert_der,   SCEP_MAX_CERT_DER);
+    ALLOC_BUF(csr_der,         SCEP_MAX_CSR_DER);
+    ALLOC_BUF(spki_der,        320);   /* RSA-2048 SPKI DER is ~294 bytes */
+    ALLOC_BUF(p7_req,          SCEP_MAX_P7_LEN);
+    ALLOC_BUF(issued_cert_der, SCEP_MAX_CERT_DER);
+
+#undef ALLOC_BUF
+
     /* ------------------------------------------------------------------ */
     /* Step 1: GetCACert                                                    */
     /* ------------------------------------------------------------------ */
@@ -169,10 +196,8 @@ esp_err_t scep_enroll(const char *scep_url,
 
     /* Snapshot certs we need into local buffers so they survive any
      * subsequent allocations that might reuse the PSRAM region. */
-    static uint8_t ra_cert_copy[SCEP_MAX_CA_BUNDLE_CERT_DER];
-    static uint8_t ca_cert_copy[SCEP_MAX_CA_BUNDLE_CERT_DER];
-    if (cab.ra_encrypt_cert_len > sizeof(ra_cert_copy) ||
-        cab.ca_cert_len         > sizeof(ca_cert_copy)) {
+    if (cab.ra_encrypt_cert_len > SCEP_MAX_CA_BUNDLE_CERT_DER ||
+        cab.ca_cert_len         > SCEP_MAX_CA_BUNDLE_CERT_DER) {
         ESP_LOGE(TAG, "CA bundle cert too large for snapshot");
         psram_free(ca_p7);
         ca_p7 = NULL;
@@ -198,8 +223,7 @@ esp_err_t scep_enroll(const char *scep_url,
 
     /* Export private key to DER now, before any goto that would call
      * mbedtls_pk_free().  We need it later for cred_store_save(). */
-    static uint8_t dev_key_der[CRED_DEV_KEY_MAX];
-    int dev_key_der_len_i = mbedtls_pk_write_key_der(&key, dev_key_der, sizeof(dev_key_der));
+    int dev_key_der_len_i = mbedtls_pk_write_key_der(&key, dev_key_der, CRED_DEV_KEY_MAX);
     if (dev_key_der_len_i <= 0) {
         ESP_LOGE(TAG, "mbedtls_pk_write_key_der failed: -0x%04x",
                  (unsigned)(-dev_key_der_len_i));
@@ -207,7 +231,7 @@ esp_err_t scep_enroll(const char *scep_url,
     }
     /* mbedtls_pk_write_key_der writes at end of buffer; move to front */
     size_t dev_key_der_len = (size_t)dev_key_der_len_i;
-    memmove(dev_key_der, dev_key_der + sizeof(dev_key_der) - dev_key_der_len,
+    memmove(dev_key_der, dev_key_der + CRED_DEV_KEY_MAX - dev_key_der_len,
             dev_key_der_len);
     ESP_LOGI(TAG, "Private key DER: %zu B", dev_key_der_len);
 
@@ -218,8 +242,7 @@ esp_err_t scep_enroll(const char *scep_url,
     memset(&subject, 0, sizeof(subject));
     subject.common_name = common_name;
 
-    static uint8_t self_cert_der[SCEP_MAX_CERT_DER];
-    size_t self_cert_len = sizeof(self_cert_der);
+    size_t self_cert_len = SCEP_MAX_CERT_DER;
 
     ret = scep_build_self_signed_cert(&subject, &key,
                                       mbedtls_ctr_drbg_random, &ctr_drbg,
@@ -233,8 +256,7 @@ esp_err_t scep_enroll(const char *scep_url,
     /* ------------------------------------------------------------------ */
     /* Step 5: Build PKCS#10 CSR                                           */
     /* ------------------------------------------------------------------ */
-    static uint8_t csr_der[SCEP_MAX_CSR_DER];
-    size_t csr_len = sizeof(csr_der);
+    size_t csr_len = SCEP_MAX_CSR_DER;
 
     ret = scep_build_csr(&subject, &key, challenge_password,
                          mbedtls_ctr_drbg_random, &ctr_drbg,
@@ -248,8 +270,7 @@ esp_err_t scep_enroll(const char *scep_url,
     /* ------------------------------------------------------------------ */
     /* Step 6: Derive transactionID from RSA SPKI                         */
     /* ------------------------------------------------------------------ */
-    static uint8_t spki_der[320];  /* RSA-2048 SPKI DER is ~294 bytes */
-    int spki_len_i = mbedtls_pk_write_pubkey_der(&key, spki_der, sizeof(spki_der));
+    int spki_len_i = mbedtls_pk_write_pubkey_der(&key, spki_der, 320);
     if (spki_len_i <= 0) {
         ESP_LOGE(TAG, "mbedtls_pk_write_pubkey_der failed: -0x%04x",
                  (unsigned)(-spki_len_i));
@@ -257,7 +278,7 @@ esp_err_t scep_enroll(const char *scep_url,
     }
     /* mbedtls_pk_write_pubkey_der writes at end of buffer */
     size_t spki_len = (size_t)spki_len_i;
-    const uint8_t *spki_start = spki_der + sizeof(spki_der) - spki_len;
+    const uint8_t *spki_start = spki_der + 320 - spki_len;
 
     char txid[SCEP_TRANSACTION_ID_HEX_LEN + 1];
     ret = scep_transaction_id(spki_start, spki_len, txid, sizeof(txid));
@@ -270,8 +291,7 @@ esp_err_t scep_enroll(const char *scep_url,
     /* ------------------------------------------------------------------ */
     /* Step 7: Build PKCSReq pkiMessage                                    */
     /* ------------------------------------------------------------------ */
-    static uint8_t p7_req[SCEP_MAX_P7_LEN];
-    size_t p7_req_len = sizeof(p7_req);
+    size_t p7_req_len = SCEP_MAX_P7_LEN;
 
     ret = scep_build_pkimessage_pkcsreq(
               csr_der,                 csr_len,
@@ -288,12 +308,12 @@ esp_err_t scep_enroll(const char *scep_url,
     ESP_LOGI(TAG, "PKCSReq pkiMessage built: %zu B", p7_req_len);
 
     /* ------------------------------------------------------------------ */
-    /* Step 8: Wipe key material from stack before network I/O             */
+    /* Step 8: Wipe key material before network I/O                        */
     /* ------------------------------------------------------------------ */
     mbedtls_pk_free(&key);
-    force_zero(csr_der, sizeof(csr_der));
-    force_zero(self_cert_der, sizeof(self_cert_der));
-    force_zero(spki_der, sizeof(spki_der));
+    zeroize(csr_der,      SCEP_MAX_CSR_DER);
+    zeroize(self_cert_der, SCEP_MAX_CERT_DER);
+    zeroize(spki_der,     320);
 
     /* ------------------------------------------------------------------ */
     /* Step 9: PKIOperation (POST)                                         */
@@ -305,7 +325,7 @@ esp_err_t scep_enroll(const char *scep_url,
                                  p7_req, p7_req_len,
                                  &p7_resp, &p7_resp_len,
                                  psram_alloc, psram_free);
-    force_zero(p7_req, p7_req_len);   /* no longer needed */
+    zeroize(p7_req, p7_req_len);   /* no longer needed */
 
     if (trc != SCEP_TRANSPORT_OK) {
         ESP_LOGE(TAG, "PKIOperation HTTP transport error: %d", trc);
@@ -330,8 +350,7 @@ esp_err_t scep_enroll(const char *scep_url,
         goto done;
     }
 
-    static uint8_t issued_cert_der[SCEP_MAX_CERT_DER];
-    size_t issued_cert_len = sizeof(issued_cert_der);
+    size_t issued_cert_len = SCEP_MAX_CERT_DER;
     scep_pki_status_t pki_status = SCEP_PKI_STATUS_UNKNOWN;
     int fail_info = SCEP_FAIL_INFO_NONE;
 
@@ -421,9 +440,7 @@ esp_err_t scep_enroll(const char *scep_url,
     /* Step 12: Save credentials to NVS                                    */
     /* ------------------------------------------------------------------ */
     err = cred_store_save(&creds);
-    force_zero(&creds, sizeof(creds));
-    force_zero(dev_key_der, sizeof(dev_key_der));
-    force_zero(issued_cert_der, sizeof(issued_cert_der));
+    zeroize(&creds, sizeof(creds));
 
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "cred_store_save failed: %s", esp_err_to_name(err));
@@ -441,14 +458,27 @@ done:
      * via pk_info: pk_init sets it to NULL, pk_free leaves it NULL. */
     if (mbedtls_pk_get_type(&key) != MBEDTLS_PK_NONE) {
         mbedtls_pk_free(&key);
-        force_zero(&key, sizeof(key));
+        zeroize(&key, sizeof(key));
     }
     mbedtls_ctr_drbg_free(&ctr_drbg);
     mbedtls_entropy_free(&entropy);
     if (ca_p7) {
         psram_free(ca_p7);
     }
-    force_zero(dev_key_der, sizeof(dev_key_der));
+    if (dev_key_der) {
+        zeroize(dev_key_der, CRED_DEV_KEY_MAX);
+        heap_caps_free(dev_key_der);
+    }
+    if (issued_cert_der) {
+        zeroize(issued_cert_der, SCEP_MAX_CERT_DER);
+        heap_caps_free(issued_cert_der);
+    }
+    heap_caps_free(ra_cert_copy);
+    heap_caps_free(ca_cert_copy);
+    heap_caps_free(self_cert_der);
+    heap_caps_free(csr_der);
+    heap_caps_free(spki_der);
+    heap_caps_free(p7_req);
 
     return result;
 }
