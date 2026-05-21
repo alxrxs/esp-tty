@@ -139,6 +139,24 @@
 #define SCEP_CHALLENGE_PASSWORD  "replace-with-your-static-challenge"
 */
 
+/* Subject DN for the SCEP-issued certificate.
+ *
+ *   SCEP_CN  -- Common Name.  If unset the CN defaults to
+ *               "<DEVICE_HOSTNAME>-<mac_lowercase_hex>" (gives per-device
+ *               uniqueness automatically).
+ *   SCEP_O   -- Organization        (optional)
+ *   SCEP_OU  -- Organizational Unit (optional)
+ *   SCEP_C   -- Country, 2-char ISO (optional)
+ *
+ * NDES legacy CryptoAPI/CSP mode ignores most non-CN attributes by policy,
+ * but they are still included in the CSR you submit. */
+/*
+#define SCEP_CN  "device-cn"
+#define SCEP_O   "Example Org"
+#define SCEP_OU  "Example Unit"
+#define SCEP_C   "US"
+*/
+
 /* Mode B+ / Mode C clock handling -- pick ONE (or neither).
  *
  *   NTP_BEFORE_EAPTLS:

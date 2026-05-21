@@ -114,9 +114,14 @@ esp_err_t scep_enroll(const char *scep_url,
         return ESP_FAIL;
     }
 
-    /* -- Derive common name from MAC if not provided -------------------- */
+    /* -- Resolve common name --------------------------------------------
+     * Precedence: caller-provided argument > SCEP_CN macro > MAC-derived
+     * default of "<DEVICE_HOSTNAME>-<mac>". */
     char cn_buf[64];
     if (!common_name || common_name[0] == '\0') {
+#ifdef SCEP_CN
+        common_name = SCEP_CN;
+#else
         uint8_t mac[6] = {0};
         esp_err_t merr = esp_wifi_get_mac(WIFI_IF_STA, mac);
         if (merr != ESP_OK) {
@@ -130,16 +135,14 @@ esp_err_t scep_enroll(const char *scep_url,
                      mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
         }
         common_name = cn_buf;
+#endif
     }
     ESP_LOGI(TAG, "SCEP enrollment starting: URL=%s CN=%s", scep_url, common_name);
 
-    /* -- Heap-allocate working buffers in internal RAM.
-     *
-     * These were formerly `static` which pinned ~14 KB of BSS permanently and
-     * made the function non-reentrant.  Heap allocation costs nothing during
-     * boot and frees the BSS.  Credential material (dev_key_der, issued_cert)
-     * goes to internal RAM; the cert snapshot copies (ra/ca) can be 8-bit
-     * addressable internal RAM as well since mbedTLS accesses them directly. */
+    /* Heap-allocate working buffers in internal RAM.  Credential material
+     * (dev_key_der, issued_cert) needs internal RAM; the cert snapshot
+     * copies (ra/ca) live in 8-bit addressable internal RAM too since
+     * mbedTLS accesses them directly. */
     uint8_t *ra_cert_copy   = NULL;
     uint8_t *ca_cert_copy   = NULL;
     uint8_t *dev_key_der    = NULL;
@@ -241,6 +244,15 @@ esp_err_t scep_enroll(const char *scep_url,
     scep_subject_t subject;
     memset(&subject, 0, sizeof(subject));
     subject.common_name = common_name;
+#ifdef SCEP_O
+    subject.organization = SCEP_O;
+#endif
+#ifdef SCEP_OU
+    subject.organizational_unit = SCEP_OU;
+#endif
+#ifdef SCEP_C
+    subject.country = SCEP_C;
+#endif
 
     size_t self_cert_len = SCEP_MAX_CERT_DER;
 
