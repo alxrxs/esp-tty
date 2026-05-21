@@ -324,6 +324,17 @@
  * are silently discarded and UART0 output is unaffected.
  *
  * ANSI colour escape codes are forwarded verbatim.
+ *
+ * Datagrams are coalesced up to a near-MTU buffer and prefixed with a
+ * "#<seq>\n" header so gaps in the receiver's sequence make lost packets
+ * obvious.  Optional tunables (all have sensible defaults):
+ *
+ *   UDP_LOG_LINE_MAX         per-line scratch buffer        (default 256)
+ *   UDP_LOG_DGRAM_MAX        accumulator size in bytes      (default 1300)
+ *   UDP_LOG_FLUSH_TIMEOUT_MS idle-flush threshold           (default 50)
+ *   UDP_LOG_POLL_MS          flush task tick                (default 25)
+ *   UDP_LOG_FLUSH_STACK      flush task stack bytes         (default 4096)
+ *   UDP_LOG_FLUSH_PRIO       flush task FreeRTOS priority   (default 3)
  * ========================================================================== */
 /*
 #define UDP_LOG_HOST  "10.57.16.10"
