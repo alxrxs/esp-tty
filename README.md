@@ -164,7 +164,12 @@ modes are mutually exclusive.
 | **A** | `WIFI_SSID` + `WIFI_PASS` | WPA2/WPA3-Personal (PSK) | One network |
 | **B** | + `WIFI_USE_ENTERPRISE` | WPA2/WPA3-Enterprise EAP-TLS | One network; client cert + key embedded from `main/certs/` at build time |
 | **B+** | + `WIFI_USE_ENTERPRISE` + `WIFI_ENTERPRISE_SSID` | PSK bootstrap for NTP, then WPA3-Enterprise EAP-TLS | Two SSIDs; same embedded certs as Mode B; add `NTP_ENABLE` to sync the clock before EAP-TLS so cert NotBefore/After is validated correctly on cold boot |
-| **C** | + `WIFI_ENTERPRISE_SSID` + `SCEP_URL` + `SCEP_CHALLENGE_PASSWORD` + `EAP_IDENTITY` | PSK bootstrap, then WPA3-Enterprise EAP-TLS | Two SSIDs; client cert auto-enrolled via SCEP and stored in encrypted NVS |
+| **C** | + `WIFI_ENTERPRISE_SSID` + `SCEP_URL` + `SCEP_CHALLENGE_PASSWORD` | PSK bootstrap, then WPA3-Enterprise EAP-TLS | Two SSIDs; client cert auto-enrolled via SCEP and stored in encrypted NVS |
+
+All three EAP-TLS modes (B, B+, C) also read `EAP_IDENTITY`, the outer
+(anonymous) identity sent before the TLS tunnel is established.  It
+defaults to `"anonymous"` if unset; override to whatever your RADIUS
+realm requires (e.g. `"anonymous@example.org"`).
 
 Mode B and Mode B+ place their three PEMs (`ca.pem`, `client.crt`,
 `client.key`) in `main/certs/`; the build embeds them. See
