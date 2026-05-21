@@ -147,9 +147,12 @@ endif
 build:
 	$(PIO) run -e $(ENV)
 
-# Wipe .pio/build/<env>/ so the next build re-runs cmake configure.  Use this
-# when a CMake-time dependency (e.g. main/certs/scep_ca.pem appearing for the
-# first time) wasn't picked up because the cmake cache predates the file.
+# Wipe .pio/build/<env>/ AND the top-level sdkconfig.<env> so the next build
+# re-runs cmake configure and re-merges sdkconfig.defaults from scratch.  Use
+# this when a CMake-time dependency wasn't picked up because the cache predates
+# it, OR when sdkconfig.defaults was edited (ESP-IDF takes the existing merged
+# sdkconfig.<env> as truth and only consults sdkconfig.defaults on first
+# generation, so edits to defaults are silently ignored without this clean).
 #
 #   make clean              # cleans every board env
 #   make clean s3zero       # cleans only esp32s3_zero
@@ -157,10 +160,12 @@ build:
 clean:
 ifeq ($(ENV_EXPLICIT),yes)
 	$(PIO) run -e $(ENV) --target fullclean
+	@rm -fv sdkconfig.$(ENV)
 else
 	@for env in $(ALL_BOARD_ENVS); do \
 	    echo ">> fullclean $$env"; \
 	    $(PIO) run -e $$env --target fullclean; \
+	    rm -fv sdkconfig.$$env; \
 	done
 endif
 

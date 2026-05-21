@@ -1257,10 +1257,22 @@ static bool smart_ntp_wait_sync(void)
     TickType_t deadline = xTaskGetTickCount() +
         pdMS_TO_TICKS((uint32_t)BOOTSTRAP_NTP_SYNC_TIMEOUT_SEC * 1000u);
     while (xTaskGetTickCount() < deadline) {
-        if (esp_netif_sntp_sync_wait(pdMS_TO_TICKS(5000)) == ESP_OK) {
+        esp_err_t wait_err = esp_netif_sntp_sync_wait(pdMS_TO_TICKS(5000));
+        if (wait_err == ESP_OK) {
             break;
         }
-        ESP_LOGI(TAG, "[smart] NTP: still waiting ...");
+        /* esp_netif_sntp_sync_wait can return ESP_ERR_TIMEOUT even after the
+         * sntp callback already set the clock (singleton-state edge case
+         * after re-init).  Use a real-time-of-day check as a faster exit. */
+        if (time(NULL) >= MIN_PLAUSIBLE_EPOCH) {
+            break;
+        }
+        ESP_LOGI(TAG, "[smart] NTP: still waiting (%s) ...",
+                 esp_err_to_name(wait_err));
+        /* Defensive floor: if sync_wait returned faster than the requested
+         * timeout (e.g. due to an internal error state), avoid spinning
+         * the CPU and spamming the log. */
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 #else
     /* NTP not enabled or loopback build -- skip. */
