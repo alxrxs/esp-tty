@@ -662,8 +662,17 @@ static void wifi_event_handler(void *arg,
     if (event_base == WIFI_EVENT) {
 
         if (event_id == WIFI_EVENT_STA_START) {
-            /* Driver is up -- kick off the first connection attempt. */
-            ESP_LOGI(TAG, "STA started, connecting to \"%s\" ...", WIFI_SSID);
+            /* Driver is up -- kick off the first connection attempt.  Read
+             * the actual SSID from the driver rather than hard-coding
+             * WIFI_SSID; in Mode B+/C the active config may be the
+             * enterprise SSID, not the PSK bootstrap one. */
+            wifi_config_t cur = {0};
+            const char *ssid_str = WIFI_SSID;  /* fallback */
+            if (esp_wifi_get_config(WIFI_IF_STA, &cur) == ESP_OK
+                && cur.sta.ssid[0] != '\0') {
+                ssid_str = (const char *)cur.sta.ssid;
+            }
+            ESP_LOGI(TAG, "STA started, connecting to \"%s\" ...", ssid_str);
             esp_wifi_connect();
 
         } else if (event_id == WIFI_EVENT_STA_CONNECTED) {
@@ -1245,8 +1254,12 @@ static bool smart_ntp_wait_sync(void)
         cfg.servers[i] = servers[i];
     }
 
-    /* esp_netif_sntp_init is idempotent if called a second time -- it will
-     * return ESP_ERR_INVALID_STATE if already running; that is fine. */
+    /* Deinit any previous SNTP singleton from an earlier bootstrap pass so
+     * sync_wait sees a fresh state machine on this attempt.  Otherwise it
+     * can return ESP_ERR_TIMEOUT even after the sntp callback has set the
+     * clock, leading to a stuck wait loop. */
+    esp_netif_sntp_deinit();
+
     esp_err_t init_err = esp_netif_sntp_init(&cfg);
     if (init_err != ESP_OK && init_err != ESP_ERR_INVALID_STATE) {
         ESP_LOGW(TAG, "[smart] esp_netif_sntp_init: %s",
