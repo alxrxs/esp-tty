@@ -794,6 +794,17 @@ static void wifi_event_handler(void *arg,
             if (s_dhcp_watchdog) xTimerStop(s_dhcp_watchdog, 0);
 #endif
 
+            /* Reason 8 (ASSOC_LEAVE) is the disconnect that fires when we
+             * call esp_wifi_stop() ourselves to transition between PSK
+             * bootstrap and enterprise.  The next wifi_mode_* call will
+             * start a fresh session; auto-reconnect here would race it. */
+            if (ev->reason == WIFI_REASON_ASSOC_LEAVE) {
+                ESP_LOGI(TAG, "disconnected (reason %d -- planned teardown)",
+                         ev->reason);
+                /* fall through past the retry block */
+                goto disc_done;
+            }
+
             const bool infinite = (WIFI_MAX_RETRY == 0);
             if (infinite || s_retry_num < WIFI_MAX_RETRY) {
                 s_retry_num++;
@@ -816,6 +827,7 @@ static void wifi_event_handler(void *arg,
                  * Remove the call below if you want hard-stop semantics. */
                 esp_wifi_connect();
             }
+        disc_done: ;
         }
 
     } else if (event_base == IP_EVENT) {
@@ -1653,7 +1665,15 @@ static esp_err_t wifi_mode_enterprise(const char         *ssid,
     s_psk_bootstrap_active = false;
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &cfg));
+    /* esp_wifi_set_config logs a benign "Password length is zero, but
+     * authmode threshold is 5 ..." warning when configuring EAP-TLS
+     * (password is unused in EAP).  Drop the wifi log level briefly so
+     * that one line stays out of the boot capture, then restore. */
+    esp_log_level_t prev_wifi_level = esp_log_level_get("wifi");
+    esp_log_level_set("wifi", ESP_LOG_ERROR);
+    esp_err_t set_cfg_err = esp_wifi_set_config(WIFI_IF_STA, &cfg);
+    esp_log_level_set("wifi", prev_wifi_level);
+    ESP_ERROR_CHECK(set_cfg_err);
     ESP_ERROR_CHECK(esp_wifi_start());
 
     TickType_t wait = (timeout_sec == 0)
