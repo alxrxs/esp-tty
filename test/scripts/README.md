@@ -20,6 +20,7 @@ suite-wide overview and the documented coverage gaps.
 | `test_ota_protocol_e2e.py` | End-to-end OTA protocol against an in-process `FakeDevice` -- success, tampered ciphertext, truncated transfer, replay |
 | `test_scep_protocol_e2e.py` | End-to-end SCEP enrolment against an in-process `FakeNdesCA` -- success, failure, pending, malformed CertRep, single/multi-cert bundle parsing |
 | `test_psk_bootstrap_dhcp.py` | Structural guard over `main/wifi.c`: asserts the `s_psk_bootstrap_active` flag is declared, set in `wifi_mode_psk()`, cleared in `wifi_mode_enterprise()`, and consulted in both event handlers (catches regressions where someone re-enables static IP on the PSK bootstrap network) |
+| `test_bootstrap_static_ipv4.py` | Structural guard for the optional bootstrap-static path: `USE_STATIC_IPV4_BOOTSTRAP` + `BOOTSTRAP_STATIC_IPV4_*` / `BOOTSTRAP_STATIC_IPV6_*` macro `#error` guards, the `apply_static_ipv4_core` + `_enterprise` / `_bootstrap` wrapper split, `ipv6_bring_up_bootstrap` presence, event-handler branches |
 | `regen_cred_store_fixtures.py` | Developer utility: regenerates the DER fixtures baked into `test/native/test_cred_store_integration/` using `FakeNdesCA`. Run only when the fake CA changes; the resulting C file is committed so native tests do not depend on Python at run time |
 | `native_link_openssl.py` | PlatformIO `extra_scripts` hook for the `[env:native]` build; appends `-lcrypto` and the host mbedTLS link flags so the OpenSSL- and mbedTLS-backed stubs resolve at link time. Not invoked directly |
 

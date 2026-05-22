@@ -17,12 +17,24 @@
  *     DHCPv4 -- the DHCP watchdog timer keeps the client alive indefinitely.
  *
  *   With USE_STATIC_IPV4 defined:
- *     Static IPv4 -- DHCP client is stopped before the interface comes up.
- *     Requires STATIC_IPV4_ADDRESS, STATIC_IPV4_NETMASK, STATIC_IPV4_GATEWAY
- *     (all dotted-decimal strings).  Optional: STATIC_IPV4_DNS_PRIMARY,
- *     STATIC_IPV4_DNS_SECONDARY.  The DHCP watchdog is disabled automatically.
+ *     Static IPv4 for the enterprise/production network -- DHCP client is
+ *     stopped before the interface comes up.  Requires STATIC_IPV4_ADDRESS,
+ *     STATIC_IPV4_NETMASK, STATIC_IPV4_GATEWAY (all dotted-decimal strings).
+ *     Optional: STATIC_IPV4_DNS_PRIMARY, STATIC_IPV4_DNS_SECONDARY.  The
+ *     DHCP watchdog is disabled automatically.
  *
- * IPv6 addressing (selected in config.h via IPV6_MODE):
+ *     PSK bootstrap network (Mode B+/C): when USE_STATIC_IPV4 is defined but
+ *     USE_STATIC_IPV4_BOOTSTRAP is not, the bootstrap network (WIFI_SSID)
+ *     always uses DHCP -- the bootstrap subnet may differ from the production
+ *     subnet and is only used for NTP sync / SCEP enrollment.
+ *
+ *   With USE_STATIC_IPV4_BOOTSTRAP defined (requires WIFI_ENTERPRISE_SSID):
+ *     Static IPv4 for the PSK bootstrap network as well.  Requires
+ *     BOOTSTRAP_STATIC_IPV4_ADDRESS, BOOTSTRAP_STATIC_IPV4_NETMASK,
+ *     BOOTSTRAP_STATIC_IPV4_GATEWAY.  Optional: BOOTSTRAP_STATIC_IPV4_DNS_PRIMARY,
+ *     BOOTSTRAP_STATIC_IPV4_DNS_SECONDARY.
+ *
+ * IPv6 addressing (selected in config.h via IPV6_MODE / BOOTSTRAP_IPV6_MODE):
  *
  *   IPV6_MODE_DISABLED              -- no IPv6 at all
  *   IPV6_MODE_SLAAC                 -- link-local + SLAAC global (default)
@@ -34,6 +46,14 @@
  *                                     STATIC_IPV6_GATEWAY.  Optional:
  *                                     STATIC_IPV6_DNS_PRIMARY,
  *                                     STATIC_IPV6_DNS_SECONDARY.
+ *
+ *   BOOTSTRAP_IPV6_MODE selects the IPv6 mode for the PSK bootstrap network
+ *   when USE_STATIC_IPV4_BOOTSTRAP is defined.  Defaults to IPV6_MODE_DISABLED
+ *   when not set (static IPv6 addressing belongs to the enterprise interface,
+ *   not the transient bootstrap VLAN).  When set to IPV6_MODE_STATIC, requires
+ *   BOOTSTRAP_STATIC_IPV6_ADDRESS, BOOTSTRAP_STATIC_IPV6_PREFIX_LEN,
+ *   BOOTSTRAP_STATIC_IPV6_GATEWAY.  Optional: BOOTSTRAP_STATIC_IPV6_DNS_PRIMARY,
+ *   BOOTSTRAP_STATIC_IPV6_DNS_SECONDARY.
  *
  * Compile-time credentials come from main/config.h (gitignored).
  * Copy config.h.example -> config.h and fill in your values.
@@ -269,6 +289,38 @@ extern const uint8_t eap_client_key_end[]   asm("_binary_client_key_end");
 # endif
 #endif /* IPV6_MODE_STATIC */
 
+/* Bootstrap static IPv4/IPv6 is only meaningful in smart mode (WIFI_ENTERPRISE_SSID). */
+#if defined(USE_STATIC_IPV4_BOOTSTRAP) && !defined(WIFI_ENTERPRISE_SSID)
+# error "USE_STATIC_IPV4_BOOTSTRAP requires WIFI_ENTERPRISE_SSID (Mode B+ or C)"
+#endif
+
+#ifdef USE_STATIC_IPV4_BOOTSTRAP
+# ifndef BOOTSTRAP_STATIC_IPV4_ADDRESS
+#  error "USE_STATIC_IPV4_BOOTSTRAP requires BOOTSTRAP_STATIC_IPV4_ADDRESS in config.h"
+# endif
+# ifndef BOOTSTRAP_STATIC_IPV4_NETMASK
+#  error "USE_STATIC_IPV4_BOOTSTRAP requires BOOTSTRAP_STATIC_IPV4_NETMASK in config.h"
+# endif
+# ifndef BOOTSTRAP_STATIC_IPV4_GATEWAY
+#  error "USE_STATIC_IPV4_BOOTSTRAP requires BOOTSTRAP_STATIC_IPV4_GATEWAY in config.h"
+# endif
+/* Default bootstrap IPv6 mode to DISABLED when the user has not specified one. */
+# ifndef BOOTSTRAP_IPV6_MODE
+#  define BOOTSTRAP_IPV6_MODE  IPV6_MODE_DISABLED
+# endif
+# if BOOTSTRAP_IPV6_MODE == IPV6_MODE_STATIC
+#  ifndef BOOTSTRAP_STATIC_IPV6_ADDRESS
+#   error "BOOTSTRAP_IPV6_MODE==IPV6_MODE_STATIC requires BOOTSTRAP_STATIC_IPV6_ADDRESS in config.h"
+#  endif
+#  ifndef BOOTSTRAP_STATIC_IPV6_PREFIX_LEN
+#   error "BOOTSTRAP_IPV6_MODE==IPV6_MODE_STATIC requires BOOTSTRAP_STATIC_IPV6_PREFIX_LEN in config.h"
+#  endif
+#  ifndef BOOTSTRAP_STATIC_IPV6_GATEWAY
+#   error "BOOTSTRAP_IPV6_MODE==IPV6_MODE_STATIC requires BOOTSTRAP_STATIC_IPV6_GATEWAY in config.h"
+#  endif
+# endif /* BOOTSTRAP_IPV6_MODE == IPV6_MODE_STATIC */
+#endif /* USE_STATIC_IPV4_BOOTSTRAP */
+
 /* --------------------------------------------------------------------------
  * EventGroup bit definitions
  * -------------------------------------------------------------------------- */
@@ -326,27 +378,33 @@ static void dhcp_watchdog_cb(TimerHandle_t t)
 #endif
 
 /* --------------------------------------------------------------------------
- * Static IPv4 configuration helper
+ * Static IPv4 configuration helpers
  *
- * Called once after esp_netif_create_default_wifi_sta() but before
- * esp_wifi_start(), so the DHCP client is stopped before it ever sends
- * a DISCOVER.
+ * apply_static_ipv4_core() does the actual work: stop DHCP, set address,
+ * optionally configure DNS servers.  dns_pri and dns_sec may be NULL.
+ *
+ * apply_static_ipv4_enterprise() and apply_static_ipv4_bootstrap() are thin
+ * wrappers that pass the right compile-time macro strings.
  * -------------------------------------------------------------------------- */
-#ifdef USE_STATIC_IPV4
-static void apply_static_ipv4(void)
+#if defined(USE_STATIC_IPV4) || defined(USE_STATIC_IPV4_BOOTSTRAP)
+static void apply_static_ipv4_core(const char *addr,
+                                   const char *netmask,
+                                   const char *gw,
+                                   const char *dns_pri,
+                                   const char *dns_sec)
 {
     esp_netif_ip_info_t ip_info = {};
 
-    if (esp_netif_str_to_ip4(STATIC_IPV4_ADDRESS, &ip_info.ip) != ESP_OK) {
-        ESP_LOGE(TAG, "Invalid STATIC_IPV4_ADDRESS: \"%s\"", STATIC_IPV4_ADDRESS);
+    if (esp_netif_str_to_ip4(addr, &ip_info.ip) != ESP_OK) {
+        ESP_LOGE(TAG, "Invalid static IPv4 address: \"%s\"", addr);
         return;
     }
-    if (esp_netif_str_to_ip4(STATIC_IPV4_NETMASK, &ip_info.netmask) != ESP_OK) {
-        ESP_LOGE(TAG, "Invalid STATIC_IPV4_NETMASK: \"%s\"", STATIC_IPV4_NETMASK);
+    if (esp_netif_str_to_ip4(netmask, &ip_info.netmask) != ESP_OK) {
+        ESP_LOGE(TAG, "Invalid static IPv4 netmask: \"%s\"", netmask);
         return;
     }
-    if (esp_netif_str_to_ip4(STATIC_IPV4_GATEWAY, &ip_info.gw) != ESP_OK) {
-        ESP_LOGE(TAG, "Invalid STATIC_IPV4_GATEWAY: \"%s\"", STATIC_IPV4_GATEWAY);
+    if (esp_netif_str_to_ip4(gw, &ip_info.gw) != ESP_OK) {
+        ESP_LOGE(TAG, "Invalid static IPv4 gateway: \"%s\"", gw);
         return;
     }
 
@@ -365,37 +423,71 @@ static void apply_static_ipv4(void)
              IP2STR(&ip_info.gw));
 
     /* Optional static DNS servers. */
-#ifdef STATIC_IPV4_DNS_PRIMARY
-    {
+    if (dns_pri) {
         esp_netif_dns_info_t dns = {};
         dns.ip.type = ESP_IPADDR_TYPE_V4;
-        if (esp_netif_str_to_ip4(STATIC_IPV4_DNS_PRIMARY,
-                                 &dns.ip.u_addr.ip4) == ESP_OK) {
+        if (esp_netif_str_to_ip4(dns_pri, &dns.ip.u_addr.ip4) == ESP_OK) {
             esp_netif_set_dns_info(s_sta_netif, ESP_NETIF_DNS_MAIN, &dns);
-            ESP_LOGI(TAG, "Static DNS primary: %s", STATIC_IPV4_DNS_PRIMARY);
+            ESP_LOGI(TAG, "Static DNS primary: %s", dns_pri);
         } else {
-            ESP_LOGW(TAG, "Invalid STATIC_IPV4_DNS_PRIMARY: \"%s\"",
-                     STATIC_IPV4_DNS_PRIMARY);
+            ESP_LOGW(TAG, "Invalid static DNS primary: \"%s\"", dns_pri);
         }
     }
-#endif /* STATIC_IPV4_DNS_PRIMARY */
 
-#ifdef STATIC_IPV4_DNS_SECONDARY
-    {
+    if (dns_sec) {
         esp_netif_dns_info_t dns = {};
         dns.ip.type = ESP_IPADDR_TYPE_V4;
-        if (esp_netif_str_to_ip4(STATIC_IPV4_DNS_SECONDARY,
-                                 &dns.ip.u_addr.ip4) == ESP_OK) {
+        if (esp_netif_str_to_ip4(dns_sec, &dns.ip.u_addr.ip4) == ESP_OK) {
             esp_netif_set_dns_info(s_sta_netif, ESP_NETIF_DNS_BACKUP, &dns);
-            ESP_LOGI(TAG, "Static DNS secondary: %s", STATIC_IPV4_DNS_SECONDARY);
+            ESP_LOGI(TAG, "Static DNS secondary: %s", dns_sec);
         } else {
-            ESP_LOGW(TAG, "Invalid STATIC_IPV4_DNS_SECONDARY: \"%s\"",
-                     STATIC_IPV4_DNS_SECONDARY);
+            ESP_LOGW(TAG, "Invalid static DNS secondary: \"%s\"", dns_sec);
         }
     }
-#endif /* STATIC_IPV4_DNS_SECONDARY */
+}
+#endif /* USE_STATIC_IPV4 || USE_STATIC_IPV4_BOOTSTRAP */
+
+#ifdef USE_STATIC_IPV4
+static void apply_static_ipv4_enterprise(void)
+{
+    apply_static_ipv4_core(
+        STATIC_IPV4_ADDRESS,
+        STATIC_IPV4_NETMASK,
+        STATIC_IPV4_GATEWAY,
+#ifdef STATIC_IPV4_DNS_PRIMARY
+        STATIC_IPV4_DNS_PRIMARY,
+#else
+        NULL,
+#endif
+#ifdef STATIC_IPV4_DNS_SECONDARY
+        STATIC_IPV4_DNS_SECONDARY
+#else
+        NULL
+#endif
+    );
 }
 #endif /* USE_STATIC_IPV4 */
+
+#ifdef USE_STATIC_IPV4_BOOTSTRAP
+static void apply_static_ipv4_bootstrap(void)
+{
+    apply_static_ipv4_core(
+        BOOTSTRAP_STATIC_IPV4_ADDRESS,
+        BOOTSTRAP_STATIC_IPV4_NETMASK,
+        BOOTSTRAP_STATIC_IPV4_GATEWAY,
+#ifdef BOOTSTRAP_STATIC_IPV4_DNS_PRIMARY
+        BOOTSTRAP_STATIC_IPV4_DNS_PRIMARY,
+#else
+        NULL,
+#endif
+#ifdef BOOTSTRAP_STATIC_IPV4_DNS_SECONDARY
+        BOOTSTRAP_STATIC_IPV4_DNS_SECONDARY
+#else
+        NULL
+#endif
+    );
+}
+#endif /* USE_STATIC_IPV4_BOOTSTRAP */
 
 /* --------------------------------------------------------------------------
  * IPv6 bring-up helper
@@ -500,6 +592,78 @@ static void ipv6_bring_up(void)
 #endif /* DHCPv6 modes */
 }
 #endif /* IPV6_MODE != IPV6_MODE_DISABLED */
+
+/* --------------------------------------------------------------------------
+ * Bootstrap IPv6 bring-up helper
+ *
+ * Used only when USE_STATIC_IPV4_BOOTSTRAP is defined.  Applies
+ * BOOTSTRAP_IPV6_MODE (defaults to IPV6_MODE_DISABLED) on the PSK bootstrap
+ * interface instead of leaking the enterprise IPv6 config onto a different
+ * VLAN.
+ * -------------------------------------------------------------------------- */
+#if defined(USE_STATIC_IPV4_BOOTSTRAP) && \
+    defined(CONFIG_LWIP_IPV6) && \
+    BOOTSTRAP_IPV6_MODE != IPV6_MODE_DISABLED
+static void ipv6_bring_up_bootstrap(void)
+{
+    /* Create a link-local address (fe80::) for all non-disabled IPv6 modes. */
+    esp_err_t err = esp_netif_create_ip6_linklocal(s_sta_netif);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "ipv6_bring_up_bootstrap: create_ip6_linklocal: %s",
+                 esp_err_to_name(err));
+    }
+
+# if BOOTSTRAP_IPV6_MODE == IPV6_MODE_STATIC
+    /* Add the statically configured bootstrap global unicast address. */
+    esp_ip6_addr_t addr6 = {};
+    if (esp_netif_str_to_ip6(BOOTSTRAP_STATIC_IPV6_ADDRESS, &addr6) != ESP_OK) {
+        ESP_LOGE(TAG, "Invalid BOOTSTRAP_STATIC_IPV6_ADDRESS: \"%s\"",
+                 BOOTSTRAP_STATIC_IPV6_ADDRESS);
+        return;
+    }
+    esp_err_t aerr = esp_netif_add_ip6_address(s_sta_netif, addr6, true);
+    if (aerr != ESP_OK) {
+        ESP_LOGW(TAG, "ipv6_bring_up_bootstrap: add_ip6_address: %s",
+                 esp_err_to_name(aerr));
+    } else {
+        ESP_LOGI(TAG, "Bootstrap static IPv6: " IPV6STR "/%d",
+                 IPV62STR(addr6), (int)BOOTSTRAP_STATIC_IPV6_PREFIX_LEN);
+    }
+
+#  ifdef BOOTSTRAP_STATIC_IPV6_DNS_PRIMARY
+    {
+        esp_netif_dns_info_t dns = {};
+        dns.ip.type = ESP_IPADDR_TYPE_V6;
+        if (esp_netif_str_to_ip6(BOOTSTRAP_STATIC_IPV6_DNS_PRIMARY,
+                                 &dns.ip.u_addr.ip6) == ESP_OK) {
+            esp_netif_set_dns_info(s_sta_netif, ESP_NETIF_DNS_MAIN, &dns);
+            ESP_LOGI(TAG, "Bootstrap static IPv6 DNS primary: %s",
+                     BOOTSTRAP_STATIC_IPV6_DNS_PRIMARY);
+        } else {
+            ESP_LOGW(TAG, "Invalid BOOTSTRAP_STATIC_IPV6_DNS_PRIMARY: \"%s\"",
+                     BOOTSTRAP_STATIC_IPV6_DNS_PRIMARY);
+        }
+    }
+#  endif /* BOOTSTRAP_STATIC_IPV6_DNS_PRIMARY */
+
+#  ifdef BOOTSTRAP_STATIC_IPV6_DNS_SECONDARY
+    {
+        esp_netif_dns_info_t dns = {};
+        dns.ip.type = ESP_IPADDR_TYPE_V6;
+        if (esp_netif_str_to_ip6(BOOTSTRAP_STATIC_IPV6_DNS_SECONDARY,
+                                 &dns.ip.u_addr.ip6) == ESP_OK) {
+            esp_netif_set_dns_info(s_sta_netif, ESP_NETIF_DNS_BACKUP, &dns);
+            ESP_LOGI(TAG, "Bootstrap static IPv6 DNS secondary: %s",
+                     BOOTSTRAP_STATIC_IPV6_DNS_SECONDARY);
+        } else {
+            ESP_LOGW(TAG, "Invalid BOOTSTRAP_STATIC_IPV6_DNS_SECONDARY: \"%s\"",
+                     BOOTSTRAP_STATIC_IPV6_DNS_SECONDARY);
+        }
+    }
+#  endif /* BOOTSTRAP_STATIC_IPV6_DNS_SECONDARY */
+# endif /* BOOTSTRAP_IPV6_MODE == IPV6_MODE_STATIC */
+}
+#endif /* USE_STATIC_IPV4_BOOTSTRAP && CONFIG_LWIP_IPV6 && BOOTSTRAP_IPV6_MODE != DISABLED */
 
 /* --------------------------------------------------------------------------
  * NTP defaults
@@ -724,6 +888,30 @@ static void wifi_event_handler(void *arg,
 #ifdef USE_STATIC_IPV4
 # ifdef WIFI_ENTERPRISE_SSID
             if (s_psk_bootstrap_active) {
+#  ifdef USE_STATIC_IPV4_BOOTSTRAP
+                /* Bootstrap network has its own static IP config. */
+                apply_static_ipv4_bootstrap();
+                /* Log and signal immediately -- no IP event will follow. */
+                {
+                    esp_netif_ip_info_t ip;
+                    if (esp_netif_get_ip_info(s_sta_netif, &ip) == ESP_OK) {
+                        ESP_LOGI(TAG, "IP address : " IPSTR, IP2STR(&ip.ip));
+                        ESP_LOGI(TAG, "Netmask    : " IPSTR, IP2STR(&ip.netmask));
+                        ESP_LOGI(TAG, "Gateway    : " IPSTR, IP2STR(&ip.gw));
+                    }
+                }
+                s_retry_num = 0;
+                xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+#if !defined(BRIDGE_LOOPBACK) && defined(MDNS_ENABLE)
+                mdns_dispatch_start();
+#endif
+#if !defined(BRIDGE_LOOPBACK) && defined(NTP_ENABLE)
+                ntp_dispatch_start();
+#endif
+#if defined(UDP_LOG_HOST) && defined(UDP_LOG_PORT)
+                udp_log_init();
+#endif
+#  else  /* USE_STATIC_IPV4_BOOTSTRAP not defined */
                 /* PSK bootstrap is transient and may be on a different subnet
                  * from the production enterprise network -- use DHCP regardless
                  * of the USE_STATIC_IPV4 setting.  Ensure the DHCP client is
@@ -734,15 +922,16 @@ static void wifi_event_handler(void *arg,
                  * subnet, the on_ip() callback runs (NTP sync / SCEP), and then
                  * wifi_mode_psk() calls esp_wifi_stop().  On the subsequent
                  * wifi_mode_enterprise() call s_psk_bootstrap_active is false,
-                 * so apply_static_ipv4() runs normally for the enterprise
-                 * interface. */
+                 * so apply_static_ipv4_enterprise() runs normally for the
+                 * enterprise interface. */
                 esp_netif_dhcpc_start(s_sta_netif);
                 /* No IP yet -- let IP_EVENT_STA_GOT_IP fire later. */
+#  endif /* USE_STATIC_IPV4_BOOTSTRAP */
             } else {
 # endif /* WIFI_ENTERPRISE_SSID */
             /* Apply static address at L2-connect time so the routing table
              * is populated before we signal success. */
-            apply_static_ipv4();
+            apply_static_ipv4_enterprise();
             /* Log and signal immediately -- no IP event will follow. */
             {
                 esp_netif_ip_info_t ip;
@@ -768,19 +957,29 @@ static void wifi_event_handler(void *arg,
 # endif /* WIFI_ENTERPRISE_SSID */
 #endif /* USE_STATIC_IPV4 */
 
-            /* Bring up IPv6 (SLAAC / DHCPv6 / static) now that L2 is up.
-             * On the PSK bootstrap network (transient), skip static IPv6
-             * addressing -- it belongs to the production enterprise interface.
-             * SLAAC and DHCPv6 modes still bring up link-local normally. */
+            /* Bring up IPv6 now that L2 is up.
+             *
+             * Enterprise path: follow IPV6_MODE.  On the PSK bootstrap network
+             * with USE_STATIC_IPV4_BOOTSTRAP, follow BOOTSTRAP_IPV6_MODE
+             * (defaults to DISABLED -- static IPv6 belongs to the enterprise
+             * interface, not the transient bootstrap VLAN).  SLAAC/DHCPv6
+             * modes still bring up link-local on the bootstrap path. */
 #if IPV6_MODE != IPV6_MODE_DISABLED && defined(CONFIG_LWIP_IPV6)
-# if IPV6_MODE == IPV6_MODE_STATIC && defined(WIFI_ENTERPRISE_SSID)
-            if (!s_psk_bootstrap_active) {
+# if defined(WIFI_ENTERPRISE_SSID)
+            if (s_psk_bootstrap_active) {
+#  if defined(USE_STATIC_IPV4_BOOTSTRAP) && \
+      BOOTSTRAP_IPV6_MODE != IPV6_MODE_DISABLED
+                ipv6_bring_up_bootstrap();
+#  endif /* USE_STATIC_IPV4_BOOTSTRAP && BOOTSTRAP_IPV6_MODE != DISABLED */
+                /* When BOOTSTRAP_IPV6_MODE is DISABLED (or bootstrap static not
+                 * requested), skip IPv6 on the bootstrap interface entirely. */
+            } else {
                 ipv6_bring_up();
             }
-# else
+# else  /* no WIFI_ENTERPRISE_SSID -- single-network modes A/B */
             ipv6_bring_up();
-# endif
-#endif
+# endif /* WIFI_ENTERPRISE_SSID */
+#endif /* IPV6_MODE != IPV6_MODE_DISABLED */
 
         } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
             wifi_event_sta_disconnected_t *ev =
@@ -842,14 +1041,22 @@ static void wifi_event_handler(void *arg,
              * signalled in the STA_CONNECTED handler, so skip it.
              *
              * When WIFI_ENTERPRISE_SSID is also defined (Mode B+/C smart),
-             * the PSK bootstrap path runs DHCP even if USE_STATIC_IPV4 is
-             * set (s_psk_bootstrap_active); in that case this event carries
-             * the DHCP-assigned bootstrap IP and must signal CONNECTED_BIT.
-             * The static-IP path in STA_CONNECTED already handles the
-             * enterprise interface (s_psk_bootstrap_active == false). */
+             * the PSK bootstrap path runs DHCP when USE_STATIC_IPV4_BOOTSTRAP
+             * is not set (s_psk_bootstrap_active + no bootstrap static); in
+             * that case this event carries the DHCP-assigned bootstrap IP and
+             * must signal CONNECTED_BIT.
+             *
+             * When USE_STATIC_IPV4_BOOTSTRAP is also set, the bootstrap path
+             * already logged and signalled in STA_CONNECTED (same as the
+             * enterprise static path), so skip this event for both cases. */
 # if defined(USE_STATIC_IPV4) && defined(WIFI_ENTERPRISE_SSID)
-            /* Only process if we're on the PSK bootstrap DHCP path. */
+            /* Skip for enterprise static (not bootstrap) OR when bootstrap
+             * also has a static address already applied. */
             if (!s_psk_bootstrap_active) goto ip_event_done;
+#  ifdef USE_STATIC_IPV4_BOOTSTRAP
+            /* Bootstrap static path already handled in STA_CONNECTED. */
+            goto ip_event_done;
+#  endif
 # endif
             {
             ip_event_got_ip_t *ev = (ip_event_got_ip_t *)event_data;

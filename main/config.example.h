@@ -238,15 +238,15 @@
  * IPv4 addressing
  *
  * Default (USE_STATIC_IPV4 undefined): DHCPv4 with watchdog.
- * Define USE_STATIC_IPV4 for a fixed address; then STATIC_IPV4_ADDRESS,
- * STATIC_IPV4_NETMASK and STATIC_IPV4_GATEWAY are required.
+ * Define USE_STATIC_IPV4 for a fixed address on the enterprise/production
+ * network; then STATIC_IPV4_ADDRESS, STATIC_IPV4_NETMASK and
+ * STATIC_IPV4_GATEWAY are required.
  *
  * Mode B+ / Mode C note: when WIFI_ENTERPRISE_SSID is also defined, the
- * PSK bootstrap phase (WIFI_SSID) always uses DHCP even if USE_STATIC_IPV4
- * is set.  The static address is applied only when joining the enterprise
- * network.  This is intentional: the bootstrap PSK network is transient
- * (seconds, used only for NTP sync / SCEP) and typically lives on a
- * different subnet from the production enterprise network.
+ * PSK bootstrap phase (WIFI_SSID) uses DHCP by default even if
+ * USE_STATIC_IPV4 is set.  The static address is applied only when joining
+ * the enterprise network.  See USE_STATIC_IPV4_BOOTSTRAP below if the
+ * bootstrap network also needs a static address.
  * ========================================================================== */
 /*
 #define USE_STATIC_IPV4
@@ -255,6 +255,32 @@
 #define STATIC_IPV4_GATEWAY       "10.57.16.1"
 #define STATIC_IPV4_DNS_PRIMARY   "1.1.1.1"
 #define STATIC_IPV4_DNS_SECONDARY "1.0.0.1"
+*/
+
+/* ==========================================================================
+ * Bootstrap-network static IPv4 addressing (Mode B+ / Mode C only)
+ *
+ * Optional.  Requires WIFI_ENTERPRISE_SSID and USE_STATIC_IPV4.
+ *
+ * When defined, the PSK bootstrap network (the one used during PSK
+ * bootstrap for NTP sync / SCEP enrollment, identified by WIFI_SSID)
+ * receives a static IP address instead of DHCP.  Use this when the
+ * bootstrap network is on a different subnet, VLAN, or simply has no
+ * DHCP server.
+ *
+ * BOOTSTRAP_STATIC_IPV4_ADDRESS, _NETMASK, _GATEWAY are required.
+ * DNS servers are optional.
+ *
+ * When USE_STATIC_IPV4_BOOTSTRAP is not defined (the default), the
+ * bootstrap network continues to use DHCP as before.
+ * ========================================================================== */
+/*
+#define USE_STATIC_IPV4_BOOTSTRAP
+#define BOOTSTRAP_STATIC_IPV4_ADDRESS       "10.254.1.91"
+#define BOOTSTRAP_STATIC_IPV4_NETMASK       "255.255.255.0"
+#define BOOTSTRAP_STATIC_IPV4_GATEWAY       "10.254.1.1"
+#define BOOTSTRAP_STATIC_IPV4_DNS_PRIMARY   "10.254.1.1"
+#define BOOTSTRAP_STATIC_IPV4_DNS_SECONDARY "1.1.1.1"
 */
 
 /* ==========================================================================
@@ -281,6 +307,28 @@
 #define STATIC_IPV6_GATEWAY       "fe80::1"
 #define STATIC_IPV6_DNS_PRIMARY   "2606:4700:4700::1111"
 #define STATIC_IPV6_DNS_SECONDARY "2001:4860:4860::8888"
+*/
+
+/* ==========================================================================
+ * Bootstrap-network IPv6 addressing (Mode B+ / Mode C only)
+ *
+ * Optional.  Only meaningful when USE_STATIC_IPV4_BOOTSTRAP is defined.
+ *
+ * BOOTSTRAP_IPV6_MODE selects the IPv6 mode applied to the PSK bootstrap
+ * network.  Accepts the same values as IPV6_MODE.  Defaults to
+ * IPV6_MODE_DISABLED when not set -- static IPv6 addressing belongs to the
+ * enterprise interface, not the transient bootstrap VLAN.
+ *
+ * When set to IPV6_MODE_STATIC, the BOOTSTRAP_STATIC_IPV6_* macros are
+ * required (ADDRESS, PREFIX_LEN, GATEWAY).  DNS servers are optional.
+ * ========================================================================== */
+/*
+#define BOOTSTRAP_IPV6_MODE                 IPV6_MODE_STATIC
+#define BOOTSTRAP_STATIC_IPV6_ADDRESS       "2001:db8:1::91"
+#define BOOTSTRAP_STATIC_IPV6_PREFIX_LEN    64
+#define BOOTSTRAP_STATIC_IPV6_GATEWAY       "fe80::1"
+#define BOOTSTRAP_STATIC_IPV6_DNS_PRIMARY   "2606:4700:4700::1111"
+#define BOOTSTRAP_STATIC_IPV6_DNS_SECONDARY "2001:4860:4860::8888"
 */
 
 /* ==========================================================================
