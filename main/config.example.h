@@ -398,6 +398,26 @@
 /* #define MDNS_ENABLE  1 */
 
 /* ==========================================================================
+ * Wi-Fi country code + TX power (optional)
+ *
+ * WIFI_COUNTRY_CODE: 2-char ISO country code.  ESP-IDF defaults to "01"
+ *   (world domain, channels 1-11).  If your AP runs on channel 12 or 13
+ *   you MUST set this explicitly so the chip's RF state machine is fully
+ *   initialised for those channels at boot; otherwise the chip can
+ *   associate (via passive scan) but trip an internal WiFi crash on the
+ *   first burst of TCP traffic.  Examples: "US" (1-11), "DE"/"RO"/"KR"
+ *   (1-13), "JP" (1-14).  Calls esp_wifi_set_country_code(..., true), so
+ *   ieee80211d is enabled and the AP's beacon can refine the choice.
+ *
+ * WIFI_MAX_TX_POWER: cap WiFi TX power, in units of 0.25 dBm.  Useful on
+ *   boards with a small onboard ceramic antenna (e.g. ESP32-S3-Zero)
+ *   where 21 dBm output can RF-couple back into the chip.  Common values:
+ *   84 = 21 dBm (chip default), 56 = 14 dBm, 40 = 10 dBm.
+ * ========================================================================== */
+/* #define WIFI_COUNTRY_CODE  "DE" */
+/* #define WIFI_MAX_TX_POWER  56   */
+
+/* ==========================================================================
  * Debug-console mode (USB_DEBUG_CONSOLE_ONLY)
  *
  * IMPORTANT: defining this macro here does nothing on its own.  You MUST

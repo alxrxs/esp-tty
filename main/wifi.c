@@ -1161,6 +1161,26 @@ esp_err_t wifi_init_sta(void)
     wifi_init_config_t driver_cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&driver_cfg));
 
+    /* Explicit country code so RF state for channels 12-13 is fully set up
+     * at init time.  Default is "01" (world / channels 1-11) which lets the
+     * chip associate to ch12/13 APs via passive scan but can leave the RX
+     * state machine half-initialised for those channels -- on some S3 dies
+     * the first burst of TCP traffic on channel 13 then crashes ppRxFragmentProc.
+     * Define WIFI_COUNTRY_CODE in config.h with a 2-char ISO country code
+     * (e.g. "RO", "DE", "US") to opt in. */
+#ifdef WIFI_COUNTRY_CODE
+    {
+        esp_err_t cc_err = esp_wifi_set_country_code(WIFI_COUNTRY_CODE, true);
+        if (cc_err == ESP_OK) {
+            ESP_LOGI(TAG, "WiFi country code set to \"%s\" (ieee80211d enabled)",
+                     WIFI_COUNTRY_CODE);
+        } else {
+            ESP_LOGW(TAG, "esp_wifi_set_country_code(\"%s\"): %s",
+                     WIFI_COUNTRY_CODE, esp_err_to_name(cc_err));
+        }
+    }
+#endif
+
 #ifdef WIFI_MAC_BYTES
     /* Override the factory-burned MAC.
      *
@@ -1973,6 +1993,25 @@ static esp_err_t wifi_smart_init_common(
     /* 3. WiFi driver init (once). */
     wifi_init_config_t driver_cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&driver_cfg));
+
+    /* Explicit country code: ESP-IDF defaults to "01" (world / channels 1-11),
+     * which lets the chip associate to ch12/13 APs via passive scan but leaves
+     * the RX state machine half-initialised for those channels.  On some S3
+     * dies the first burst of TCP traffic on ch12/13 then crashes
+     * ppRxFragmentProc.  Setting the country code explicitly with ieee80211d
+     * fully reinitialises the RF subsystem for the configured band. */
+#ifdef WIFI_COUNTRY_CODE
+    {
+        esp_err_t cc_err = esp_wifi_set_country_code(WIFI_COUNTRY_CODE, true);
+        if (cc_err == ESP_OK) {
+            ESP_LOGI(TAG, "[smart] WiFi country code set to \"%s\"",
+                     WIFI_COUNTRY_CODE);
+        } else {
+            ESP_LOGW(TAG, "[smart] esp_wifi_set_country_code(\"%s\"): %s",
+                     WIFI_COUNTRY_CODE, esp_err_to_name(cc_err));
+        }
+    }
+#endif
 
     /* 4. Persistent event handlers (reconnect + IP logging). */
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
