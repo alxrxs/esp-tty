@@ -59,7 +59,11 @@ static const char *TAG = "scep_enroll";
  * -------------------------------------------------------------------------- */
 static void *psram_alloc(size_t sz)
 {
-    return heap_caps_malloc(sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    /* Prefer PSRAM; fall back to internal RAM when CONFIG_SPIRAM=n
+     * (e.g. Zero boards with PSRAM disabled for stability). */
+    void *p = heap_caps_malloc(sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!p) p = heap_caps_malloc(sz, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    return p;
 }
 
 static void psram_free(void *p)

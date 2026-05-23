@@ -93,17 +93,27 @@ bench_done:
 }
 #endif
 
-/* Per-direction ring buffer size (PSRAM-backed). Override in config.h
- * if you need more headroom for bursty workloads. */
+/* Per-direction ring buffer size.  Defaults differ between PSRAM-equipped
+ * and internal-RAM-only boards: PSRAM has plenty of room for 16 KB each,
+ * internal RAM is tight so 4 KB is a sensible cap.  Override in config.h
+ * if you need more headroom (and have the RAM for it). */
 #ifndef RING_BUFFER_BYTES
-#define RING_BUFFER_BYTES (16 * 1024)
+# ifdef CONFIG_SPIRAM
+#  define RING_BUFFER_BYTES (16 * 1024)
+# else
+#  define RING_BUFFER_BYTES (4 * 1024)
+# endif
 #endif
 
-/* Scrollback capacity in bytes (PSRAM-backed circular buffer). Larger
- * values let the device retain more history of the target's serial output
- * between SSH sessions; bounded by free PSRAM. */
+/* Scrollback capacity.  PSRAM build keeps 128 KB; no-PSRAM build drops to
+ * 8 KB so the scrollback fits alongside the WiFi/TLS heap usage in
+ * internal RAM. */
 #ifndef SCROLLBACK_BUFFER_BYTES
-#define SCROLLBACK_BUFFER_BYTES (128 * 1024)
+# ifdef CONFIG_SPIRAM
+#  define SCROLLBACK_BUFFER_BYTES (128 * 1024)
+# else
+#  define SCROLLBACK_BUFFER_BYTES (8 * 1024)
+# endif
 #endif
 
 /* -- Rollback self-test ---------------------------------------------------
@@ -181,16 +191,28 @@ void app_main(void)
         ESP_LOGE(TAG, "Failed to allocate ring buffers in PSRAM");
         abort();
     }
-    ESP_LOGI(TAG, "Ring buffers allocated (%d KB each in PSRAM)",
-             RING_BUFFER_BYTES / 1024);
+    ESP_LOGI(TAG, "Ring buffers allocated (%d KB each, %s)",
+             RING_BUFFER_BYTES / 1024,
+#ifdef CONFIG_SPIRAM
+             "PSRAM"
+#else
+             "internal RAM"
+#endif
+            );
 
     scrollback_t *scrollback = scrollback_create(SCROLLBACK_BUFFER_BYTES);
     if (!scrollback) {
         /* Non-fatal: SSH sessions work, just no replay on connect. */
         ESP_LOGW(TAG, "scrollback_create failed -- continuing without replay");
     } else {
-        ESP_LOGI(TAG, "Scrollback buffer allocated (%u KB in PSRAM)",
-                 (unsigned)(SCROLLBACK_BUFFER_BYTES / 1024));
+        ESP_LOGI(TAG, "Scrollback buffer allocated (%u KB, %s)",
+                 (unsigned)(SCROLLBACK_BUFFER_BYTES / 1024),
+#ifdef CONFIG_SPIRAM
+                 "PSRAM"
+#else
+                 "internal RAM"
+#endif
+                );
     }
 
     /* -- 3. USB CDC ACM (Linux host serial port) ------------------- */

@@ -1512,6 +1512,26 @@ static esp_err_t wifi_mode_psk(const char *ssid,
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &cfg));
     ESP_ERROR_CHECK(esp_wifi_start());
 
+    /* Cap the TX power.  On boards with a small onboard ceramic antenna
+     * (ESP32-S3-Zero in particular) full 21 dBm output can RF-couple back
+     * into the chip during sustained TX bursts (TCP/HTTP handshake),
+     * corrupting WiFi RX state.  Set via WIFI_MAX_TX_POWER in config.h:
+     * 40 = 10 dBm, 56 = 14 dBm, 84 = 21 dBm (default).  Skipped if unset. */
+#ifdef WIFI_MAX_TX_POWER
+    {
+        int8_t cur = 0;
+        esp_wifi_get_max_tx_power(&cur);
+        esp_err_t pe = esp_wifi_set_max_tx_power((int8_t)WIFI_MAX_TX_POWER);
+        if (pe == ESP_OK) {
+            ESP_LOGI(TAG, "TX power capped: %d -> %d (0.25 dBm units)",
+                     cur, (int)WIFI_MAX_TX_POWER);
+        } else {
+            ESP_LOGW(TAG, "esp_wifi_set_max_tx_power(%d): %s",
+                     (int)WIFI_MAX_TX_POWER, esp_err_to_name(pe));
+        }
+    }
+#endif
+
     /* Wait for IP or failure.  WIFI_MAX_RETRY=0 means infinite here too. */
     EventBits_t bits = xEventGroupWaitBits(
         s_wifi_event_group,

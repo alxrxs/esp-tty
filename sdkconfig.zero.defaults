@@ -24,8 +24,25 @@ CONFIG_PARTITION_TABLE_FILENAME="partitions_zero.csv"
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=n
 CONFIG_SPIRAM_MODE_QUAD=y
-# Speed: the embedded QSPI PSRAM on FH4R2 is rated for 80 MHz as well.
-# CONFIG_SPIRAM_SPEED_80M is already set in sdkconfig.defaults; no override.
 
 # Quad PSRAM type: auto-detect covers the embedded 2 MB part.
 CONFIG_SPIRAM_TYPE_AUTO=y
+
+# -- Wi-Fi stability tweaks for FH4R2 + Quad PSRAM --------------------------
+# Without these, the Zero panics in ppRxFragmentProc (LoadProhibited at
+# EXCVADDR=0x00000004) shortly after the first outbound TCP SYN -- the WiFi
+# RX reassembly path dereferences a NULL fragment header under sustained
+# load.  Disabling A-MPDU aggregation puts the RX path on the simpler
+# synchronous code path; disabling power save removes the modem-sleep wake
+# timing race.  Cost is small throughput; gain is reliability.
+CONFIG_ESP_WIFI_AMPDU_RX_ENABLED=n
+CONFIG_ESP_WIFI_AMPDU_TX_ENABLED=n
+CONFIG_PM_ENABLE=n
+
+# Pull extra WiFi code paths into IRAM so WiFi RX never trips into a "cache
+# disabled but cached memory region accessed" panic when the flash cache is
+# briefly suspended (CACHE-126 errata on v0.0/v0.1/v0.2 ESP32-S3 silicon).
+# Costs ~10 KB IRAM; mandatory on the Zero's FH4R2 v0.2 die.
+CONFIG_ESP_WIFI_EXTRA_IRAM_OPT=y
+CONFIG_ESP_WIFI_SLP_IRAM_OPT=y
+
