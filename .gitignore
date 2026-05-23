@@ -23,6 +23,7 @@ sdkconfig
 sdkconfig.*
 !sdkconfig.defaults
 !sdkconfig.zero.defaults
+!sdkconfig.debug_console.defaults
 
 # ESP-IDF managed components cache
 managed_components/

@@ -5,12 +5,16 @@
 #   This is the DevKitC-1 path.  The CH340 is always present and is the
 #   correct port to drive esptool against on that board.
 #
-# Priority 2: ESP32-S3 native USB Serial-JTAG bootloader endpoint
-#   (VID 0x303A, PID 0x1001).  This is the Waveshare ESP32-S3-Zero path.
-#   The chip only exposes this PID while it is in the ROM bootloader; you
-#   MUST hold the BOOT button and tap RESET before running `make flash` on
-#   the Zero.  Once the app starts, the PID changes to 0x4001 (TinyUSB CDC)
-#   and this script will no longer match it -- that is intentional.
+# Priority 2: ESP32-S3 native USB Serial-JTAG controller
+#   (VID 0x303A, PID 0x1001).  Two cases use this PID:
+#   a) Zero in ROM bootloader mode: hold BOOT, tap RESET before `make flash`.
+#      Once the app starts in production firmware (TinyUSB), the PID changes
+#      to 0x4001 (TinyUSB CDC) and this script no longer matches -- intentional.
+#   b) USB_DEBUG_CONSOLE_ONLY builds (s3debug / s3zerodebug): the running app
+#      does not initialise TinyUSB, so the USB-Serial-JTAG controller keeps
+#      the pins and the device continues to enumerate as 303a:1001 even after
+#      boot.  In that case the BOOT+RESET dance is still required to enter
+#      download mode for flashing (the app has no auto-reset circuit on Zero).
 #
 # Prints nothing if neither device is found; the Makefile then falls back
 # to PlatformIO's own auto-detect.  Override at any time with:

@@ -22,7 +22,7 @@ spawned FreeRTOS tasks keep running.
 |---|---|
 | `main.c` | `app_main`: NVS AES-XTS-256 init, ring + scrollback allocation in PSRAM, subsystem start sequence, OTA rollback timer |
 | `wifi.c` / `wifi.h` | Wi-Fi STA driver: PSK / smart bootstrap (PSK -> NTP -> SCEP -> EAP-TLS) / static-EAP-TLS modes, event-driven reconnect, DHCP watchdog, IPv4/IPv6 config, optional MAC override |
-| `usb_cdc.c` / `usb_cdc.h` | TinyUSB CDC ACM driver, custom USB descriptors, `usb_tx_task`, RX callback into ring (skipped when `BRIDGE_LOOPBACK` is defined) |
+| `usb_cdc.c` / `usb_cdc.h` | TinyUSB CDC ACM driver, custom USB descriptors, `usb_tx_task`, RX callback into ring (no-op stubs when `BRIDGE_LOOPBACK` or `USB_DEBUG_CONSOLE_ONLY` is defined) |
 | `ssh_server.c` / `ssh_server.h` | wolfSSH accept loop, single-session takeover via semaphore, pubkey auth, bridge pump tasks, terminal-resize callback |
 | `ota_session.c` / `ota_session.h` | `ota@` SSH channel handler: ephemeral X25519 / HKDF / AES-256-GCM via wolfCrypt, streaming decrypt into the inactive OTA partition, partition switch + reboot |
 | `host_key.c` / `host_key.h` | Ed25519 host-key generation (wolfCrypt RNG) and NVS persistence; SHA-256 fingerprint printed at every boot |
@@ -47,7 +47,7 @@ flowchart TB
     start(["app_main()"])
     nvs["1. NVS flash init (AES-XTS-256)"]
     rings["2. Ring buffers + scrollback (PSRAM)"]
-    usb["3. USB CDC ACM<br/><i>skipped when BRIDGE_LOOPBACK is defined</i>"]
+    usb["3. USB CDC ACM<br/><i>skipped when BRIDGE_LOOPBACK or USB_DEBUG_CONSOLE_ONLY is defined</i>"]
     wifi["4. Wi-Fi STA (PSK, smart, or static EAP-TLS)"]
     scep["5. SCEP enrol on first boot<br/>(only in smart-bootstrap mode)"]
     ssh["6. SSH server (TCP/22)"]

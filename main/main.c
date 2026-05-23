@@ -194,14 +194,19 @@ void app_main(void)
     }
 
     /* -- 3. USB CDC ACM (Linux host serial port) ------------------- */
-#ifndef BRIDGE_LOOPBACK
-    ESP_ERROR_CHECK(usb_cdc_init(usb_to_ssh, ssh_to_usb, scrollback));
-    ESP_ERROR_CHECK(usb_cdc_start_task());
-    ESP_LOGI(TAG, "USB CDC ACM ready -- plug USB-C cable to native USB port");
-#else
+#if defined(BRIDGE_LOOPBACK)
     /* Wokwi / CI loopback: usb_to_ssh and ssh_to_usb are wired together
        by the bridge pump directly; no TinyUSB involved. */
     ESP_LOGI(TAG, "BRIDGE_LOOPBACK mode -- USB CDC bypassed");
+#elif defined(USB_DEBUG_CONSOLE_ONLY)
+    /* Debug-console mode: USB-OTG is not initialised so the USB-Serial-JTAG
+       controller owns GPIO19/20.  ESP_LOG* output streams from the USB-C port
+       as a 303a:1001 CDC ACM device -- no SSH bridge in this build. */
+    ESP_LOGI(TAG, "USB_DEBUG_CONSOLE_ONLY -- TinyUSB skipped, logs via USB-Serial-JTAG");
+#else
+    ESP_ERROR_CHECK(usb_cdc_init(usb_to_ssh, ssh_to_usb, scrollback));
+    ESP_ERROR_CHECK(usb_cdc_start_task());
+    ESP_LOGI(TAG, "USB CDC ACM ready -- plug USB-C cable to native USB port");
 #endif
 
 #ifdef SCEP_KEYGEN_BENCH_ON_BOOT

@@ -110,6 +110,36 @@ pads. Connect an external USB-UART dongle at 115200 baud to read them.
 Set `UDP_LOG_HOST`/`UDP_LOG_PORT` in `config.h` to mirror ESP_LOG to UDP.
 Useful on the Zero, which lacks the CH340.
 
+### Debug-console mode (Zero and DevKitC-1)
+
+For bring-up on the Zero without an external USB-UART dongle, use the
+debug-console build. It skips TinyUSB so the ESP32-S3's built-in
+USB-Serial-JTAG controller claims the shared GPIO19/20 pins and the boot log
+streams directly from the USB-C port as a `303a:1001` CDC ACM device.
+Wi-Fi, SSH (TCP 22), OTA, SCEP, and mDNS all remain functional.
+
+```
+make flash <devname> s3zerodebug    # Zero: debug-console build
+make flash <devname> s3debug        # DevKitC-1: debug-console build
+```
+
+Read the boot log:
+
+```
+pio device monitor                  # or: picocom /dev/ttyACM0  (303a:1001)
+```
+
+Once you are done debugging, switch back to the production build which
+re-enables the TinyUSB CDC SSH bridge:
+
+```
+make flash <devname> s3zero         # back to production (TinyUSB bridge)
+```
+
+The Zero still requires the BOOT+RESET dance to enter download mode even in
+debug-console builds -- the USB-Serial-JTAG controller does not support
+auto-reset.
+
 ## Quick start
 
 ```

@@ -1,0 +1,29 @@
+# sdkconfig.debug_console.defaults -- overlay for USB_DEBUG_CONSOLE_ONLY builds
+#
+# Applied on top of the base defaults via:
+#   -DSDKCONFIG_DEFAULTS="sdkconfig.defaults[;sdkconfig.zero.defaults];sdkconfig.debug_console.defaults"
+#
+# Intent: route ESP_LOG* to the ESP32-S3 USB-Serial-JTAG controller
+# (303a:1001) instead of UART0, and skip TinyUSB CDC init entirely.
+#
+# Background: the ESP32-S3 has two separate USB peripherals that share the
+# same physical GPIO19/20 pins -- only one can be active at a time:
+#   - USB-OTG controller:         used by TinyUSB (the SSH bridge)
+#   - USB-Serial-JTAG controller: fixed-function CDC+JTAG, always present in silicon
+#
+# In a normal build TinyUSB claims the pins and UART0 carries the console.
+# With this overlay the USB-Serial-JTAG controller claims the pins instead
+# and the console output streams over USB-C as a standard CDC ACM device
+# (lsusb shows 303a:1001).  The SSH bridge is not functional in this mode,
+# but Wi-Fi, SCEP, mDNS, and SSH listen on TCP -- everything except the
+# serial bridge -- remain operational.
+
+# -- Console output ------------------------------------------------------------
+# Switch the IDF console from UART0 to USB-Serial-JTAG.
+# These three settings are mutually exclusive; the base sdkconfig.defaults
+# sets CONFIG_ESP_CONSOLE_UART_DEFAULT=y -- override it here.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=n
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+# Disable TinyUSB entirely -- it must not initialise or it will claim GPIO19/20
+# away from the USB-Serial-JTAG controller.
+CONFIG_TINYUSB_CDC_ENABLED=n

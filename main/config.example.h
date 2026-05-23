@@ -398,6 +398,40 @@
 /* #define MDNS_ENABLE  1 */
 
 /* ==========================================================================
+ * Debug-console mode (USB_DEBUG_CONSOLE_ONLY)
+ *
+ * IMPORTANT: defining this macro here does nothing on its own.  You MUST
+ * also use the matching PlatformIO env (esp32s3_debug or esp32s3_zero_debug)
+ * which applies the sdkconfig.debug_console.defaults overlay.  That overlay
+ * sets CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y and disables CONFIG_TINYUSB_CDC_ENABLED.
+ * Without those sdkconfig changes, the USB-OTG peripheral still starts up and
+ * claims GPIO19/20, preventing the USB-Serial-JTAG controller from working.
+ *
+ * Use the Makefile wrappers instead of defining this macro by hand:
+ *   make flash <devname> s3debug        # DevKitC-1 with debug-console
+ *   make flash <devname> s3zerodebug    # Zero with debug-console (recommended)
+ *   make ota   <devname> s3zerodebug    # OTA to a running debug-console build
+ *
+ * What it does:
+ *   - Skips usb_cdc_init() and the USB TX pump task
+ *   - USB-OTG peripheral is never initialised
+ *   - USB-Serial-JTAG controller claims GPIO19/20 (shared physical pins)
+ *   - ESP_LOG* output streams from the USB-C port as a 303a:1001 CDC ACM device
+ *   - Read with: pio device monitor  /  picocom  /  screen  /  cu
+ *   - Wi-Fi, SSH (TCP 22), OTA, SCEP, mDNS all remain functional
+ *
+ * When to use it:
+ *   On the Zero, which has no CH340 USB-UART bridge and no UART0 accessible
+ *   without an external dongle, this is the easiest way to see the boot log.
+ *   Prefer the production env (esp32s3_zero) once bring-up is complete.
+ *
+ * Defining this macro in config.h has NO EFFECT unless you select the
+ * matching _debug PlatformIO env, because the sdkconfig knobs that enable
+ * USB-Serial-JTAG console and disable TinyUSB are baked in at configure time.
+ * ========================================================================== */
+/* #define USB_DEBUG_CONSOLE_ONLY  1 */
+
+/* ==========================================================================
  * USB CDC descriptors
  *
  * VID/PID are reported by lsusb / Windows driver matching; Linux and
@@ -409,6 +443,9 @@
  *
  * Each string is converted ASCII -> UTF-16LE by esp_tinyusb and capped
  * at 31 characters.
+ *
+ * Note: these descriptors are unused in USB_DEBUG_CONSOLE_ONLY builds since
+ * TinyUSB is not initialised.
  * ========================================================================== */
 #define USB_VID                  0x303a   /* Espressif Systems */
 #define USB_PID                  0x4001   /* TinyUSB default CDC */

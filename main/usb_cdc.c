@@ -6,6 +6,10 @@
  *
  * When BRIDGE_LOOPBACK is defined (Wokwi simulation) TinyUSB is absent;
  * the whole file becomes no-ops since the bridge never calls usb_cdc_*.
+ *
+ * When USB_DEBUG_CONSOLE_ONLY is defined the USB-OTG peripheral is not
+ * initialised so that the USB-Serial-JTAG controller can claim the shared
+ * GPIO19/20 pins instead.  All public functions become no-ops in that case.
  */
 
 #include "usb_cdc.h"
@@ -17,7 +21,7 @@
 #include <inttypes.h>
 #include <stdint.h>
 
-#ifndef BRIDGE_LOOPBACK
+#if !defined(BRIDGE_LOOPBACK) && !defined(USB_DEBUG_CONSOLE_ONLY)
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -173,7 +177,7 @@ esp_err_t usb_cdc_start_task(void)
     return ESP_OK;
 }
 
-#else /* BRIDGE_LOOPBACK -- stubs, never called */
+#else /* BRIDGE_LOOPBACK or USB_DEBUG_CONSOLE_ONLY -- stubs, never called */
 
 esp_err_t usb_cdc_init(ring_t *usb_to_ssh, ring_t *ssh_to_usb,
                        scrollback_t *scrollback)
@@ -184,4 +188,4 @@ esp_err_t usb_cdc_init(ring_t *usb_to_ssh, ring_t *ssh_to_usb,
 
 esp_err_t usb_cdc_start_task(void) { return ESP_OK; }
 
-#endif /* BRIDGE_LOOPBACK */
+#endif /* BRIDGE_LOOPBACK || USB_DEBUG_CONSOLE_ONLY */

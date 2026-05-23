@@ -32,23 +32,35 @@
 # Board model positional (MODEL):
 #   Pass a board model name after DEVNAME (or alone if no DEVNAME) to select
 #   the PlatformIO environment.  Known models and their ENV mappings:
-#     s3      (default) ESP32-S3-DevKitC-1 N16R8 -> env:esp32s3
-#     s3zero            Waveshare ESP32-S3-Zero   -> env:esp32s3_zero
+#     s3           (default) ESP32-S3-DevKitC-1 N16R8        -> env:esp32s3
+#     s3zero                 Waveshare ESP32-S3-Zero          -> env:esp32s3_zero
+#     s3debug                DevKitC-1 N16R8, debug-console   -> env:esp32s3_debug
+#     s3zerodebug            ESP32-S3-Zero, debug-console     -> env:esp32s3_zero_debug
+#
+#   Debug-console builds omit TinyUSB and route ESP_LOG* to the USB-Serial-JTAG
+#   controller (303a:1001 on USB-C).  Wi-Fi, SSH, OTA, SCEP all remain active.
+#   Useful on the Zero, which has no CH340 -- you can see boot logs without an
+#   external USB-UART dongle.
 #
 #   Examples:
-#     make flash dell             # devname=dell, model defaults to s3 (env esp32s3)
-#     make flash dell s3          # same as above
-#     make flash dell s3zero      # devname=dell, model=s3zero (env esp32s3_zero)
-#     make ota   dell s3zero      # OTA build+upload, env esp32s3_zero
-#     make build s3zero           # build only, env esp32s3_zero, no devname change
+#     make flash dell                   # devname=dell, model defaults to s3
+#     make flash dell s3                # same as above
+#     make flash dell s3zero            # devname=dell, model=s3zero
+#     make flash dell s3zerodebug       # Zero board, debug-console firmware
+#     make flash dell s3debug           # DevKitC-1, debug-console firmware
+#     make ota   dell s3zero            # OTA build+upload, env esp32s3_zero
+#     make build s3zero                 # build only, env esp32s3_zero, no devname change
+#     make build s3zerodebug            # build only, debug-console env for Zero
 #
 #   If only one positional is given it is auto-detected: if main/config.<arg>.h
 #   exists it is treated as DEVNAME; if it matches a known model name it is
 #   treated as MODEL.  Explicit ENV=... always wins over the positional.
 #
 # Board environments (ENV=):
-#   esp32s3       (default) ESP32-S3-DevKitC-1 N16R8 -- 16 MB flash, 8 MB PSRAM
-#   esp32s3_zero            Waveshare ESP32-S3-Zero  --  4 MB flash, 2 MB PSRAM
+#   esp32s3            (default) ESP32-S3-DevKitC-1 N16R8 -- 16 MB flash, 8 MB PSRAM
+#   esp32s3_zero                 Waveshare ESP32-S3-Zero  --  4 MB flash, 2 MB PSRAM
+#   esp32s3_debug                DevKitC-1 N16R8, debug-console (USB-Serial-JTAG logs)
+#   esp32s3_zero_debug           ESP32-S3-Zero, debug-console (USB-Serial-JTAG logs)
 #
 #   make build ENV=esp32s3_zero
 #   make flash ENV=esp32s3_zero dell     # see Zero flashing note below
@@ -82,9 +94,11 @@ PYTHON := $(shell \
 # Anything in MAKECMDGOALS that isn't a known target is a positional.  Up to
 # two positionals are accepted, in either order: a per-device config name
 # (main/config.<x>.h exists) and a board model name (in $(KNOWN_MODELS)).
-KNOWN_MODELS   := s3 s3zero
-ENV_OF_s3      := esp32s3
-ENV_OF_s3zero  := esp32s3_zero
+KNOWN_MODELS          := s3 s3zero s3debug s3zerodebug
+ENV_OF_s3             := esp32s3
+ENV_OF_s3zero         := esp32s3_zero
+ENV_OF_s3debug        := esp32s3_debug
+ENV_OF_s3zerodebug    := esp32s3_zero_debug
 
 POSITIONALS := $(filter-out ota flash build clean test test-py,$(MAKECMDGOALS))
 
@@ -109,7 +123,7 @@ else
 endif
 
 # Full list of board envs, used by `make clean` when no env was specified.
-ALL_BOARD_ENVS := esp32s3 esp32s3_zero
+ALL_BOARD_ENVS := esp32s3 esp32s3_zero esp32s3_debug esp32s3_zero_debug
 
 # Auto-detect the upload port by USB Vendor ID, not by device-name pattern.
 #

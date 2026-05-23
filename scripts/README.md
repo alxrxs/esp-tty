@@ -67,6 +67,13 @@ USB devices by the CH340/CH343 vendor ID (`0x1a86`) so the flashing port is
 picked out even when the ESP32-S3's own native USB CDC enumerates with the same
 filename pattern.
 
+For Zero-class boards (no CH340) and for `USB_DEBUG_CONSOLE_ONLY` builds on any
+board where TinyUSB is absent, the script falls back to detecting the ESP32-S3
+USB-Serial-JTAG controller (`303a:1001`).  On the Zero this requires the
+BOOT+RESET dance before running `make flash`.  On the DevKitC-1 in debug-console
+mode the CH340 (`1a86`) is still detected first (higher priority) and is the
+correct port to drive `esptool` against.
+
 ## ota_send.py
 
 Uploads a compiled firmware binary to a running device over an SSH
