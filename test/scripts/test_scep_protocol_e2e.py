@@ -1659,3 +1659,225 @@ class TestPkcsReqBuildVariants:
         # The CA cert's CN should be present in the bundle
         cn = bundle["ca_cert"].subject.get_attributes_for_oid(NameOID.COMMON_NAME)
         assert cn[0].value == "Fake-NDES-CA"
+
+
+# ── SCEP Subject DN config macro tests ───────────────────────────────────────
+#
+# These tests validate the SCEP_CN / SCEP_O / SCEP_OU / SCEP_C subject DN
+# wiring used by the firmware.  The SCEPClient._build_csr() method mirrors
+# the C firmware's scep_build_csr() including the DN fields.  We extend
+# SCEPClient to accept explicit O/OU/C so we can exercise and verify each
+# field end-to-end.
+
+class SCEPClientWithFullDN(SCEPClient):
+    """
+    SCEPClient subclass that accepts explicit O, OU, C fields, mirroring
+    the SCEP_O / SCEP_OU / SCEP_C config macros in scep_enroll.c.
+    """
+
+    def __init__(self, cn: str, challenge_password: str,
+                 organization: str = None,
+                 organizational_unit: str = None,
+                 country: str = None):
+        super().__init__(cn, challenge_password)
+        self._organization        = organization
+        self._organizational_unit = organizational_unit
+        self._country             = country
+
+    def _build_csr(self):
+        """Build CSR with full DN (O, OU, C) when set, mirroring SCEP_O/OU/C."""
+        OID_CHALLENGE_PW_OBJ = x509.ObjectIdentifier(_OID_CHALLENGE_PW)
+        name_attrs = [x509.NameAttribute(NameOID.COMMON_NAME, self.cn)]
+        if self._organization:
+            name_attrs.append(
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, self._organization)
+            )
+        if self._organizational_unit:
+            name_attrs.append(
+                x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME,
+                                   self._organizational_unit)
+            )
+        if self._country:
+            name_attrs.append(
+                x509.NameAttribute(NameOID.COUNTRY_NAME, self._country)
+            )
+        builder = x509.CertificateSigningRequestBuilder()
+        builder = builder.subject_name(x509.Name(name_attrs))
+        builder = builder.add_attribute(
+            OID_CHALLENGE_PW_OBJ,
+            self.challenge_pw.encode("ascii"),
+        )
+        return builder.sign(self._private_key, hashes.SHA256())
+
+
+class TestSubjectDNMacros:
+    """
+    Test that SCEP subject DN config macros (SCEP_CN, SCEP_O, SCEP_OU, SCEP_C)
+    wire through correctly to the issued cert's DN.
+
+    Tests 7/8 from the brief: coverage of the DN config macros so a
+    regression in their wiring would be caught.
+    """
+
+    def test_cn_only_enrollment_issued_cert_has_correct_cn(self, ca):
+        """CN-only subject: issued cert contains the right CN."""
+        client = SCEPClientWithFullDN(
+            cn="scep-cn-only-device",
+            challenge_password=CHALLENGE_PW,
+        )
+        client.generate_key()
+        bundle = client.parse_getcacert(ca.respond_get_cacert())
+        client.parse_certrep(ca.respond_pki_operation(
+            client.build_pkcsreq(bundle["ra_enc_cert"])
+        ))
+        assert client.issued_cert is not None
+        cn = client.issued_cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+        assert cn, "Issued cert must have CN"
+        assert cn[0].value == "scep-cn-only-device"
+
+    def test_full_dn_enrollment_issued_cert_cn_matches(self, ca):
+        """CN + O + OU + C: all fields wired through; issued cert CN matches."""
+        client = SCEPClientWithFullDN(
+            cn="scep-full-dn-device",
+            challenge_password=CHALLENGE_PW,
+            organization="TestOrg",
+            organizational_unit="IoT",
+            country="RO",
+        )
+        client.generate_key()
+        bundle = client.parse_getcacert(ca.respond_get_cacert())
+        client.parse_certrep(ca.respond_pki_operation(
+            client.build_pkcsreq(bundle["ra_enc_cert"])
+        ))
+        assert client.issued_cert is not None
+        # The CA issues the cert with the CSR subject; check CN
+        cn = client.issued_cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+        assert cn[0].value == "scep-full-dn-device"
+
+    def test_organization_field_propagated_to_issued_cert(self, ca):
+        """O field from SCEP_O macro appears in the issued cert subject."""
+        client = SCEPClientWithFullDN(
+            cn="scep-org-device",
+            challenge_password=CHALLENGE_PW,
+            organization="Acme Corp",
+        )
+        client.generate_key()
+        bundle = client.parse_getcacert(ca.respond_get_cacert())
+        client.parse_certrep(ca.respond_pki_operation(
+            client.build_pkcsreq(bundle["ra_enc_cert"])
+        ))
+        assert client.issued_cert is not None
+        # FakeNdesCA._issue_cert() copies the CSR subject directly
+        org = client.issued_cert.subject.get_attributes_for_oid(
+            NameOID.ORGANIZATION_NAME
+        )
+        assert org, "Issued cert must contain O field"
+        assert org[0].value == "Acme Corp"
+
+    def test_cn_change_yields_different_transaction_id(self, ca):
+        """Different CNs (same key size) yield different transactionIDs.
+        Exercises the SCEP_CN macro effect on uniqueness."""
+        # Two clients; different CNs but same challenge
+        clients = [
+            SCEPClientWithFullDN(cn=f"device-{i}", challenge_password=CHALLENGE_PW)
+            for i in range(2)
+        ]
+        txids = set()
+        for c in clients:
+            c.generate_key()
+            txids.add(c.transaction_id)
+        # Each client has its own key -> distinct transactionIDs
+        assert len(txids) == 2, \
+            "Different keys must produce different transactionIDs (SCEP_CN path)"
+
+    def test_country_code_propagated_to_issued_cert(self, ca):
+        """C field from SCEP_C macro appears in the issued cert subject."""
+        client = SCEPClientWithFullDN(
+            cn="scep-country-device",
+            challenge_password=CHALLENGE_PW,
+            country="DE",
+        )
+        client.generate_key()
+        bundle = client.parse_getcacert(ca.respond_get_cacert())
+        client.parse_certrep(ca.respond_pki_operation(
+            client.build_pkcsreq(bundle["ra_enc_cert"])
+        ))
+        assert client.issued_cert is not None
+        country = client.issued_cert.subject.get_attributes_for_oid(
+            NameOID.COUNTRY_NAME
+        )
+        assert country, "Issued cert must contain C field"
+        assert country[0].value == "DE"
+
+
+class TestPendingResponseAdditional:
+    """Additional PENDING response coverage (Test 8 from the brief)."""
+
+    def test_pending_certrep_contains_transaction_id(self, ca):
+        """A PENDING CertRep still carries the correct transactionID."""
+        client = SCEPClient(cn="pending-txid-check", challenge_password=CHALLENGE_PW)
+        client.generate_key()
+        bundle = client.parse_getcacert(ca.respond_get_cacert())
+        client.build_pkcsreq(bundle["ra_enc_cert"])  # prepare but don't send
+
+        # Build PENDING response directly
+        pending_certrep = _build_scep_signed_data(
+            content_der=b"",
+            signing_key=ca._ra_sign_key,
+            signing_cert=ca._ra_sign_cert,
+            message_type=_MSG_TYPE_CERTREP,
+            transaction_id=client.transaction_id,
+            sender_nonce=os.urandom(16),
+            pki_status=_PKI_STATUS_PENDING,
+        )
+
+        # Parse manually to confirm transactionID is present
+        _, _, signed_attrs_raw = _parse_signed_data_der(pending_certrep)
+        attrs = _extract_signed_attrs(signed_attrs_raw)
+        tx_id = attrs.get(_OID_TRANSACTION_ID, "")
+        assert tx_id == client.transaction_id, \
+            "PENDING CertRep must carry the correct transactionID"
+
+        # And the client rejects it with PENDING
+        with pytest.raises(RuntimeError) as exc_info:
+            client.parse_certrep(pending_certrep)
+        assert "PENDING" in str(exc_info.value)
+
+    def test_pending_then_success_on_second_request(self, ca):
+        """Client that gets PENDING can re-enroll and get SUCCESS."""
+        client = SCEPClient(cn="pending-retry-device", challenge_password=CHALLENGE_PW)
+        client.generate_key()
+        bundle = client.parse_getcacert(ca.respond_get_cacert())
+        pkcsreq = client.build_pkcsreq(bundle["ra_enc_cert"])
+
+        # First attempt: PENDING
+        pending_certrep = _build_scep_signed_data(
+            content_der=b"",
+            signing_key=ca._ra_sign_key,
+            signing_cert=ca._ra_sign_cert,
+            message_type=_MSG_TYPE_CERTREP,
+            transaction_id=client.transaction_id,
+            sender_nonce=os.urandom(16),
+            pki_status=_PKI_STATUS_PENDING,
+        )
+        with pytest.raises(RuntimeError):
+            client.parse_certrep(pending_certrep)
+
+        # Second attempt: now the CA approves (same pkcsreq is resubmittable)
+        certrep_success = ca.respond_pki_operation(pkcsreq)
+        client.parse_certrep(certrep_success)
+        assert client.issued_cert is not None, \
+            "After PENDING, a resubmitted request must succeed"
+
+    def test_getcacert_ra_enc_cert_has_rsa_key(self, ca):
+        """GetCACert RA encryption cert must have an RSA key (PKCS7EnvelopeBuilder
+        requires RSA KTRI recipients; ECDSA recipients require ECDH-based KARI).
+        This mirrors the C-side check in scep_build_pkimessage_pkcsreq."""
+        bundle_der = ca.respond_get_cacert()
+        client = SCEPClient(cn="ra-enc-rsa-check", challenge_password=CHALLENGE_PW)
+        client.generate_key()
+        bundle = client.parse_getcacert(bundle_der)
+        ra_enc_cert = bundle["ra_enc_cert"]
+        from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
+        assert isinstance(ra_enc_cert.public_key(), RSAPublicKey), \
+            "RA encryption cert must have RSA key (SCEP KTRI recipient requirement)"

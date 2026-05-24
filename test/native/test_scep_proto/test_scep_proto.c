@@ -30,6 +30,7 @@
 #include "mbedtls/rsa.h"
 #include "mbedtls/entropy.h"
 #include "mbedtls/ctr_drbg.h"
+#include "mbedtls/x509_crt.h"
 
 #include "unity.h"
 #include "scep_proto.h"
@@ -741,6 +742,441 @@ void test_csr_null_challenge_password_returns_error(void)
 }
 
 /* =========================================================================
+ * 14. mbedTLS version-gate compile-time checks
+ *
+ * Confirm that the #if-gated API path chosen at compile time is the one
+ * that actually matches the mbedTLS version present.  On the host (3.6.x)
+ * the 3.x path is taken; on-device (ESP-IDF 6.0.1, mbedTLS 4.x) the 4.x
+ * path is taken.  Either way, building the suite exercises the selected path.
+ * ======================================================================= */
+
+/* Test A: the RNG signature selected at compile time actually produces a
+ * proper key (exercises scep_generate_keypair via the right internal path). */
+void test_mbedtls_version_gate_keypair_works(void)
+{
+    mbedtls_pk_context key;
+    gen_keypair_or_fail(&key);
+
+    /* If the version gate is wrong we'd see a compile error or a crash here */
+    TEST_ASSERT_EQUAL_INT(MBEDTLS_PK_RSA, mbedtls_pk_get_type(&key));
+    TEST_ASSERT_EQUAL_INT(2048, (int)mbedtls_pk_get_bitlen(&key));
+
+    mbedtls_pk_free(&key);
+}
+
+/* Test B: mbedtls_pk_sign path exercised by scep_build_csr produces a
+ * signature verifiable by OpenSSL.  On 3.x the f_rng/p_rng overload is
+ * used; on 4.x the no-f_rng overload is used.  Both must produce a valid
+ * PKCS#1v1.5 signature over the same payload. */
+void test_mbedtls_pk_sign_version_path_produces_valid_signature(void)
+{
+    mbedtls_pk_context key;
+    gen_keypair_or_fail(&key);
+
+    scep_subject_t subj = {
+        .common_name = "version-gate-test",
+        .organization = "TestOrg",
+        .country = "DE",
+    };
+    uint8_t csr_der[SCEP_MAX_CSR_DER];
+    size_t  csr_len = sizeof(csr_der);
+
+    int rc = scep_build_csr(&subj, &key, "TESTPW",
+                            mbedtls_ctr_drbg_random, &g_ctr_drbg,
+                            csr_der, &csr_len);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, rc, "scep_build_csr");
+
+    /* Verify via OpenSSL: the CSR signature must verify with its own pubkey
+     * regardless of which mbedTLS code path was compiled in. */
+    const unsigned char *p = csr_der;
+    X509_REQ *req = d2i_X509_REQ(NULL, &p, (long)csr_len);
+    TEST_ASSERT_NOT_NULL_MESSAGE(req, "d2i_X509_REQ");
+    EVP_PKEY *pk = X509_REQ_get0_pubkey(req);
+    TEST_ASSERT_NOT_NULL(pk);
+    int vrc = X509_REQ_verify(req, pk);
+    TEST_ASSERT_GREATER_THAN_INT_MESSAGE(0, vrc,
+        "CSR signature must verify (tests the right mbedtls_pk_sign overload)");
+
+    X509_REQ_free(req);
+    mbedtls_pk_free(&key);
+}
+
+/* =========================================================================
+ * 15. scep_build_csr -- long CN and fully-populated DN
+ * ======================================================================= */
+
+/* A CN of exactly 64 chars should work or fail gracefully (not crash). */
+void test_csr_long_cn_64_chars_no_crash(void)
+{
+    mbedtls_pk_context key;
+    gen_keypair_or_fail(&key);
+
+    /* 64-character CN is at the boundary of the name_buf in scep_proto.c */
+    char long_cn[65];
+    memset(long_cn, 'A', 64);
+    long_cn[64] = '\0';
+
+    scep_subject_t subj = { .common_name = long_cn };
+    uint8_t buf[SCEP_MAX_CSR_DER];
+    size_t  len = sizeof(buf);
+    int rc = scep_build_csr(&subj, &key, "pw",
+                            mbedtls_ctr_drbg_random, &g_ctr_drbg,
+                            buf, &len);
+    /* Either succeeds or returns an error -- must not crash or corrupt memory */
+    (void)rc;
+    /* Valgrind / AddressSanitizer will catch any out-of-bounds write here */
+
+    mbedtls_pk_free(&key);
+}
+
+/* A CN longer than 64 chars must either succeed or fail cleanly. */
+void test_csr_very_long_cn_fails_gracefully(void)
+{
+    mbedtls_pk_context key;
+    gen_keypair_or_fail(&key);
+
+    /* 128-character CN -- larger than the name_buf internal scratch space;
+     * scep_build_csr should detect the overflow and return an error. */
+    char very_long_cn[129];
+    memset(very_long_cn, 'B', 128);
+    very_long_cn[128] = '\0';
+
+    scep_subject_t subj = { .common_name = very_long_cn };
+    uint8_t buf[SCEP_MAX_CSR_DER];
+    size_t  len = sizeof(buf);
+    int rc = scep_build_csr(&subj, &key, "pw",
+                            mbedtls_ctr_drbg_random, &g_ctr_drbg,
+                            buf, &len);
+    /* If it fails, that is the expected graceful-failure behaviour.
+     * If it succeeds, the generated CSR must still be parseable. */
+    if (rc == 0) {
+        const unsigned char *p = buf;
+        X509_REQ *req = d2i_X509_REQ(NULL, &p, (long)len);
+        /* Must not crash; may or may not parse depending on truncation */
+        if (req) X509_REQ_free(req);
+    }
+    /* Either path is acceptable -- no crash is the key assertion. */
+
+    mbedtls_pk_free(&key);
+}
+
+/* All optional DN fields populated: O, OU, C, ST, L + CN */
+void test_csr_all_dn_fields_populated_and_verifies(void)
+{
+    mbedtls_pk_context key;
+    gen_keypair_or_fail(&key);
+
+    scep_subject_t subj = {
+        .common_name         = "dn-full-test",
+        .organization        = "FullOrg",
+        .organizational_unit = "FullOU",
+        .country             = "US",
+        .state               = "California",
+        .locality            = "San Francisco",
+    };
+    uint8_t csr_der[SCEP_MAX_CSR_DER];
+    size_t  csr_len = sizeof(csr_der);
+    int rc = scep_build_csr(&subj, &key, "FULLPW",
+                            mbedtls_ctr_drbg_random, &g_ctr_drbg,
+                            csr_der, &csr_len);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, rc, "scep_build_csr all fields");
+
+    /* Verify CSR via OpenSSL */
+    const unsigned char *p = csr_der;
+    X509_REQ *req = d2i_X509_REQ(NULL, &p, (long)csr_len);
+    TEST_ASSERT_NOT_NULL_MESSAGE(req, "d2i_X509_REQ");
+
+    EVP_PKEY *pk = X509_REQ_get0_pubkey(req);
+    TEST_ASSERT_NOT_NULL(pk);
+    TEST_ASSERT_GREATER_THAN_INT(0, X509_REQ_verify(req, pk));
+
+    /* Check CN is present */
+    X509_NAME *name = X509_REQ_get_subject_name(req);
+    char cn[64] = {0};
+    X509_NAME_get_text_by_NID(name, NID_commonName, cn, sizeof(cn));
+    TEST_ASSERT_EQUAL_STRING("dn-full-test", cn);
+
+    X509_REQ_free(req);
+    mbedtls_pk_free(&key);
+}
+
+/* =========================================================================
+ * 16. scep_build_self_signed_cert -- NotBefore < NotAfter + sig verifies
+ * ======================================================================= */
+
+void test_self_signed_cert_notbefore_before_notafter(void)
+{
+    mbedtls_pk_context key;
+    gen_keypair_or_fail(&key);
+
+    scep_subject_t subj = { .common_name = "time-check" };
+    uint8_t cert_der[SCEP_MAX_CERT_DER];
+    size_t  cert_len = sizeof(cert_der);
+
+    int rc = scep_build_self_signed_cert(&subj, &key,
+                                         mbedtls_ctr_drbg_random, &g_ctr_drbg,
+                                         cert_der, &cert_len);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, rc, "scep_build_self_signed_cert");
+
+    const unsigned char *p = cert_der;
+    X509 *x509 = d2i_X509(NULL, &p, (long)cert_len);
+    TEST_ASSERT_NOT_NULL_MESSAGE(x509, "d2i_X509");
+
+    /* NotBefore and NotAfter: hardcoded to "20200101000000" and "20380101000000"
+     * in scep_proto.c -- the cert covers 2020-01-01..2038-01-01.
+     * Verify NotBefore < NotAfter. */
+    const ASN1_TIME *not_before = X509_get0_notBefore(x509);
+    const ASN1_TIME *not_after  = X509_get0_notAfter(x509);
+    TEST_ASSERT_NOT_NULL(not_before);
+    TEST_ASSERT_NOT_NULL(not_after);
+
+    int cmp = ASN1_TIME_compare(not_before, not_after);
+    TEST_ASSERT_LESS_THAN_INT_MESSAGE(0, cmp, "NotBefore must be before NotAfter");
+
+    X509_free(x509);
+    mbedtls_pk_free(&key);
+}
+
+/* Self-signed cert: OpenSSL can verify signature with its own public key */
+void test_self_signed_cert_signature_self_verifies(void)
+{
+    mbedtls_pk_context key;
+    gen_keypair_or_fail(&key);
+
+    scep_subject_t subj = {
+        .common_name  = "self-verify",
+        .organization = "SelfOrg",
+        .country      = "FR",
+    };
+    uint8_t cert_der[SCEP_MAX_CERT_DER];
+    size_t  cert_len = sizeof(cert_der);
+
+    int rc = scep_build_self_signed_cert(&subj, &key,
+                                         mbedtls_ctr_drbg_random, &g_ctr_drbg,
+                                         cert_der, &cert_len);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, rc, "scep_build_self_signed_cert");
+
+    const unsigned char *p = cert_der;
+    X509 *x509 = d2i_X509(NULL, &p, (long)cert_len);
+    TEST_ASSERT_NOT_NULL(x509);
+
+    /* Verify the cert's own signature: issuer == subject, so we verify
+     * using the cert's own public key. */
+    EVP_PKEY *pub = X509_get0_pubkey(x509);
+    TEST_ASSERT_NOT_NULL(pub);
+
+    /* X509_verify returns 1 on success */
+    int vrc = X509_verify(x509, pub);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, vrc, "Self-signed cert signature must self-verify");
+
+    X509_free(x509);
+    mbedtls_pk_free(&key);
+}
+
+/* Self-signed cert: public key in cert matches the supplied pk_context */
+void test_self_signed_cert_pubkey_matches_pk_context(void)
+{
+    mbedtls_pk_context key;
+    gen_keypair_or_fail(&key);
+
+    scep_subject_t subj = { .common_name = "pk-match-test" };
+    uint8_t cert_der[SCEP_MAX_CERT_DER];
+    size_t  cert_len = sizeof(cert_der);
+
+    int rc = scep_build_self_signed_cert(&subj, &key,
+                                         mbedtls_ctr_drbg_random, &g_ctr_drbg,
+                                         cert_der, &cert_len);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, rc, "scep_build_self_signed_cert");
+
+    /* Export SPKI from key context */
+    uint8_t spki_from_key[512];
+    size_t  spki_key_len;
+    const uint8_t *spki_key = export_spki(&key, spki_from_key, sizeof(spki_from_key),
+                                          &spki_key_len);
+
+    /* Parse cert and export its SPKI */
+    const unsigned char *p = cert_der;
+    X509 *x509 = d2i_X509(NULL, &p, (long)cert_len);
+    TEST_ASSERT_NOT_NULL(x509);
+
+    EVP_PKEY *pub = X509_get0_pubkey(x509);
+    TEST_ASSERT_NOT_NULL(pub);
+
+    /* Serialize cert's public key to DER and compare with mbedTLS SPKI */
+    unsigned char *spki_cert_buf = NULL;
+    int spki_cert_len_i = i2d_PUBKEY(pub, &spki_cert_buf);
+    TEST_ASSERT_GREATER_THAN_INT(0, spki_cert_len_i);
+
+    TEST_ASSERT_EQUAL_size_t_MESSAGE((size_t)spki_cert_len_i, spki_key_len,
+        "SPKI length mismatch between key and cert");
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(spki_key, spki_cert_buf, spki_key_len,
+        "SPKI bytes mismatch between key context and embedded cert");
+
+    OPENSSL_free(spki_cert_buf);
+    X509_free(x509);
+    mbedtls_pk_free(&key);
+}
+
+/* =========================================================================
+ * 17. scep_parse_getcacert -- RSA KeyEncipherment cert selection
+ *
+ * The scep_parse_getcacert() C implementation selects the RA encryption cert
+ * by choosing the cert whose public key is RSA with keyEncipherment usage.
+ * Build a synthetic 3-cert P7 bundle (EC signing cert + RSA encryption cert
+ * + CA cert) using OpenSSL DER helpers, then parse it and verify the RA
+ * encryption cert slot holds the RSA cert.
+ * ======================================================================= */
+
+/* Build a minimal degenerate PKCS#7 SignedData (no signers, just certs)
+ * from an array of DER-encoded certs.  Returns the total length or -1. */
+static int build_degenerate_p7(const uint8_t **certs, const size_t *cert_lens,
+                                 int num_certs,
+                                 uint8_t *out, size_t out_cap)
+{
+    /* We need to build:
+     * SEQUENCE {                  -- ContentInfo
+     *   OID (1.2.840.113549.1.7.2)  -- id-signedData
+     *   [0] EXPLICIT SEQUENCE {   -- SignedData
+     *     INTEGER 1               -- version
+     *     SET {}                  -- digestAlgorithms (empty)
+     *     SEQUENCE {              -- encapContentInfo
+     *       OID (1.2.840.113549.1.7.1)  -- id-data
+     *     }
+     *     [0] IMPLICIT            -- certificates
+     *       <cert1> <cert2> ...
+     *     SET {}                  -- signerInfos (empty)
+     *   }
+     * }
+     */
+    /* Use OpenSSL to build this via d2i + serialize_certificates-style path */
+    PKCS7 *p7 = PKCS7_new();
+    if (!p7) return -1;
+    PKCS7_set_type(p7, NID_pkcs7_signed);
+    PKCS7_content_new(p7, NID_pkcs7_data);
+    /* Add certs */
+    for (int i = 0; i < num_certs; i++) {
+        const unsigned char *cp = certs[i];
+        X509 *xc = d2i_X509(NULL, &cp, (long)cert_lens[i]);
+        if (!xc) { PKCS7_free(p7); return -1; }
+        PKCS7_add_certificate(p7, xc);
+        X509_free(xc);
+    }
+    unsigned char *p7_buf = NULL;
+    int p7_len = i2d_PKCS7(p7, &p7_buf);
+    PKCS7_free(p7);
+    if (p7_len <= 0) return -1;
+    if ((size_t)p7_len > out_cap) { OPENSSL_free(p7_buf); return -1; }
+    memcpy(out, p7_buf, p7_len);
+    OPENSSL_free(p7_buf);
+    return p7_len;
+}
+
+void test_parse_getcacert_rsa_key_encipherment_cert_is_selected_for_ra_encrypt(void)
+{
+    /* Build two certs:
+     *   cert A: RSA-2048, KeyUsage=keyEncipherment (RA encryption)
+     *   cert B: EC P-256, KeyUsage=digitalSignature (RA signing)
+     * Both are self-signed.  Wrap in a degenerate PKCS#7 in order [B, A].
+     * scep_parse_getcacert must still pick cert A for ra_encrypt_cert. */
+
+    /* Cert A: RSA-2048 with KeyUsage=keyEncipherment */
+    EVP_PKEY *rsa_key = EVP_RSA_gen(2048);
+    TEST_ASSERT_NOT_NULL_MESSAGE(rsa_key, "EVP_RSA_gen");
+
+    X509_NAME *rsa_name = X509_NAME_new();
+    X509_NAME_add_entry_by_txt(rsa_name, "CN", MBSTRING_UTF8,
+                               (const unsigned char *)"RSA-RA-Encrypt", -1, -1, 0);
+    X509 *rsa_cert = X509_new();
+    X509_set_version(rsa_cert, X509_VERSION_3);
+    ASN1_INTEGER_set(X509_get_serialNumber(rsa_cert), 1);
+    X509_set_subject_name(rsa_cert, rsa_name);
+    X509_set_issuer_name(rsa_cert, rsa_name);
+    X509_set_pubkey(rsa_cert, rsa_key);
+    /* Validity: 2020-2038 */
+    X509_gmtime_adj(X509_get_notBefore(rsa_cert), -365*24*3600);
+    X509_gmtime_adj(X509_get_notAfter(rsa_cert),   365*24*3600);
+    /* Add KeyUsage: keyEncipherment */
+    {
+        ASN1_BIT_STRING *ku = ASN1_BIT_STRING_new();
+        /* bit 2 = keyEncipherment */
+        ASN1_BIT_STRING_set_bit(ku, 2, 1);
+        X509_add1_ext_i2d(rsa_cert, NID_key_usage, ku, 1, X509V3_ADD_DEFAULT);
+        ASN1_BIT_STRING_free(ku);
+    }
+    X509_sign(rsa_cert, rsa_key, EVP_sha256());
+
+    /* Cert B: EC P-256 with KeyUsage=digitalSignature */
+    EVP_PKEY *ec_key = EVP_EC_gen("P-256");
+    TEST_ASSERT_NOT_NULL_MESSAGE(ec_key, "EVP_EC_gen");
+
+    X509_NAME *ec_name = X509_NAME_new();
+    X509_NAME_add_entry_by_txt(ec_name, "CN", MBSTRING_UTF8,
+                               (const unsigned char *)"EC-RA-Sign", -1, -1, 0);
+    X509 *ec_cert = X509_new();
+    X509_set_version(ec_cert, X509_VERSION_3);
+    ASN1_INTEGER_set(X509_get_serialNumber(ec_cert), 2);
+    X509_set_subject_name(ec_cert, ec_name);
+    X509_set_issuer_name(ec_cert, ec_name);
+    X509_set_pubkey(ec_cert, ec_key);
+    X509_gmtime_adj(X509_get_notBefore(ec_cert), -365*24*3600);
+    X509_gmtime_adj(X509_get_notAfter(ec_cert),   365*24*3600);
+    {
+        ASN1_BIT_STRING *ku = ASN1_BIT_STRING_new();
+        /* bit 0 = digitalSignature */
+        ASN1_BIT_STRING_set_bit(ku, 0, 1);
+        X509_add1_ext_i2d(ec_cert, NID_key_usage, ku, 1, X509V3_ADD_DEFAULT);
+        ASN1_BIT_STRING_free(ku);
+    }
+    X509_sign(ec_cert, ec_key, EVP_sha256());
+
+    /* Serialize both certs to DER */
+    unsigned char *rsa_der_buf = NULL, *ec_der_buf = NULL;
+    int rsa_der_len = i2d_X509(rsa_cert, &rsa_der_buf);
+    int ec_der_len  = i2d_X509(ec_cert,  &ec_der_buf);
+    TEST_ASSERT_GREATER_THAN_INT(0, rsa_der_len);
+    TEST_ASSERT_GREATER_THAN_INT(0, ec_der_len);
+
+    /* Build degenerate P7 with order [ec_cert, rsa_cert] */
+    const uint8_t *cert_ptrs[2] = { ec_der_buf, rsa_der_buf };
+    size_t cert_lens[2] = { (size_t)ec_der_len, (size_t)rsa_der_len };
+    uint8_t p7_buf[SCEP_MAX_CA_BUNDLE_CERT_DER * 4];
+    int p7_len = build_degenerate_p7(cert_ptrs, cert_lens, 2,
+                                      p7_buf, sizeof(p7_buf));
+    TEST_ASSERT_GREATER_THAN_INT_MESSAGE(0, p7_len, "build_degenerate_p7");
+
+    /* Parse with scep_parse_getcacert */
+    scep_cacert_bundle_t bundle;
+    int rc = scep_parse_getcacert(p7_buf, (size_t)p7_len, &bundle);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, rc, "scep_parse_getcacert");
+
+    /* The RA encryption cert must be the RSA one */
+    TEST_ASSERT_NOT_NULL_MESSAGE(bundle.ra_encrypt_cert_der,
+        "ra_encrypt_cert_der must be set");
+    TEST_ASSERT_GREATER_THAN_size_t(0, bundle.ra_encrypt_cert_len);
+
+    /* Verify by parsing the ra_encrypt_cert_der with mbedTLS */
+    mbedtls_x509_crt crt;
+    mbedtls_x509_crt_init(&crt);
+    int mrc = mbedtls_x509_crt_parse_der(&crt, bundle.ra_encrypt_cert_der,
+                                          bundle.ra_encrypt_cert_len);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, mrc, "mbedtls_x509_crt_parse_der ra_encrypt");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(MBEDTLS_PK_RSA,
+        (int)mbedtls_pk_get_type(&crt.pk),
+        "ra_encrypt cert must have RSA key");
+    mbedtls_x509_crt_free(&crt);
+
+    /* Cleanup */
+    OPENSSL_free(rsa_der_buf);
+    OPENSSL_free(ec_der_buf);
+    X509_free(rsa_cert);
+    X509_free(ec_cert);
+    X509_NAME_free(rsa_name);
+    X509_NAME_free(ec_name);
+    EVP_PKEY_free(rsa_key);
+    EVP_PKEY_free(ec_key);
+}
+
+/* =========================================================================
  * Main
  * ======================================================================= */
 
@@ -806,6 +1242,23 @@ int main(void)
     RUN_TEST(test_csr_null_rng_fn_returns_error);
     RUN_TEST(test_csr_null_key_returns_error);
     RUN_TEST(test_csr_null_challenge_password_returns_error);
+
+    /* mbedTLS version-gate compile-time API path checks */
+    RUN_TEST(test_mbedtls_version_gate_keypair_works);
+    RUN_TEST(test_mbedtls_pk_sign_version_path_produces_valid_signature);
+
+    /* scep_build_csr long/full DN */
+    RUN_TEST(test_csr_long_cn_64_chars_no_crash);
+    RUN_TEST(test_csr_very_long_cn_fails_gracefully);
+    RUN_TEST(test_csr_all_dn_fields_populated_and_verifies);
+
+    /* scep_build_self_signed_cert NotBefore/NotAfter + sig */
+    RUN_TEST(test_self_signed_cert_notbefore_before_notafter);
+    RUN_TEST(test_self_signed_cert_signature_self_verifies);
+    RUN_TEST(test_self_signed_cert_pubkey_matches_pk_context);
+
+    /* scep_parse_getcacert RSA key_encipherment selection */
+    RUN_TEST(test_parse_getcacert_rsa_key_encipherment_cert_is_selected_for_ra_encrypt);
 
     /* Cleanup global RNG */
     if (g_rng_init) {

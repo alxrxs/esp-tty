@@ -9,8 +9,14 @@ CONFIG_SPIRAM_SPEED_80M=y
 # in many ESP-IDF components. Allocate PSRAM explicitly with heap_caps_malloc instead.
 CONFIG_SPIRAM_FETCH_INSTRUCTIONS=n
 CONFIG_SPIRAM_RODATA=n
-# Do NOT set CONFIG_SPIRAM_USE_MALLOC -- we allocate PSRAM explicitly via
-# xStreamBufferCreateWithCaps / heap_caps_malloc to avoid surprising spills.
+# Do NOT set CONFIG_SPIRAM_USE_MALLOC for the DevKit (this file's target) --
+# we allocate PSRAM explicitly via xStreamBufferCreateWithCaps /
+# heap_caps_malloc to avoid surprising spills.
+#
+# The Zero overlay (sdkconfig.zero.defaults) deliberately overrides this and
+# sets CONFIG_SPIRAM_USE_MALLOC=y + CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=256
+# to work around v0.2-silicon heap CAS spinlock crashes -- see the comment
+# block at the top of sdkconfig.zero.defaults.
 
 # -- Flash (16 MB, QIO) ----------------------------------------------------
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y

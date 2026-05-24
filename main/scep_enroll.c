@@ -50,7 +50,7 @@
 #include "mbedtls/build_info.h"
 #if MBEDTLS_VERSION_NUMBER >= 0x04000000
 /* mbedTLS 4.x: private/ headers for legacy crypto contexts.
- * MBEDTLS_ALLOW_PRIVATE_ACCESS (build_flags) → private_access.h defines
+ * MBEDTLS_ALLOW_PRIVATE_ACCESS (from ESP-IDF mbedtls esp_config.h) → private_access.h defines
  * MBEDTLS_DECLARE_PRIVATE_IDENTIFIERS which unlocks function declarations. */
 #include "mbedtls/private/pk_private.h"
 #include "mbedtls/private/rsa.h"
@@ -405,6 +405,7 @@ esp_err_t scep_enroll(const char *scep_url,
 #endif
     if (ret != 0) {
         ESP_LOGE(TAG, "mbedtls_pk_parse_key failed: -0x%04x", (unsigned)(-ret));
+        mbedtls_pk_free(&dec_key);
         psram_free(p7_resp);
         goto done;
     }

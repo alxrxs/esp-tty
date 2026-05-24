@@ -26,10 +26,14 @@
 #ifdef WIFI_ENTERPRISE_SSID
 #include "cert_renewer.h"
 #endif
+/* mbedTLS bench-only includes: only rsa_bench_task uses these.  Gated so
+ * the production app_main path does not pull in private headers it does
+ * not need. */
+#ifdef SCEP_KEYGEN_BENCH_ON_BOOT
 #include "mbedtls/build_info.h"
 #if MBEDTLS_VERSION_NUMBER >= 0x04000000
 /* mbedTLS 4.x: private/ headers for legacy crypto contexts.
- * MBEDTLS_ALLOW_PRIVATE_ACCESS (build_flags) → private_access.h defines
+ * MBEDTLS_ALLOW_PRIVATE_ACCESS (from ESP-IDF mbedtls esp_config.h) → private_access.h defines
  * MBEDTLS_DECLARE_PRIVATE_IDENTIFIERS which unlocks function declarations. */
 #include "mbedtls/private/pk_private.h"
 #include "mbedtls/private/rsa.h"
@@ -49,6 +53,7 @@ static int main_esp_rng(void *ctx, unsigned char *buf, size_t len)
 #include "mbedtls/rsa.h"
 #endif
 #include "mbedtls/pk.h"
+#endif /* SCEP_KEYGEN_BENCH_ON_BOOT */
 
 static const char *TAG = "main";
 
@@ -289,9 +294,12 @@ void app_main(void)
     }
 #endif
 
-#if defined(WIFI_ENTERPRISE_SSID) && !defined(WIFI_USE_ENTERPRISE)
+#if defined(WIFI_ENTERPRISE_SSID) && defined(SCEP_URL) && !defined(WIFI_USE_ENTERPRISE)
     /* Certificate renewal watchdog (Mode C only -- Mode B+ uses embedded
-       certs that cannot be renewed via SCEP). */
+     * certs that cannot be renewed via SCEP).  Guard MUST match
+     * cert_renewer.h's #if exactly; otherwise this call site references
+     * an undeclared symbol on a future config that defines
+     * WIFI_ENTERPRISE_SSID without SCEP_URL. */
     if (err == ESP_OK) {
         esp_err_t renewer_err = cert_renewer_start();
         if (renewer_err != ESP_OK) {

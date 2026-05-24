@@ -16,7 +16,7 @@
 #include "mbedtls/build_info.h"
 #if MBEDTLS_VERSION_NUMBER >= 0x04000000
 /* mbedTLS 4.x: legacy crypto primitives moved to private/ subdirectory.
- * MBEDTLS_ALLOW_PRIVATE_ACCESS is supplied via build_flags in platformio.ini;
+ * MBEDTLS_ALLOW_PRIVATE_ACCESS comes from ESP-IDF mbedtls esp_config.h (which mbedtls/build_info.h pulls in);
  * private_access.h then defines MBEDTLS_DECLARE_PRIVATE_IDENTIFIERS which
  * unlocks function declarations in the private/ headers. */
 #include "mbedtls/private/pk_private.h"
@@ -440,11 +440,11 @@ int scep_build_self_signed_cert(const scep_subject_t *subject,
 
     int ret;
     mbedtls_x509write_cert crt;
-#if !defined(MBEDTLS_VERSION_NUMBER) || MBEDTLS_VERSION_NUMBER < 0x03000000
+    /* mbedTLS 2.x consumes `serial` directly via set_serial(); 3.x/4.x use
+     * the raw API (set_serial_raw) instead.  In both worlds we still init
+     * + free the mbedtls_mpi for symmetry, even though 3.x/4.x don't pass
+     * it to the writer. */
     mbedtls_mpi serial;
-#else
-    mbedtls_mpi serial; /* unused in mbedTLS 3.x but kept for free() symmetry */
-#endif
 
     mbedtls_x509write_crt_init(&crt);
     mbedtls_mpi_init(&serial);

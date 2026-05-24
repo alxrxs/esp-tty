@@ -350,6 +350,54 @@ void test_modebp_budget_exhausted_overrides_ntp_only(void)
     TEST_ASSERT_EQUAL_INT(WIFI_DECISION_BOOTSTRAP_FULL, d);
 }
 
+/* ==========================================================================
+ * Additional Mode B+ edge-case rows.
+ *
+ * These supplement the rows above with scenarios that are specific to the
+ * embedded-cert (no SCEP renewer) build variant.
+ *
+ *  #  | no_ntp | cert | expired | synced | ntp_req | attempts | max | expected
+ *  ---|--------|------|---------|--------|---------|----------|-----|----------
+ * 24  |  yes   | yes  |   no    |  yes   |   no    |    0     |  0  | BOOTSTRAP_FULL (no_ntp overrides)
+ * 25  |   no   | yes  |   no    |  yes   |   no    |    0     |  0  | ENTERPRISE (unlimited, first boot)
+ * 26  |   no   | yes  |   no    |   no   |   yes   |    4     |  5  | BOOTSTRAP_NTP_ONLY (one attempt left, still unsynced)
+ * ========================================================================== */
+
+/* --- Row 24: Mode B+ with no_ntp_mode=true -> BOOTSTRAP_FULL even with embedded cert */
+void test_modebp_no_ntp_mode_overrides_embedded_cert(void)
+{
+    /* In Mode B+ the caller normally passes cert_present=true, cert_expired=false.
+     * When no_ntp_mode is also true (SCEP_NO_NTP_USE_ISSUANCE_TIME build), the
+     * no_ntp rule fires first and returns BOOTSTRAP_FULL regardless. */
+    wifi_decision_t d = wifi_decide_next_step(
+        true,  /* cert_present  -- embedded cert always considered present */
+        false, /* cert_expired  -- embedded cert never "expires" here      */
+        true,  /* ntp_synced    -- clock is fine, but no_ntp_mode wins     */
+        false, /* ntp_before_eaptls_required */
+        true,  /* no_ntp_mode   -- SCEP_NO_NTP_USE_ISSUANCE_TIME           */
+        0, 0);
+    TEST_ASSERT_EQUAL_INT(WIFI_DECISION_BOOTSTRAP_FULL, d);
+}
+
+/* --- Row 25: Mode B+ first boot, unlimited retries, clock synced -> ENTERPRISE */
+void test_modebp_first_boot_unlimited_retries_returns_enterprise(void)
+{
+    /* retry_max=0 means unlimited; 0 attempts so far on a first boot where
+     * the embedded cert is present and the clock is already synced.
+     * Expected outcome: ENTERPRISE directly (no bootstrap needed). */
+    wifi_decision_t d = decide(true, false, true, false, 0, 0);
+    TEST_ASSERT_EQUAL_INT(WIFI_DECISION_ENTERPRISE, d);
+}
+
+/* --- Row 26: Mode B+ NTP required, unsynced, 4 of 5 attempts used -> NTP_ONLY */
+void test_modebp_ntp_required_unsynced_one_attempt_remaining(void)
+{
+    /* Boundary: 4 attempts out of max 5. Budget is NOT yet exhausted (4 < 5),
+     * NTP is required, clock is unsynced -> BOOTSTRAP_NTP_ONLY (not FULL). */
+    wifi_decision_t d = decide(true, false, false, true, 4, 5);
+    TEST_ASSERT_EQUAL_INT(WIFI_DECISION_BOOTSTRAP_NTP_ONLY, d);
+}
+
 /* -------------------------------------------------------------------------- */
 int main(void)
 {
@@ -389,5 +437,9 @@ int main(void)
     RUN_TEST(test_modebp_budget_exhausted_returns_bootstrap_full);
     RUN_TEST(test_modebp_partial_budget_ntp_req_unsynced_returns_ntp_only);
     RUN_TEST(test_modebp_budget_exhausted_overrides_ntp_only);
+    /* Additional Mode B+ edge-case rows */
+    RUN_TEST(test_modebp_no_ntp_mode_overrides_embedded_cert);
+    RUN_TEST(test_modebp_first_boot_unlimited_retries_returns_enterprise);
+    RUN_TEST(test_modebp_ntp_required_unsynced_one_attempt_remaining);
     return UNITY_END();
 }

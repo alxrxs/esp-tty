@@ -35,94 +35,149 @@ CACertificates.verify = lambda self: None
 os.environ.setdefault("REQUESTS_CA_BUNDLE",
                       "/root/esp-tty/main/certs/scep_ca.pem")
 
-SCEP_URL  = "https://scep.irix.systems/certsrv/mscep/mscep.dll"
-PASSWORD  = "FFC9708138742EC99A8CDF837A9F4CEA"
-ZERO_MAC  = "ac276ecec4e0"
-CN        = f"IRIX-TTY-PVE-DELL-{ZERO_MAC}"
+# Enrollment parameters: pulled from environment, with safe stubs for tests.
+# The previous "real" defaults baked into source (a single-use NDES OTP and
+# a fixed MAC) are removed since the script is committed to git; export the
+# values at run time instead, e.g.:
+#   export SCEP_URL='https://scep.example.com/certsrv/mscep/mscep.dll'
+#   export SCEP_CHALLENGE_PASSWORD='...'
+#   export SCEP_DEVICE_MAC='ac276ecec4e0'
+#   ./scripts/scep_enroll_zero.py
+_DEFAULT_SCEP_URL   = os.environ.get("SCEP_URL", "https://scep.example.com/certsrv/mscep/mscep.dll")
+_DEFAULT_PASSWORD   = os.environ.get("SCEP_CHALLENGE_PASSWORD", "")
+_DEFAULT_ZERO_MAC   = os.environ.get("SCEP_DEVICE_MAC", "000000000000")
+_DEFAULT_OUTPUT_DIR = os.environ.get("SCEP_OUTPUT_DIR", "/root/esp-tty/main/certs")
 
-print(f">>> SCEP enrolment for CN={CN}")
-print(f"    URL: {SCEP_URL}")
 
-# 1. Use PyScep helper: generate RSA-2048 key + CSR with challengePassword
-print(">>> generating key + CSR ...")
-csr, private_key = SigningRequest.generate_csr(
-    cn=CN,
-    key_usage={u"digital_signature", u"key_encipherment"},
-    password=PASSWORD,
-)
+def do_enroll(scep_url=_DEFAULT_SCEP_URL,
+              password=_DEFAULT_PASSWORD,
+              cn=None,
+              output_dir=_DEFAULT_OUTPUT_DIR,
+              zero_mac=_DEFAULT_ZERO_MAC):
+    """
+    Perform SCEP enrollment against *scep_url* and write the three PEM
+    files (ca.pem, client.crt, client.key) into *output_dir*.
 
-# 2. Self-signed transient identity cert used as the PKCS#7 signer
-print(">>> building self-signed identity ...")
-identity_cert, _ = SigningRequest.generate_self_signed(
-    cn=CN,
-    key_usage={u"digital_signature", u"key_encipherment"},
-    private_key=private_key,
-)
+    Parameters
+    ----------
+    scep_url : str
+        Full URL of the SCEP endpoint (e.g. https://…/mscep.dll).
+    password : str
+        SCEP challenge password (OTP from NDES / CA admin).
+    cn : str or None
+        CommonName for the certificate subject.  Defaults to
+        ``IRIX-TTY-PVE-DELL-<zero_mac>``.
+    output_dir : str
+        Directory to write ca.pem, client.crt, client.key into.
+        The directory must exist.
+    zero_mac : str
+        MAC address suffix used to build the default CN when *cn* is None.
+    """
+    if cn is None:
+        cn = f"IRIX-TTY-PVE-DELL-{zero_mac}"
 
-# 3. NDES round-trip
-print(">>> calling NDES ...")
-client = Client(SCEP_URL)
-print("    GetCACaps + GetCACert ...")
-ca_certs = client.get_ca_certs()
-ca_list = ca_certs.certificates
-print(f"    received {len(ca_list)} CA cert(s)")
-for i, c in enumerate(ca_list):
-    cn_attr = c.subject_dict.get("common_name", "(no CN)")
-    pubkey = type(c.public_key.to_crypto_public_key()).__name__
-    print(f"    [{i}] CN={cn_attr}  ku={c.key_usage}  pk={pubkey}")
+    print(f">>> SCEP enrolment for CN={cn}")
+    print(f"    URL: {scep_url}")
 
-# PyScep has a bug filtering recipient (is_ca=None != False).  Force the
-# RA-encryption cert (RSA + key_encipherment, no digital_signature).
-for cand in ca_list:
-    if (cand.key_usage == {"key_encipherment"}
-            and type(cand.public_key.to_crypto_public_key()).__name__ == "RSAPublicKey"):
-        ca_certs._recipient = cand
-        print(f"    >>> forced recipient = CN={cand.subject_dict.get('common_name')}")
-        break
-# Pick a signer too (RA signing cert: digital_signature, RSA, not CA)
-for cand in ca_list:
-    if (cand.key_usage == {"digital_signature"}
-            and type(cand.public_key.to_crypto_public_key()).__name__ == "RSAPublicKey"):
-        ca_certs._signer = cand
-        print(f"    >>> forced signer = CN={cand.subject_dict.get('common_name')}")
-        break
-# Issuer = the CA that signed the recipient
-for cand in ca_list:
-    if cand.is_ca and cand.subject == ca_certs._recipient.issuer:
-        ca_certs._issuer = cand
-        print(f"    >>> forced issuer = CN={cand.subject_dict.get('common_name')}")
-        break
+    # 1. Use PyScep helper: generate RSA-2048 key + CSR with challengePassword
+    print(">>> generating key + CSR ...")
+    csr, private_key = SigningRequest.generate_csr(
+        cn=cn,
+        key_usage={u"digital_signature", u"key_encipherment"},
+        password=password,
+    )
 
-print("    PKCSReq (enrol) ...")
-resp = client.enrol(csr=csr, identity=identity_cert,
-                    identity_private_key=private_key)
-print(f"    response status: {resp.status}")
+    # 2. Self-signed transient identity cert used as the PKCS#7 signer
+    print(">>> building self-signed identity ...")
+    identity_cert, _ = SigningRequest.generate_self_signed(
+        cn=cn,
+        key_usage={u"digital_signature", u"key_encipherment"},
+        private_key=private_key,
+    )
 
-if str(resp.status) != "PKIStatus.SUCCESS":
-    print(f"    fail_info: {getattr(resp, 'fail_info', '(none)')}")
-    raise SystemExit(1)
+    # 3. NDES round-trip
+    print(">>> calling NDES ...")
+    client = Client(scep_url)
+    print("    GetCACaps + GetCACert ...")
+    ca_certs = client.get_ca_certs()
+    ca_list = ca_certs.certificates
+    print(f"    received {len(ca_list)} CA cert(s)")
+    for i, c in enumerate(ca_list):
+        cn_attr = c.subject_dict.get("common_name", "(no CN)")
+        pubkey = type(c.public_key.to_crypto_public_key()).__name__
+        print(f"    [{i}] CN={cn_attr}  ku={c.key_usage}  pk={pubkey}")
 
-issued = resp.certificates[0]
-print(f"    issued cert subject CN: {issued.subject_dict.get('common_name')}")
-print(f"    serial: {issued.serial_number}")
+    # PyScep has a bug filtering recipient (is_ca=None != False).  Force the
+    # RA-encryption cert (RSA + key_encipherment, no digital_signature).
+    for cand in ca_list:
+        if (cand.key_usage == {"key_encipherment"}
+                and type(cand.public_key.to_crypto_public_key()).__name__ == "RSAPublicKey"):
+            ca_certs._recipient = cand
+            print(f"    >>> forced recipient = CN={cand.subject_dict.get('common_name')}")
+            break
+    # Pick a signer too (RA signing cert: digital_signature, RSA, not CA)
+    for cand in ca_list:
+        if (cand.key_usage == {"digital_signature"}
+                and type(cand.public_key.to_crypto_public_key()).__name__ == "RSAPublicKey"):
+            ca_certs._signer = cand
+            print(f"    >>> forced signer = CN={cand.subject_dict.get('common_name')}")
+            break
+    # Issuer = the CA that signed the recipient
+    for cand in ca_list:
+        if cand.is_ca and cand.subject == ca_certs._recipient.issuer:
+            ca_certs._issuer = cand
+            print(f"    >>> forced issuer = CN={cand.subject_dict.get('common_name')}")
+            break
 
-# 4. Write Mode B/B+ files.
-ca_pem     = b"".join(c.to_pem() for c in ca_list)
-client_pem = issued.to_pem()
-# Private key — PyScep wraps an asn1crypto/cryptography object. Get a PEM:
-from cryptography.hazmat.primitives import serialization as _ser
-crypto_key = private_key.to_crypto_private_key() if hasattr(private_key, "to_crypto_private_key") else private_key
-key_pem = crypto_key.private_bytes(
-    encoding=_ser.Encoding.PEM,
-    format=_ser.PrivateFormat.PKCS8,
-    encryption_algorithm=_ser.NoEncryption(),
-)
+    print("    PKCSReq (enrol) ...")
+    resp = client.enrol(csr=csr, identity=identity_cert,
+                        identity_private_key=private_key)
+    print(f"    response status: {resp.status}")
 
-with open("/root/esp-tty/main/certs/ca.pem",     "wb") as f: f.write(ca_pem)
-with open("/root/esp-tty/main/certs/client.crt", "wb") as f: f.write(client_pem)
-with open("/root/esp-tty/main/certs/client.key", "wb") as f: f.write(key_pem)
+    if str(resp.status) != "PKIStatus.SUCCESS":
+        print(f"    fail_info: {getattr(resp, 'fail_info', '(none)')}")
+        raise SystemExit(1)
 
-print(">>> wrote main/certs/{ca.pem,client.crt,client.key}")
-print(f"    ca.pem     = {len(ca_pem)} B")
-print(f"    client.crt = {len(client_pem)} B")
-print(f"    client.key = {len(key_pem)} B")
+    issued = resp.certificates[0]
+    print(f"    issued cert subject CN: {issued.subject_dict.get('common_name')}")
+    print(f"    serial: {issued.serial_number}")
+
+    # 4. Write Mode B/B+ files.
+    ca_pem     = b"".join(c.to_pem() for c in ca_list)
+    client_pem = issued.to_pem()
+    # Private key — PyScep wraps an asn1crypto/cryptography object. Get a PEM:
+    from cryptography.hazmat.primitives import serialization as _ser
+    crypto_key = private_key.to_crypto_private_key() if hasattr(private_key, "to_crypto_private_key") else private_key
+    key_pem = crypto_key.private_bytes(
+        encoding=_ser.Encoding.PEM,
+        format=_ser.PrivateFormat.PKCS8,
+        encryption_algorithm=_ser.NoEncryption(),
+    )
+
+    os.makedirs(output_dir, exist_ok=True)
+    ca_path     = os.path.join(output_dir, "ca.pem")
+    crt_path    = os.path.join(output_dir, "client.crt")
+    key_path    = os.path.join(output_dir, "client.key")
+    with open(ca_path,  "wb") as f: f.write(ca_pem)
+    with open(crt_path, "wb") as f: f.write(client_pem)
+    with open(key_path, "wb") as f: f.write(key_pem)
+    # client.key is a private key -- restrict to owner read/write only.
+    os.chmod(key_path, 0o600)
+
+    print(f">>> wrote {output_dir}/{{ca.pem,client.crt,client.key}}")
+    print(f"    ca.pem     = {len(ca_pem)} B")
+    print(f"    client.crt = {len(client_pem)} B")
+    print(f"    client.key = {len(key_pem)} B")
+
+    return {
+        "ca_pem":     ca_pem,
+        "client_pem": client_pem,
+        "key_pem":    key_pem,
+        "issued":     issued,
+        "ca_list":    ca_list,
+        "private_key": private_key,
+    }
+
+
+if __name__ == "__main__":
+    do_enroll()
