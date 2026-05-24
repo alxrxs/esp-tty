@@ -1,0 +1,118 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -553,6 +553,7 @@
+     idf_component_register(
+                             REQUIRES "${COMPONENT_REQUIRES}"
+                             PRIV_REQUIRES # esp_hw_support
++                                          esp_security # IDF 6: for esp_crypto_periph_clk.h
+                                           "${THIS_ESP_TLS}"
+                                           "${THIS_INCLUDE_PTHREAD}"
+                                           "${THIS_INCLUDE_TIMER}"
+@@ -892,6 +893,7 @@
+                                 REQUIRES "${COMPONENT_REQUIRES}"
+                                 EXCLUDE_SRCS "${COMPONENT_SRCEXCLUDE}"
+                                 PRIV_REQUIRES
++                                  esp_security # IDF 6: for esp_crypto_periph_clk.h (esp_crypto_aes/sha_enable_periph_clk)
+                                   "${THIS_ESP_TLS}"
+                                   "${THIS_INCLUDE_TIMER}"
+                                   "${THIS_INCLUDE_DRIVER}" # this will typically only be needed for wolfSSL benchmark
+--- a/wolfcrypt/src/port/Espressif/esp32_aes.c
++++ b/wolfcrypt/src/port/Espressif/esp32_aes.c
+@@ -35,6 +35,7 @@
+ #if defined(WOLFSSL_ESPIDF) /* Entire file is only for Espressif EDP-IDF */
+ #include "sdkconfig.h" /* programmatically generated from sdkconfig */
+ #include <wolfssl/wolfcrypt/port/Espressif/esp32-crypt.h>
++#include "esp_crypto_periph_clk.h" /* IDF 6: replaces periph_module_enable(PERIPH_AES_MODULE) */
+
+ #ifndef NO_AES
+
+@@ -104,7 +105,7 @@
+
+     if (ret == ESP_OK) {
+         /* Enable AES hardware */
+-        periph_module_enable(PERIPH_AES_MODULE);
++        esp_crypto_aes_enable_periph_clk(true); /* IDF 6: was periph_module_enable(PERIPH_AES_MODULE) */
+
+         #if defined(CONFIG_IDF_TARGET_ESP32S2) || \
+             defined(CONFIG_IDF_TARGET_ESP32S3)
+@@ -136,7 +137,7 @@
+ {
+     ESP_LOGV(TAG, "enter esp_aes_hw_Leave");
+     /* Disable AES hardware */
+-    periph_module_disable(PERIPH_AES_MODULE);
++    esp_crypto_aes_enable_periph_clk(false); /* IDF 6: was periph_module_disable(PERIPH_AES_MODULE) */
+
+     /* unlock */
+     esp_CryptHwMutexUnLock(&aes_mutex);
+--- a/wolfcrypt/src/port/Espressif/esp32_sha.c
++++ b/wolfcrypt/src/port/Espressif/esp32_sha.c
+@@ -54,14 +54,12 @@
+     #include <hal/sha_hal.h>
+
+     #include <hal/sha_ll.h>
+-    #include <hal/clk_gate_ll.h>
+-#elif defined(CONFIG_IDF_TARGET_ESP32)   || \
+-      defined(CONFIG_IDF_TARGET_ESP32S2) || \
+-      defined(CONFIG_IDF_TARGET_ESP32S3)
+-    #include <hal/clk_gate_ll.h>
+-#else
+-    #include <hal/clk_gate_ll.h> /* ESP32-WROOM */
+-#endif
++#endif /* RISC-V: sha_hal.h / sha_ll.h */
++
++/* IDF 6.0 removed PERIPH_SHA_MODULE from shared_periph_module_t and moved
++ * SHA clock control to esp_crypto_periph_clk.h (in esp_security component).
++ * hal/clk_gate_ll.h is no longer in the public include path for SHA. */
++#include "esp_crypto_periph_clk.h" /* IDF 6: sha enable/disable */
+
+ /* wolfSSL */
+ #include <wolfssl/wolfcrypt/logging.h>
+@@ -925,22 +923,22 @@
+ #else
+     /************* Xtensa Architecture *************/
+
+-    /* unwind prior calls to THIS ctx. decrement ref_counts[periph]
+-    ** only when ref_counts[periph] == 0 does something actually happen. */
++    /* unwind prior calls to THIS ctx. In IDF 6.0, PERIPH_SHA_MODULE was
++     * removed from shared_periph_module_t and SHA clock control now lives in
++     * esp_crypto_sha_enable_periph_clk().  We unroll using ctx->lockDepth
++     * as the iteration count rather than probing the clock-enable register. */
+
+-    /* once the value we read is a 0 in the DPORT_PERI_CLK_EN_REG bit
+-     * then we have fully unrolled the enables via ref_counts[periph]==0 */
+ #if  defined(CONFIG_IDF_TARGET_ESP32S2) ||defined(CONFIG_IDF_TARGET_ESP32S3)
+-    /* once the value we read is a 0 in the DPORT_PERI_CLK_EN_REG bit
+-     * then we have fully unrolled the enables via ref_counts[periph]==0 */
+-    while (periph_ll_periph_enabled(PERIPH_SHA_MODULE)) {
++    /* IDF 6: use lockDepth-driven loop; periph_ll_periph_enabled no longer
++     * accepts PERIPH_SHA_MODULE (removed from shared_periph_module_t). */
++    while (actual_unroll_count < ctx->lockDepth) {
+ #else
+     /* this is the bit-mask for our SHA CLK_EN_REG */
+     this_sha_mask = periph_ll_get_clk_en_mask(PERIPH_SHA_MODULE);
+     asm volatile("memw");
+     while ((this_sha_mask & *(uint32_t*)DPORT_PERI_CLK_EN_REG) != 0) {
+ #endif /* CONFIG_IDF_TARGET_ESP32S3 */
+-        periph_module_disable(PERIPH_SHA_MODULE);
++        esp_crypto_sha_enable_periph_clk(false); /* IDF 6: was periph_module_disable(PERIPH_SHA_MODULE) */
+         asm volatile("memw");
+         actual_unroll_count++;
+         ESP_LOGW(TAG, "unroll not yet successful. try #%d",
+@@ -1521,7 +1519,7 @@
+         }
+         #else
+             ESP_LOGV(TAG, "ets_sha_enable for Xtensa");
+-            periph_module_enable(PERIPH_SHA_MODULE);
++            esp_crypto_sha_enable_periph_clk(true); /* IDF 6: was periph_module_enable(PERIPH_SHA_MODULE) */
+         #endif
+     }
+     else {
+@@ -1576,7 +1574,7 @@
+         ets_sha_disable(); /* disable also resets active, ongoing hash */
+         ESP_LOGV(TAG, "ets_sha_disable in esp_sha_hw_unlock()");
+     #else
+-        periph_module_disable(PERIPH_SHA_MODULE);
++        esp_crypto_sha_enable_periph_clk(false); /* IDF 6: was periph_module_disable(PERIPH_SHA_MODULE) */
+     #endif
+         ctx->lockDepth--;
+     }

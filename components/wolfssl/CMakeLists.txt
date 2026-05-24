@@ -38,14 +38,9 @@ list(REMOVE_ITEM WOLFSSL_SRCS
     # Diagnostic utility -- uses linker section symbols as C variables; also uses
     # `thread_local` as an enum value name which conflicts with the C11 keyword.
     "${WOLFSSL_MC}/wolfcrypt/src/port/Espressif/esp_sdk_mem_lib.c"
-    # esp32_aes.c and esp32_sha.c are excluded because ESP-IDF 6.0 removed
-    # PERIPH_AES_MODULE / PERIPH_SHA_MODULE and moved hal/clk_gate_ll.h to
-    # the esp_hal_clock component (not in public include path).  wolfSSL 5.8.2
-    # still references the old IDF 5.x periph_ctrl API so these files do not
-    # compile against IDF 6.0.  NO_ESP32_CRYPT in user_settings.h routes all
-    # wolfSSL crypto to software implementations instead.
-    "${WOLFSSL_MC}/wolfcrypt/src/port/Espressif/esp32_aes.c"
-    "${WOLFSSL_MC}/wolfcrypt/src/port/Espressif/esp32_sha.c"
+    # esp32_aes.c and esp32_sha.c are now compiled with IDF 6 HAL support.
+    # patches/wolfssl__wolfssl/0002-adapt-esp32-aes-sha-to-idf6-periph-clock-api.patch
+    # replaced PERIPH_AES_MODULE/PERIPH_SHA_MODULE with esp_crypto_aes/sha_enable_periph_clk().
 )
 
 # Remove Xtensa assembly files -- not valid for this toolchain invocation
@@ -62,5 +57,5 @@ idf_component_register(
         "${WOLFSSL_MC}/wolfssl"
         "${WOLFSSL_MC}/wolfssl/wolfcrypt"
         "${WOLFSSL_MC}/wolfssl/wolfcrypt/port/Espressif"
-    PRIV_REQUIRES esp_hw_support
+    PRIV_REQUIRES esp_hw_support esp_security
 )

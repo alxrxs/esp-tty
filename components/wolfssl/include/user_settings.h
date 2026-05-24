@@ -80,34 +80,22 @@
 
 /* -- ESP32 hardware acceleration ---------------------------------- */
 /*
- * wolfSSL HW crypto is DISABLED for wolfSSL/wolfSSH operations on ESP32-S3.
+ * wolfSSL HW crypto is ENABLED for wolfSSL/wolfSSH operations on ESP32-S3.
  *
- * ESP-IDF 6.0.1 removed PERIPH_AES_MODULE / PERIPH_SHA_MODULE and moved
- * hal/clk_gate_ll.h into a new component (esp_hal_clock) that is not in the
- * public include path.  wolfSSL 5.8.2's esp32_aes.c / esp32_sha.c still
- * reference the old IDF 5.x periph_ctrl API and therefore do not compile
- * against IDF 6.0.
+ * patches/wolfssl__wolfssl/0002-adapt-esp32-aes-sha-to-idf6-periph-clock-api.patch
+ * adapted esp32_aes.c and esp32_sha.c to the IDF 6.0 HAL API:
+ *   - periph_module_enable/disable(PERIPH_AES_MODULE) replaced by
+ *     esp_crypto_aes_enable_periph_clk(true/false)
+ *   - periph_module_enable/disable(PERIPH_SHA_MODULE) replaced by
+ *     esp_crypto_sha_enable_periph_clk(true/false)
+ *   - #include <hal/clk_gate_ll.h> replaced by esp_crypto_periph_clk.h
  *
- * wolfSSH only uses ED25519 (sign/verify) and AES-256-GCM (SSH data cipher),
- * both of which fall back to wolfSSL's fast software implementations (sp_c64,
- * TI-SHAtransform).  The performance impact is negligible for a serial-bridge
- * workload.
+ * Both files are now compiled (no longer excluded in CMakeLists.txt).
+ * WOLFSSL_ESP32_CRYPT is set implicitly when neither NO_ESP32_CRYPT nor
+ * NO_WOLFSSL_ESP32_CRYPT_AES / NO_WOLFSSL_ESP32_CRYPT_HASH are defined.
  *
- * OTA and TLS operations continue to use ESP32-S3 hardware acceleration via
- * CONFIG_MBEDTLS_HARDWARE_AES=y / CONFIG_MBEDTLS_HARDWARE_SHA=y (independent
- * of wolfSSL).
- *
- * esp32_aes.c and esp32_sha.c are excluded from the build in
- * components/wolfssl/CMakeLists.txt.
+ * AES-256-GCM (SSH data cipher) and SHA-512 (ED25519) offload to the
+ * ESP32-S3 crypto accelerator, reducing CPU load on the SSH bridge path.
+ * OTA/TLS operations continue to use hardware acceleration via mbedTLS
+ * (CONFIG_MBEDTLS_HARDWARE_AES=y / CONFIG_MBEDTLS_HARDWARE_SHA=y).
  */
-/* NO_ESP32_CRYPT disables hardware acceleration.  However, wolfSSL 5.8.2 has
- * a latent bug in openssl/sha.h: it checks !defined(NO_WOLFSSL_ESP32_CRYPT_HASH)
- * to decide whether WC_ESP32SHA is in scope, but that symbol is only defined
- * inside esp32-crypt.h, which is conditionally included via sha256.h only when
- * WOLFSSL_ESP32_CRYPT is set (which NO_ESP32_CRYPT suppresses).  The net effect
- * is that when NO_ESP32_CRYPT is set, NO_WOLFSSL_ESP32_CRYPT_HASH is never
- * defined in the usual path, so openssl/sha.h still tries to use WC_ESP32SHA.
- * Explicitly defining it here closes that gap. */
-#define NO_ESP32_CRYPT
-#define NO_WOLFSSL_ESP32_CRYPT_HASH
-#define NO_WOLFSSL_ESP32_CRYPT_AES
