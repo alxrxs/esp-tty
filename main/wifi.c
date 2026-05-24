@@ -1552,6 +1552,23 @@ static esp_err_t wifi_mode_psk(const char *ssid,
     }
 #endif
 
+    /* Disable 802.11 modem-sleep PS.  CONFIG_PM_ENABLE=n only disables the
+     * ESP-IDF CPU power manager; the WiFi driver's own beacon-window PS is
+     * a separate switch.  Default is WIFI_PS_MIN_MODEM, which on the Zero
+     * (FH4R2 v0.2) can trigger an IntegerDivideByZero in pm_get_tbtt_count
+     * inside libpp.a after a flaky beacon -- the TBTT divisor is briefly 0
+     * during the recovery window and the divide instruction faults.
+     * WIFI_PS_NONE keeps the radio fully active and avoids the math. */
+    {
+        esp_err_t ps_err = esp_wifi_set_ps(WIFI_PS_NONE);
+        if (ps_err == ESP_OK) {
+            ESP_LOGI(TAG, "802.11 power save: NONE (radio always on)");
+        } else {
+            ESP_LOGW(TAG, "esp_wifi_set_ps(WIFI_PS_NONE): %s",
+                     esp_err_to_name(ps_err));
+        }
+    }
+
     /* Wait for IP or failure.  WIFI_MAX_RETRY=0 means infinite here too. */
     EventBits_t bits = xEventGroupWaitBits(
         s_wifi_event_group,

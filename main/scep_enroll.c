@@ -145,6 +145,14 @@ esp_err_t scep_enroll(const char *scep_url,
     }
 #endif
 
+    /* mbedtls_pk_context for the RSA-2048 key.  Initialise NOW (before any
+     * `goto done`) so the `done:` cleanup can safely call mbedtls_pk_free()
+     * even when an earlier step fails -- otherwise reading an uninitialised
+     * pk_context corrupts the stack with garbage pointers and crashes with
+     * IllegalInstruction. */
+    mbedtls_pk_context key;
+    mbedtls_pk_init(&key);
+
     /* -- Resolve common name --------------------------------------------
      * Precedence: caller-provided argument > SCEP_CN macro > MAC-derived
      * default of "<DEVICE_HOSTNAME>-<mac>". */
@@ -183,8 +191,13 @@ esp_err_t scep_enroll(const char *scep_url,
     uint8_t *p7_req         = NULL;
     uint8_t *issued_cert_der = NULL;
 
+/* DIAGNOSTIC: prefer PSRAM over internal RAM for SCEP scratch.  On Zero
+ * v0.2 silicon the internal-RAM heap's spinlock CAS hangs under SCEP
+ * heap pressure; PSRAM heap uses a separate spinlock instance and may
+ * avoid the issue.  Falls back to internal RAM if PSRAM unavailable. */
 #define ALLOC_BUF(ptr, sz) do { \
-    (ptr) = heap_caps_calloc(1, (sz), MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL); \
+    (ptr) = heap_caps_calloc(1, (sz), MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM); \
+    if (!(ptr)) (ptr) = heap_caps_calloc(1, (sz), MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL); \
     if (!(ptr)) { \
         ESP_LOGE(TAG, "scep_enroll: failed to allocate %zu B for " #ptr, (size_t)(sz)); \
         goto done; \
@@ -244,10 +257,8 @@ esp_err_t scep_enroll(const char *scep_url,
 
     /* ------------------------------------------------------------------ */
     /* Steps 2-3: Generate RSA-2048 keypair and export private key DER     */
+    /* `key` is declared + pk_init'd at the top of the function.           */
     /* ------------------------------------------------------------------ */
-    mbedtls_pk_context key;
-    mbedtls_pk_init(&key);
-
     ret = scep_generate_keypair(&key, SCEP_F_RNG, SCEP_P_RNG);
     if (ret != 0) {
         ESP_LOGE(TAG, "scep_generate_keypair failed: -0x%04x", (unsigned)(-ret));

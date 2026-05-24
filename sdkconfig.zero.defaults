@@ -46,3 +46,51 @@ CONFIG_PM_ENABLE=n
 CONFIG_ESP_WIFI_EXTRA_IRAM_OPT=y
 CONFIG_ESP_WIFI_SLP_IRAM_OPT=y
 
+# -- Workarounds for ESP-IDF #13794 family (spinlock hang via USJ) ----------
+# Bug pattern: code inside a spinlock'd critical section triggers a printf
+# that the USB-Serial-JTAG (USJ) console driver buffers via xRingbufferSend,
+# which itself takes a lock.  The nested lock causes esp_cpu_compare_and_set
+# to spin forever and the interrupt WDT fires.  Two mitigations:
+#
+#   1. CONFIG_SPI_FLASH_AUTO_SUSPEND: lets the SPI flash controller suspend
+#      its current command on a cache miss instead of blocking the CPU,
+#      reducing the time atomic CAS instructions on PSRAM-backed locks
+#      remain in contention with concurrent flash reads.
+#   2. CONFIG_ESP_INT_WDT_TIMEOUT_MS bumped from the default 300 ms to
+#      1500 ms so transient lock contention under heap-poisoning pressure
+#      doesn't trigger a WDT panic before the contention resolves.
+CONFIG_SPI_FLASH_AUTO_SUSPEND=y
+CONFIG_ESP_INT_WDT_TIMEOUT_MS=1500
+
+# Stack overflow detection: catches stack overflows at context switch time.
+# Cheap and worth keeping on permanently.
+CONFIG_FREERTOS_CHECK_STACKOVERFLOW_CANARY=y
+
+# -- ROUTE MOST ALLOCATIONS TO PSRAM (Zero silicon workaround) --------------
+# The v0.2 silicon's internal-RAM heap spinlock CAS hangs under load (see git
+# history -- ppRxFragmentProc panic, scep_enroll heap_caps_calloc panic,
+# esp_http_client_init calloc panic, all in spinlock_acquire on the internal
+# heap's lock).  The PSRAM heap has a separate spinlock instance that does
+# NOT exhibit the issue.  Default behaviour: allocations <16 KiB go to
+# internal RAM, >=16 KiB to PSRAM.  Drop the threshold so almost everything
+# goes to PSRAM, bypassing the broken lock.  Tradeoff: small allocs are now
+# PSRAM-speed (slower), but the firmware actually works.
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=256
+# IMPORTANT: leave CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP OFF.  When y, WiFi RX
+# buffers get placed in PSRAM, which is too slow for the WiFi ISR under high
+# RX rates (TLS handshake fragments) -- the chip then panics in
+# ppRxFragmentProc.  Keep WiFi/LWIP buffers in internal RAM (default).
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=n
+
+# -- Bigger WiFi RX buffer pool ---------------------------------------------
+# Default 10 static + 32 dynamic = 42 RX buffers of 1600 B.  Under TLS
+# handshake bursts (cert chain ~5 KB inbound across multiple 802.11 frames)
+# this can overflow on the slower Zero RX path, surfacing as a ppRxFragmentProc
+# panic.  Bump to 16+64 = 80 buffers.  Costs ~60 KiB internal RAM.
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=16
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=64
+# Larger Block Ack RX window helps when multiple fragments arrive back-to-back.
+CONFIG_ESP_WIFI_RX_BA_WIN=16
+
+
