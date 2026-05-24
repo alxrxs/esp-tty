@@ -28,7 +28,9 @@
 
 #pragma once
 
-#ifdef WIFI_ENTERPRISE_SSID
+/* Mode C only (runtime SCEP enrollment).  Mode B+ uses embedded certs
+ * that cannot be renewed at runtime -- the symbol is not declared. */
+#if defined(WIFI_ENTERPRISE_SSID) && defined(SCEP_URL) && !defined(WIFI_USE_ENTERPRISE)
 
 #include "esp_err.h"
 

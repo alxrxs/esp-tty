@@ -18,7 +18,10 @@
 
 #include "config.h"   /* must precede the WIFI_ENTERPRISE_SSID #ifdef */
 
-#ifdef WIFI_ENTERPRISE_SSID
+/* cert_renewer only makes sense for Mode C (runtime SCEP enrollment).
+ * Mode B+ (WIFI_USE_ENTERPRISE + WIFI_ENTERPRISE_SSID, embedded certs)
+ * doesn't define SCEP_URL and doesn't need renewal at runtime. */
+#if defined(WIFI_ENTERPRISE_SSID) && defined(SCEP_URL) && !defined(WIFI_USE_ENTERPRISE)
 
 #include "cert_renewer.h"
 #include "cert_renewer_decide.h"
