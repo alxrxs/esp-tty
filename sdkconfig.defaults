@@ -128,6 +128,12 @@ CONFIG_LWIP_SNTP_MAX_SERVERS=4
 # Enable WPA3-Enterprise 192-bit Suite-B (needs SOC_WIFI_GCMP_SUPPORT):
 # CONFIG_ESP_WIFI_SUITE_B_192=n
 
+# -- mbedTLS X.509 write support -------------------------------------------
+# Required by scep_proto.c to build self-signed certs and CSRs.
+# In ESP-IDF 6.0 these default to y=n (disabled); must be explicit.
+CONFIG_MBEDTLS_X509_CREATE_C=y
+CONFIG_MBEDTLS_X509_CRT_WRITE_C=y
+
 # -- mbedTLS hardware acceleration (ESP32-S3) ------------------------------
 # AES: HW AES engine on S3. Used for OTA decrypt (AES-256-GCM via mbedtls_gcm_*).
 CONFIG_MBEDTLS_HARDWARE_AES=y

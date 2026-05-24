@@ -47,10 +47,35 @@
 #include "zeroize.h"
 
 /* mbedTLS for key operations */
-#include "mbedtls/pk.h"
+#include "mbedtls/build_info.h"
+#if MBEDTLS_VERSION_NUMBER >= 0x04000000
+/* mbedTLS 4.x: private/ headers for legacy crypto contexts.
+ * MBEDTLS_ALLOW_PRIVATE_ACCESS (build_flags) → private_access.h defines
+ * MBEDTLS_DECLARE_PRIVATE_IDENTIFIERS which unlocks function declarations. */
+#include "mbedtls/private/pk_private.h"
+#include "mbedtls/private/rsa.h"
+/* esp_fill_random is the low-level RNG available on all ESP32 targets.
+ * mbedtls_esp_random() wraps it for the mbedTLS f_rng signature, but its
+ * implementation was omitted from the esp-idf 6.0.1 mbedtls port sources
+ * in PlatformIO's espressif32@7.0.1 package.  Provide a local shim instead. */
+#include "esp_random.h"
+static int scep_esp_rng(void *ctx, unsigned char *buf, size_t len)
+{
+    (void)ctx;
+    esp_fill_random(buf, len);
+    return 0;
+}
+/* Shims: on mbedTLS 4.x use esp_fill_random-backed RNG directly */
+#define SCEP_F_RNG scep_esp_rng
+#define SCEP_P_RNG NULL
+#else
 #include "mbedtls/rsa.h"
 #include "mbedtls/entropy.h"
 #include "mbedtls/ctr_drbg.h"
+#define SCEP_F_RNG mbedtls_ctr_drbg_random
+#define SCEP_P_RNG (&ctr_drbg)
+#endif
+#include "mbedtls/pk.h"
 
 static const char *TAG = "scep_enroll";
 
@@ -104,6 +129,7 @@ esp_err_t scep_enroll(const char *scep_url,
     int ret;
 
     /* -- mbedTLS RNG context -------------------------------------------- */
+#if MBEDTLS_VERSION_NUMBER < 0x04000000
     mbedtls_entropy_context  entropy;
     mbedtls_ctr_drbg_context ctr_drbg;
     mbedtls_entropy_init(&entropy);
@@ -117,6 +143,7 @@ esp_err_t scep_enroll(const char *scep_url,
         mbedtls_entropy_free(&entropy);
         return ESP_FAIL;
     }
+#endif
 
     /* -- Resolve common name --------------------------------------------
      * Precedence: caller-provided argument > SCEP_CN macro > MAC-derived
@@ -221,7 +248,7 @@ esp_err_t scep_enroll(const char *scep_url,
     mbedtls_pk_context key;
     mbedtls_pk_init(&key);
 
-    ret = scep_generate_keypair(&key, mbedtls_ctr_drbg_random, &ctr_drbg);
+    ret = scep_generate_keypair(&key, SCEP_F_RNG, SCEP_P_RNG);
     if (ret != 0) {
         ESP_LOGE(TAG, "scep_generate_keypair failed: -0x%04x", (unsigned)(-ret));
         goto done;
@@ -261,7 +288,7 @@ esp_err_t scep_enroll(const char *scep_url,
     size_t self_cert_len = SCEP_MAX_CERT_DER;
 
     ret = scep_build_self_signed_cert(&subject, &key,
-                                      mbedtls_ctr_drbg_random, &ctr_drbg,
+                                      SCEP_F_RNG, SCEP_P_RNG,
                                       self_cert_der, &self_cert_len);
     if (ret != 0) {
         ESP_LOGE(TAG, "scep_build_self_signed_cert failed: -0x%04x", (unsigned)(-ret));
@@ -275,7 +302,7 @@ esp_err_t scep_enroll(const char *scep_url,
     size_t csr_len = SCEP_MAX_CSR_DER;
 
     ret = scep_build_csr(&subject, &key, challenge_password,
-                         mbedtls_ctr_drbg_random, &ctr_drbg,
+                         SCEP_F_RNG, SCEP_P_RNG,
                          csr_der, &csr_len);
     if (ret != 0) {
         ESP_LOGE(TAG, "scep_build_csr failed: -0x%04x", (unsigned)(-ret));
@@ -314,7 +341,7 @@ esp_err_t scep_enroll(const char *scep_url,
               cab.ra_encrypt_cert_der, cab.ra_encrypt_cert_len,
               &key,
               self_cert_der,           self_cert_len,
-              mbedtls_ctr_drbg_random, &ctr_drbg,
+              SCEP_F_RNG, SCEP_P_RNG,
               txid,
               p7_req,                  &p7_req_len);
     if (ret != 0) {
@@ -357,9 +384,14 @@ esp_err_t scep_enroll(const char *scep_url,
     mbedtls_pk_context dec_key;
     mbedtls_pk_init(&dec_key);
 
+#if MBEDTLS_VERSION_NUMBER >= 0x04000000
+    ret = mbedtls_pk_parse_key(&dec_key, dev_key_der, dev_key_der_len,
+                               NULL, 0);
+#else
     ret = mbedtls_pk_parse_key(&dec_key, dev_key_der, dev_key_der_len,
                                NULL, 0,
-                               mbedtls_ctr_drbg_random, &ctr_drbg);
+                               SCEP_F_RNG, SCEP_P_RNG);
+#endif
     if (ret != 0) {
         ESP_LOGE(TAG, "mbedtls_pk_parse_key failed: -0x%04x", (unsigned)(-ret));
         psram_free(p7_resp);
@@ -373,7 +405,7 @@ esp_err_t scep_enroll(const char *scep_url,
     prc = scep_parse_certrep(p7_resp, p7_resp_len,
                              txid,
                              &dec_key,
-                             mbedtls_ctr_drbg_random, &ctr_drbg,
+                             SCEP_F_RNG, SCEP_P_RNG,
                              issued_cert_der, &issued_cert_len,
                              &pki_status, &fail_info);
 
@@ -476,8 +508,10 @@ done:
         mbedtls_pk_free(&key);
         zeroize(&key, sizeof(key));
     }
+#if MBEDTLS_VERSION_NUMBER < 0x04000000
     mbedtls_ctr_drbg_free(&ctr_drbg);
     mbedtls_entropy_free(&entropy);
+#endif
     if (ca_p7) {
         psram_free(ca_p7);
     }

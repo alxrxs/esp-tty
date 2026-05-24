@@ -26,9 +26,29 @@
 #ifdef WIFI_ENTERPRISE_SSID
 #include "cert_renewer.h"
 #endif
-#include "mbedtls/pk.h"
+#include "mbedtls/build_info.h"
+#if MBEDTLS_VERSION_NUMBER >= 0x04000000
+/* mbedTLS 4.x: private/ headers for legacy crypto contexts.
+ * MBEDTLS_ALLOW_PRIVATE_ACCESS (build_flags) → private_access.h defines
+ * MBEDTLS_DECLARE_PRIVATE_IDENTIFIERS which unlocks function declarations. */
+#include "mbedtls/private/pk_private.h"
+#include "mbedtls/private/rsa.h"
+/* mbedtls_esp_random() is declared in esp_mbedtls_random.h but its
+ * implementation was omitted from the esp-idf 6.0.1 mbedtls port in
+ * PlatformIO espressif32@7.0.1.  Use esp_fill_random directly instead. */
+#include "esp_random.h"
+static int main_esp_rng(void *ctx, unsigned char *buf, size_t len)
+{
+    (void)ctx;
+    esp_fill_random(buf, len);
+    return 0;
+}
+#else
 #include "mbedtls/entropy.h"
 #include "mbedtls/ctr_drbg.h"
+#include "mbedtls/rsa.h"
+#endif
+#include "mbedtls/pk.h"
 
 static const char *TAG = "main";
 
@@ -57,38 +77,40 @@ void scep_smoke_task(void *arg)
 void rsa_bench_task(void *arg)
 {
     (void)arg;
-    mbedtls_entropy_context  entropy;
-    mbedtls_ctr_drbg_context ctr_drbg;
-    mbedtls_pk_context       pk;
+    mbedtls_pk_context pk;
     TickType_t t0, t1;
 
-    mbedtls_entropy_init(&entropy);
-    mbedtls_ctr_drbg_init(&ctr_drbg);
     mbedtls_pk_init(&pk);
 
-    int rc = mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy,
-                                    (const unsigned char *)"bench", 5);
-    if (rc != 0) {
-        ESP_LOGE(TAG, "keygen bench: ctr_drbg_seed failed: -0x%04x", (unsigned)(-rc));
-        goto bench_done;
-    }
-    rc = mbedtls_pk_setup(&pk, mbedtls_pk_info_from_type(MBEDTLS_PK_RSA));
+    int rc = mbedtls_pk_setup(&pk, mbedtls_pk_info_from_type(MBEDTLS_PK_RSA));
     if (rc != 0) {
         ESP_LOGE(TAG, "keygen bench: pk_setup failed: -0x%04x", (unsigned)(-rc));
         goto bench_done;
     }
     ESP_LOGW(TAG, "RSA-2048 keygen bench: starting...");
     t0 = xTaskGetTickCount();
-    rc = mbedtls_rsa_gen_key(mbedtls_pk_rsa(pk), mbedtls_ctr_drbg_random,
-                              &ctr_drbg, 2048, 65537);
+#if MBEDTLS_VERSION_NUMBER >= 0x04000000
+    rc = mbedtls_rsa_gen_key(mbedtls_pk_rsa(pk), main_esp_rng, NULL, 2048, 65537);
+#else
+    {
+        mbedtls_entropy_context  entropy;
+        mbedtls_ctr_drbg_context ctr_drbg;
+        mbedtls_entropy_init(&entropy);
+        mbedtls_ctr_drbg_init(&ctr_drbg);
+        mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy,
+                               (const unsigned char *)"bench", 5);
+        rc = mbedtls_rsa_gen_key(mbedtls_pk_rsa(pk), mbedtls_ctr_drbg_random,
+                                  &ctr_drbg, 2048, 65537);
+        mbedtls_ctr_drbg_free(&ctr_drbg);
+        mbedtls_entropy_free(&entropy);
+    }
+#endif
     t1 = xTaskGetTickCount();
     ESP_LOGW(TAG, "RSA-2048 keygen bench: rc=-0x%04x elapsed=%lu ms",
              (unsigned)(-rc), (unsigned long)((t1 - t0) * portTICK_PERIOD_MS));
 
 bench_done:
     mbedtls_pk_free(&pk);
-    mbedtls_ctr_drbg_free(&ctr_drbg);
-    mbedtls_entropy_free(&entropy);
     vTaskDelete(NULL);
 }
 #endif

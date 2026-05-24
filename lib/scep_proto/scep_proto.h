@@ -19,11 +19,18 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Pull in the mbedTLS build configuration first so that MBEDTLS_CONFIG_FILE
+ * (which on-device resolves to mbedtls/esp_config.h) is processed before
+ * any subsequent mbedTLS header triggers private_access.h.  esp_config.h
+ * defines MBEDTLS_ALLOW_PRIVATE_ACCESS which private_access.h then uses to
+ * define MBEDTLS_DECLARE_PRIVATE_IDENTIFIERS -- required to see function
+ * declarations in the mbedTLS 4.x private/ headers. */
+#include "mbedtls/build_info.h"
+
 /* mbedTLS types used in public API.
  * On-device: ESP-IDF ships full mbedTLS (components/mbedtls).
  * Native tests: system mbedTLS (apt install libmbedtls-dev). */
 #include "mbedtls/pk.h"
-#include "mbedtls/ctr_drbg.h"
 
 #ifdef __cplusplus
 extern "C" {

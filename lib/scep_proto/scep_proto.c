@@ -13,19 +13,31 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-#include "mbedtls/pk.h"
+#include "mbedtls/build_info.h"
+#if MBEDTLS_VERSION_NUMBER >= 0x04000000
+/* mbedTLS 4.x: legacy crypto primitives moved to private/ subdirectory.
+ * MBEDTLS_ALLOW_PRIVATE_ACCESS is supplied via build_flags in platformio.ini;
+ * private_access.h then defines MBEDTLS_DECLARE_PRIVATE_IDENTIFIERS which
+ * unlocks function declarations in the private/ headers. */
+#include "mbedtls/private/pk_private.h"
+#include "mbedtls/private/rsa.h"
+#include "mbedtls/private/sha256.h"
+#include "mbedtls/private/aes.h"
+#include "mbedtls/private/bignum.h"
+#else
 #include "mbedtls/rsa.h"
-#include "mbedtls/x509_crt.h"
-/* mbedTLS 3.x: x509write_crt functions are in x509_crt.h (no separate header).
- * mbedTLS 2.x had a separate x509write_crt.h; include it only if present. */
-#if __has_include("mbedtls/x509write_crt.h")
-#include "mbedtls/x509write_crt.h"
-#endif
-#include "mbedtls/asn1write.h"
-#include "mbedtls/asn1.h"
 #include "mbedtls/sha256.h"
 #include "mbedtls/aes.h"
 #include "mbedtls/bignum.h"
+/* mbedTLS 2.x had a separate x509write_crt.h; include it only if present. */
+#if __has_include("mbedtls/x509write_crt.h")
+#include "mbedtls/x509write_crt.h"
+#endif
+#endif
+#include "mbedtls/pk.h"
+#include "mbedtls/x509_crt.h"
+#include "mbedtls/asn1write.h"
+#include "mbedtls/asn1.h"
 
 /* -----------------------------------------------------------------------
  * OID byte arrays (raw content, without tag/length)
@@ -373,8 +385,13 @@ int scep_build_csr(const scep_subject_t *subject,
 
     uint8_t sig[512];
     size_t  sig_len = sizeof(sig);
+#if MBEDTLS_VERSION_NUMBER >= 0x04000000
+    ret = mbedtls_pk_sign(key, MBEDTLS_MD_SHA256, hash, SHA256_LEN,
+                          sig, sizeof(sig), &sig_len);
+#else
     ret = mbedtls_pk_sign(key, MBEDTLS_MD_SHA256, hash, SHA256_LEN,
                           sig, sizeof(sig), &sig_len, f_rng, p_rng);
+#endif
     if (ret != 0) return ret;
 
     /* Build final CertificationRequest */
@@ -492,7 +509,11 @@ int scep_build_self_signed_cert(const scep_subject_t *subject,
     if (ret != 0) goto out;
 
     {
+#if MBEDTLS_VERSION_NUMBER >= 0x04000000
+        int len_i = mbedtls_x509write_crt_der(&crt, out_der, *out_len);
+#else
         int len_i = mbedtls_x509write_crt_der(&crt, out_der, *out_len, f_rng, p_rng);
+#endif
         if (len_i <= 0) { ret = len_i; goto out; }
         /* mbedtls_x509write_crt_der writes at END of buffer */
         memmove(out_der, out_der + (*out_len - (size_t)len_i), (size_t)len_i);
@@ -951,8 +972,13 @@ int scep_build_pkimessage_pkcsreq(const uint8_t      *csr_der,
 
     uint8_t sig[512];
     size_t  sig_len = sizeof(sig);
+#if MBEDTLS_VERSION_NUMBER >= 0x04000000
+    ret = mbedtls_pk_sign(signing_key, MBEDTLS_MD_SHA256, sa_hash, SHA256_LEN,
+                          sig, sizeof(sig), &sig_len);
+#else
     ret = mbedtls_pk_sign(signing_key, MBEDTLS_MD_SHA256, sa_hash, SHA256_LEN,
                           sig, sizeof(sig), &sig_len, f_rng, p_rng);
+#endif
     if (ret != 0) { free(sa_content); goto done; }
 
     /* ------------------------------------------------------------------
