@@ -253,6 +253,83 @@ void test_very_large_window_days_safe(void)
     TEST_ASSERT_EQUAL_INT(RENEWAL_DECISION_RENEW_NOW, d);
 }
 
+/* --------------------------------------------------------------------------
+ * Row 17: small but plausible clock values just above MIN_PLAUSIBLE_EPOCH
+ * -------------------------------------------------------------------------- */
+void test_exactly_min_plausible_plus_one_second(void)
+{
+    /* now = MIN_PLAUSIBLE_EPOCH + 1, not_after far in future */
+    time_t now = MIN_PLAUSIBLE_EPOCH + 1;
+    renewal_decision_t d = cert_renewer_decide(
+        now,
+        (uint64_t)(now) + 365 * DAY_SEC,
+        30);
+    TEST_ASSERT_EQUAL_INT(RENEWAL_DECISION_SKIP_VALID, d);
+}
+
+/* --------------------------------------------------------------------------
+ * Row 18: not_after == 1 (epoch 1 = 1970-01-01 00:00:01): treated as expired
+ * relative to MIN_PLAUSIBLE_EPOCH, so remaining_sec < 0 <= window_sec -> RENEW
+ * -------------------------------------------------------------------------- */
+void test_not_after_epoch_one_is_expired(void)
+{
+    time_t now = MIN_PLAUSIBLE_EPOCH + 1;
+    renewal_decision_t d = cert_renewer_decide(now, (uint64_t)1, 7);
+    TEST_ASSERT_EQUAL_INT(RENEWAL_DECISION_RENEW_NOW, d);
+}
+
+/* --------------------------------------------------------------------------
+ * Row 19: cert expires in exactly window_days * 86400 + 1 seconds -> SKIP_VALID
+ * -------------------------------------------------------------------------- */
+void test_cert_one_second_past_window_skips(void)
+{
+    time_t now = MIN_PLAUSIBLE_EPOCH + 1;
+    uint32_t window_days = 14;
+    /* remaining = window_days * 86400 + 1 > window_sec -> SKIP */
+    uint64_t not_after = (uint64_t)(now) + (uint64_t)window_days * DAY_SEC + 1;
+    renewal_decision_t d = cert_renewer_decide(now, not_after, window_days);
+    TEST_ASSERT_EQUAL_INT(RENEWAL_DECISION_SKIP_VALID, d);
+}
+
+/* --------------------------------------------------------------------------
+ * Row 20: cert expires in exactly window_days * 86400 seconds -> RENEW_NOW
+ * -------------------------------------------------------------------------- */
+void test_cert_exactly_at_window_boundary_renews(void)
+{
+    time_t now = MIN_PLAUSIBLE_EPOCH + 1;
+    uint32_t window_days = 14;
+    /* remaining == window_sec -> RENEW_NOW (boundary is <=) */
+    uint64_t not_after = (uint64_t)(now) + (uint64_t)window_days * DAY_SEC;
+    renewal_decision_t d = cert_renewer_decide(now, not_after, window_days);
+    TEST_ASSERT_EQUAL_INT(RENEWAL_DECISION_RENEW_NOW, d);
+}
+
+/* --------------------------------------------------------------------------
+ * Row 21: now == not_after - 1 (one second before expiry) -> RENEW_NOW
+ * (remaining_sec == 1, window_sec == 7 * 86400 > 1 -- inside window)
+ * -------------------------------------------------------------------------- */
+void test_one_second_before_expiry_in_window(void)
+{
+    time_t now = MIN_PLAUSIBLE_EPOCH + 1;
+    uint64_t not_after = (uint64_t)(now) + 1;
+    renewal_decision_t d = cert_renewer_decide(now, not_after, 7);
+    TEST_ASSERT_EQUAL_INT(RENEWAL_DECISION_RENEW_NOW, d);
+}
+
+/* --------------------------------------------------------------------------
+ * Row 22: RENEWAL_DECISION_SKIP_NO_CLOCK returned for any now < plausible
+ *         regardless of what not_after is (even if not_after == 0)
+ * -------------------------------------------------------------------------- */
+void test_no_clock_overrides_sentinel_not_after(void)
+{
+    /* Even the zero-sentinel must not override the clock-not-synced check */
+    renewal_decision_t d = cert_renewer_decide(
+        MIN_PLAUSIBLE_EPOCH - 100,
+        0,   /* sentinel */
+        7);
+    TEST_ASSERT_EQUAL_INT(RENEWAL_DECISION_SKIP_NO_CLOCK, d);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -273,5 +350,12 @@ int main(void)
     RUN_TEST(test_window_zero_cert_expires_now_renews);
     RUN_TEST(test_one_below_min_plausible_skips);
     RUN_TEST(test_very_large_window_days_safe);
+    /* Additional boundary / branch coverage */
+    RUN_TEST(test_exactly_min_plausible_plus_one_second);
+    RUN_TEST(test_not_after_epoch_one_is_expired);
+    RUN_TEST(test_cert_one_second_past_window_skips);
+    RUN_TEST(test_cert_exactly_at_window_boundary_renews);
+    RUN_TEST(test_one_second_before_expiry_in_window);
+    RUN_TEST(test_no_clock_overrides_sentinel_not_after);
     return UNITY_END();
 }

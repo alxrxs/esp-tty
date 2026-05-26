@@ -427,6 +427,189 @@ void test_footer_constant_matches_expected(void)
                              SCROLLBACK_FOOTER);
 }
 
+/* -- NEW tests ------------------------------------------------------------- */
+
+/* scrollback_create(0) must return NULL (documented: cap=0 is invalid).    */
+void test_create_zero_capacity_returns_null(void)
+{
+    scrollback_t *sb = scrollback_create(0);
+    TEST_ASSERT_NULL(sb);
+}
+
+/* scrollback_push with NULL sb must not crash.                            */
+void test_push_null_sb_is_safe(void)
+{
+    scrollback_push(NULL, (const uint8_t *)"hello", 5);
+    TEST_PASS();
+}
+
+/* scrollback_push with zero len must be a no-op (buffer stays empty).    */
+void test_push_zero_len_is_noop(void)
+{
+    scrollback_t *sb = scrollback_create(256);
+    TEST_ASSERT_NOT_NULL(sb);
+
+    scrollback_push(sb, (const uint8_t *)"data", 0);
+
+    size_t len = 99;
+    uint8_t *out = scrollback_get_lines(sb, 100, &len);
+    TEST_ASSERT_NULL(out);
+    TEST_ASSERT_EQUAL_size_t(0, len);
+
+    free(sb);
+}
+
+/* scrollback_get_lines with NULL out_len must not crash.                  */
+void test_get_lines_null_out_len_is_safe(void)
+{
+    scrollback_t *sb = scrollback_create(256);
+    TEST_ASSERT_NOT_NULL(sb);
+    scrollback_push(sb, (const uint8_t *)"hello\n", 6);
+
+    uint8_t *out = scrollback_get_lines(sb, 10, NULL);
+    /* Must not crash; result is unspecified (NULL or freed) */
+    if (out) free(out);
+
+    free(sb);
+}
+
+/* scrollback_get_lines with NULL sb must not crash.                       */
+void test_get_lines_null_sb_is_safe(void)
+{
+    size_t len = 99;
+    uint8_t *out = scrollback_get_lines(NULL, 10, &len);
+    TEST_ASSERT_NULL(out);
+    /* len should be set to 0, but API leaves it unspecified for NULL sb */
+}
+
+/* Push exactly cap-1 bytes (one byte short of full): buffer not
+ * considered full, then push one more byte to hit exactly cap.         */
+void test_push_cap_minus_one_then_one_byte(void)
+{
+    const size_t CAP = 32;
+    scrollback_t *sb = scrollback_create(CAP);
+    TEST_ASSERT_NOT_NULL(sb);
+
+    uint8_t data[CAP - 1];
+    memset(data, 0xAA, sizeof(data));
+    scrollback_push(sb, data, sizeof(data));
+
+    /* One more byte to reach exactly cap */
+    uint8_t extra = 0xBB;
+    scrollback_push(sb, &extra, 1);
+
+    size_t len = 0;
+    uint8_t *out = scrollback_get_lines(sb, 100, &len);
+    TEST_ASSERT_NOT_NULL(out);
+    TEST_ASSERT_EQUAL_size_t(CAP, len);
+    /* Last byte must be our extra 0xBB */
+    TEST_ASSERT_EQUAL_UINT8(0xBB, out[len - 1]);
+
+    free(out);
+    free(sb);
+}
+
+/* Overwrite entire capacity with one giant push, then get_lines.
+ * A push of exactly 2*cap bytes should leave the buffer full with the
+ * last cap bytes of the input.                                         */
+void test_push_double_capacity_retains_last_cap_bytes(void)
+{
+    const size_t CAP = 64;
+    scrollback_t *sb = scrollback_create(CAP);
+    TEST_ASSERT_NOT_NULL(sb);
+
+    uint8_t *src = malloc(2 * CAP);
+    TEST_ASSERT_NOT_NULL(src);
+    /* First half: 0xAA, second half: 0xBB */
+    memset(src,       0xAA, CAP);
+    memset(src + CAP, 0xBB, CAP);
+    scrollback_push(sb, src, 2 * CAP);
+    free(src);
+
+    size_t len = 0;
+    uint8_t *out = scrollback_get_lines(sb, 100000, &len);
+    TEST_ASSERT_NOT_NULL(out);
+    TEST_ASSERT_EQUAL_size_t(CAP, len);
+    /* The retained bytes are the last CAP bytes = all 0xBB */
+    TEST_ASSERT_EACH_EQUAL_UINT8(0xBB, out, CAP);
+
+    free(out);
+    free(sb);
+}
+
+/* get_lines with max_lines=1 returns exactly 1 newline.                  */
+void test_get_lines_exactly_one_line(void)
+{
+    scrollback_t *sb = scrollback_create(4096);
+    TEST_ASSERT_NOT_NULL(sb);
+
+    for (int i = 0; i < 10; i++) {
+        char line[32];
+        int ln = snprintf(line, sizeof(line), "row %d\n", i);
+        scrollback_push(sb, (const uint8_t *)line, (size_t)ln);
+    }
+
+    size_t len = 0;
+    uint8_t *out = scrollback_get_lines(sb, 1, &len);
+    TEST_ASSERT_NOT_NULL(out);
+
+    int nl = 0;
+    for (size_t i = 0; i < len; i++)
+        if (out[i] == '\n') nl++;
+    TEST_ASSERT_EQUAL_INT(1, nl);
+
+    /* Must be the last line "row 9\n" */
+    const char *expected = "row 9\n";
+    TEST_ASSERT_GREATER_OR_EQUAL(strlen(expected), len);
+    TEST_ASSERT_EQUAL_MEMORY(expected, out + len - strlen(expected), strlen(expected));
+
+    free(out);
+    free(sb);
+}
+
+/* Binary payload (including NUL bytes) round-trips through push/get.     */
+void test_push_binary_payload_preserved(void)
+{
+    const size_t CAP = 512;
+    scrollback_t *sb = scrollback_create(CAP);
+    TEST_ASSERT_NOT_NULL(sb);
+
+    uint8_t binary[128];
+    for (int i = 0; i < 128; i++) binary[i] = (uint8_t)i;  /* includes NUL, \n, etc. */
+    scrollback_push(sb, binary, 128);
+
+    size_t len = 0;
+    uint8_t *out = scrollback_get_lines(sb, 100000, &len);
+    TEST_ASSERT_NOT_NULL(out);
+    TEST_ASSERT_EQUAL_size_t(128, len);
+    TEST_ASSERT_EQUAL_MEMORY(binary, out, 128);
+
+    free(out);
+    free(sb);
+}
+
+/* scrollback_format_header: out_sz == 1 (only room for NUL) -> return 0. */
+void test_format_header_out_sz_one_returns_zero(void)
+{
+    char buf[1] = {0};
+    int n = scrollback_format_header(5, buf, 1);
+    TEST_ASSERT_EQUAL_INT(0, n);
+}
+
+/* scrollback_count_newlines: single byte that is '\n'.                   */
+void test_count_newlines_exactly_one_byte_newline(void)
+{
+    uint8_t b = '\n';
+    TEST_ASSERT_EQUAL_INT(1, scrollback_count_newlines(&b, 1));
+}
+
+/* scrollback_count_newlines: single byte that is not '\n'.               */
+void test_count_newlines_exactly_one_byte_not_newline(void)
+{
+    uint8_t b = 'A';
+    TEST_ASSERT_EQUAL_INT(0, scrollback_count_newlines(&b, 1));
+}
+
 /* -- Main ------------------------------------------------------------------ */
 
 int main(void)
@@ -460,6 +643,19 @@ int main(void)
     RUN_TEST(test_format_header_exact_fit);
     RUN_TEST(test_format_header_large_line_count);
     RUN_TEST(test_footer_constant_matches_expected);
+
+    /* NEW tests */
+    RUN_TEST(test_create_zero_capacity_returns_null);
+    RUN_TEST(test_push_null_sb_is_safe);
+    RUN_TEST(test_push_zero_len_is_noop);
+    RUN_TEST(test_get_lines_null_sb_is_safe);
+    RUN_TEST(test_push_cap_minus_one_then_one_byte);
+    RUN_TEST(test_push_double_capacity_retains_last_cap_bytes);
+    RUN_TEST(test_get_lines_exactly_one_line);
+    RUN_TEST(test_push_binary_payload_preserved);
+    RUN_TEST(test_format_header_out_sz_one_returns_zero);
+    RUN_TEST(test_count_newlines_exactly_one_byte_newline);
+    RUN_TEST(test_count_newlines_exactly_one_byte_not_newline);
 
     return UNITY_END();
 }

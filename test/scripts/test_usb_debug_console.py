@@ -248,3 +248,98 @@ def test_makefile_s3zerodebug_maps_to_esp32s3_zero_debug():
     assert m, "ENV_OF_s3zerodebug assignment not found in Makefile"
     assert m.group(1) == "esp32s3_zero_debug", \
         f"ENV_OF_s3zerodebug should be esp32s3_zero_debug, got {m.group(1)!r}"
+
+
+# ---------------------------------------------------------------------------
+# usb_cdc.c: detailed #ifdef structure coverage
+# ---------------------------------------------------------------------------
+
+def test_usb_cdc_c_outer_guard_excludes_both_macros():
+    """The outer #if guard in usb_cdc.c excludes BOTH BRIDGE_LOOPBACK and USB_DEBUG_CONSOLE_ONLY."""
+    src = _read(USB_CDC_C)
+    # Look for the combined guard pattern
+    assert re.search(
+        r'#if\s+!defined\(BRIDGE_LOOPBACK\)\s*&&\s*!defined\(USB_DEBUG_CONSOLE_ONLY\)',
+        src
+    ), "Expected '#if !defined(BRIDGE_LOOPBACK) && !defined(USB_DEBUG_CONSOLE_ONLY)' in usb_cdc.c"
+
+
+def test_usb_cdc_c_else_comment_mentions_both_macros():
+    """The #else branch in usb_cdc.c has a comment naming BRIDGE_LOOPBACK and USB_DEBUG_CONSOLE_ONLY."""
+    src = _read(USB_CDC_C)
+    # The comment on the else line must name both macros
+    else_line = re.search(r'#else\s*/\*.*BRIDGE_LOOPBACK.*USB_DEBUG_CONSOLE_ONLY.*\*/', src)
+    assert else_line, (
+        "Expected '#else /* BRIDGE_LOOPBACK or USB_DEBUG_CONSOLE_ONLY -- stubs ... */' comment"
+    )
+
+
+def test_usb_cdc_c_endif_comment_names_both():
+    """The closing #endif of the guard names both macros in its comment."""
+    src = _read(USB_CDC_C)
+    assert re.search(
+        r'#endif\s*/\*.*BRIDGE_LOOPBACK.*USB_DEBUG_CONSOLE_ONLY.*\*/',
+        src
+    ), "Expected #endif comment naming BRIDGE_LOOPBACK and USB_DEBUG_CONSOLE_ONLY"
+
+
+def test_usb_cdc_c_tinyusb_headers_inside_active_block():
+    """TinyUSB #include directives appear inside the active (non-debug) block only."""
+    src = _read(USB_CDC_C)
+    # The guard line
+    guard_match = re.search(
+        r'#if\s+!defined\(BRIDGE_LOOPBACK\)\s*&&\s*!defined\(USB_DEBUG_CONSOLE_ONLY\)',
+        src
+    )
+    assert guard_match, "Guard line not found"
+    # Find the #else that closes the active block
+    else_match = re.search(r'^#else', src[guard_match.end():], re.MULTILINE)
+    assert else_match, "#else not found after guard"
+    active_block = src[guard_match.end(): guard_match.end() + else_match.start()]
+    assert '#include "tinyusb.h"' in active_block, \
+        'tinyusb.h #include must be inside the active (non-debug) block'
+    assert '#include "tinyusb_cdc_acm.h"' in active_block, \
+        'tinyusb_cdc_acm.h #include must be inside the active block'
+
+
+def test_usb_cdc_c_stubs_return_esp_ok():
+    """The debug-mode stubs for usb_cdc_init and usb_cdc_start_task return ESP_OK."""
+    src = _read(USB_CDC_C)
+    # Find the #else block (stub section)
+    else_match = re.search(r'^#else\b', src, re.MULTILINE)
+    assert else_match, "#else stub section not found in usb_cdc.c"
+    stub_section = src[else_match.end():]
+    # Both stub functions must return ESP_OK
+    assert "return ESP_OK" in stub_section, \
+        "Stub section must return ESP_OK (no memory allocation or task creation in debug mode)"
+
+
+# ---------------------------------------------------------------------------
+# sdkconfig.debug_console.defaults: comment quality checks
+# ---------------------------------------------------------------------------
+
+def test_sdkconfig_overlay_has_meaningful_comments():
+    """sdkconfig.debug_console.defaults contains explanatory comments."""
+    src = _read(SDKCONFIG_OVERLAY)
+    assert src.strip().startswith("#"), \
+        "sdkconfig.debug_console.defaults should start with a comment block"
+    comment_lines = [l for l in src.splitlines() if l.strip().startswith("#")]
+    assert len(comment_lines) >= 3, \
+        "Expected at least 3 comment lines explaining the overlay purpose"
+
+
+def test_sdkconfig_overlay_no_uart_console_conflict():
+    """sdkconfig.debug_console.defaults disables UART console and enables JTAG -- not both active."""
+    src = _read(SDKCONFIG_OVERLAY)
+    # JTAG must be explicitly enabled
+    jtag_enabled = "CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y" in src
+    # UART default console must be explicitly disabled (=n), not enabled (=y)
+    uart_disabled = "CONFIG_ESP_CONSOLE_UART_DEFAULT=n" in src
+    uart_active   = "CONFIG_ESP_CONSOLE_UART_DEFAULT=y" in src
+    # Check only non-comment lines for active settings
+    active_lines = [l.strip() for l in src.splitlines()
+                    if l.strip() and not l.strip().startswith("#")]
+    assert jtag_enabled, "CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y must be set in the overlay"
+    assert uart_disabled, "CONFIG_ESP_CONSOLE_UART_DEFAULT=n must be set to disable UART console"
+    assert "CONFIG_ESP_CONSOLE_UART_DEFAULT=y" not in active_lines, \
+        "CONFIG_ESP_CONSOLE_UART_DEFAULT=y must NOT appear as an active setting -- would conflict with JTAG console"

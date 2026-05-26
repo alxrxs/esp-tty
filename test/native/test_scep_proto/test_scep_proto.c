@@ -1177,6 +1177,187 @@ void test_parse_getcacert_rsa_key_encipherment_cert_is_selected_for_ra_encrypt(v
 }
 
 /* =========================================================================
+ * 18. Additional transaction_id edge cases
+ * ======================================================================= */
+
+/* Single-byte SPKI should produce a valid 64-char hex (SHA-256 of 1 byte) */
+void test_transaction_id_single_byte_spki_produces_valid_hex(void)
+{
+    uint8_t one_byte[1] = { 0xAB };
+    char buf[SCEP_TRANSACTION_ID_HEX_LEN + 1] = {0};
+    int rc = scep_transaction_id(one_byte, 1, buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_INT(0, rc);
+    TEST_ASSERT_EQUAL_size_t(SCEP_TRANSACTION_ID_HEX_LEN, strlen(buf));
+    for (size_t i = 0; i < SCEP_TRANSACTION_ID_HEX_LEN; i++) {
+        char c = buf[i];
+        TEST_ASSERT_TRUE((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+                         (c >= 'A' && c <= 'F'));
+    }
+}
+
+/* 64-byte SPKI should work fine */
+void test_transaction_id_length_64_bytes_spki_produces_valid_hex(void)
+{
+    uint8_t spki[64];
+    for (size_t i = 0; i < sizeof(spki); i++) spki[i] = (uint8_t)i;
+    char buf[SCEP_TRANSACTION_ID_HEX_LEN + 1] = {0};
+    int rc = scep_transaction_id(spki, sizeof(spki), buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_INT(0, rc);
+    TEST_ASSERT_EQUAL_size_t(SCEP_TRANSACTION_ID_HEX_LEN, strlen(buf));
+}
+
+/* Buffer of exactly SCEP_TRANSACTION_ID_HEX_LEN + 1 bytes (tight fit) succeeds */
+void test_transaction_id_exact_capacity_plus_one_succeeds(void)
+{
+    uint8_t dummy[32] = {0};
+    char buf[SCEP_TRANSACTION_ID_HEX_LEN + 1];
+    memset(buf, 0, sizeof(buf));
+    int rc = scep_transaction_id(dummy, sizeof(dummy), buf, SCEP_TRANSACTION_ID_HEX_LEN + 1);
+    TEST_ASSERT_EQUAL_INT(0, rc);
+    TEST_ASSERT_EQUAL_size_t(SCEP_TRANSACTION_ID_HEX_LEN, strlen(buf));
+}
+
+/* =========================================================================
+ * 19. CSR boundary: CN with special ASCII printable chars
+ * ======================================================================= */
+
+/* CN containing hyphens, underscores, dots -- common in device names */
+void test_csr_cn_with_special_chars_ascii_printable(void)
+{
+    mbedtls_pk_context key;
+    gen_keypair_or_fail(&key);
+
+    scep_subject_t subj = { .common_name = "esp-tty_device.001" };
+    uint8_t buf[SCEP_MAX_CSR_DER];
+    size_t  len = sizeof(buf);
+    int rc = scep_build_csr(&subj, &key, "pw",
+                            mbedtls_ctr_drbg_random, &g_ctr_drbg,
+                            buf, &len);
+    if (rc == 0) {
+        /* If success, verify the CN is preserved */
+        const unsigned char *p = buf;
+        X509_REQ *req = d2i_X509_REQ(NULL, &p, (long)len);
+        if (req) {
+            X509_NAME *name = X509_REQ_get_subject_name(req);
+            char cn[64] = {0};
+            X509_NAME_get_text_by_NID(name, NID_commonName, cn, sizeof(cn));
+            TEST_ASSERT_EQUAL_STRING("esp-tty_device.001", cn);
+            X509_REQ_free(req);
+        }
+    }
+    /* Either success or clean failure is acceptable; no crash */
+    mbedtls_pk_free(&key);
+}
+
+/* CN containing spaces (allowed in X.520 UTF8String) -- no crash */
+void test_csr_cn_with_spaces_no_crash(void)
+{
+    mbedtls_pk_context key;
+    gen_keypair_or_fail(&key);
+
+    scep_subject_t subj = { .common_name = "my device 42" };
+    uint8_t buf[SCEP_MAX_CSR_DER];
+    size_t  len = sizeof(buf);
+    int rc = scep_build_csr(&subj, &key, "pw",
+                            mbedtls_ctr_drbg_random, &g_ctr_drbg,
+                            buf, &len);
+    /* Either success or clean failure is acceptable; no crash */
+    (void)rc;
+    mbedtls_pk_free(&key);
+}
+
+/* =========================================================================
+ * 20. Self-signed cert: tiny output buffer returns error
+ * ======================================================================= */
+
+void test_self_signed_cert_tiny_buf_returns_error(void)
+{
+    mbedtls_pk_context key;
+    gen_keypair_or_fail(&key);
+
+    scep_subject_t subj = { .common_name = "tiny-buf" };
+    uint8_t tiny[4];
+    size_t len = sizeof(tiny);
+    int rc = scep_build_self_signed_cert(&subj, &key,
+                                         mbedtls_ctr_drbg_random, &g_ctr_drbg,
+                                         tiny, &len);
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(0, rc, "Tiny output buffer should return error");
+    mbedtls_pk_free(&key);
+}
+
+/* =========================================================================
+ * 21. scep_parse_certrep -- wrong outer tag / all-zeros
+ * ======================================================================= */
+
+/* Outer tag 0x04 (OCTET STRING) instead of 0x30 (SEQUENCE) */
+void test_parse_certrep_wrong_outer_tag_returns_error(void)
+{
+    mbedtls_pk_context key;
+    gen_keypair_or_fail(&key);
+
+    static const uint8_t bad_tag[] = { 0x04, 0x04, 0xDE, 0xAD, 0xBE, 0xEF };
+
+    uint8_t cert_buf[SCEP_MAX_CERT_DER];
+    size_t  cert_len = sizeof(cert_buf);
+    scep_pki_status_t status = SCEP_PKI_STATUS_UNKNOWN;
+    int fail_info = SCEP_FAIL_INFO_NONE;
+
+    int rc = scep_parse_certrep(bad_tag, sizeof(bad_tag),
+                                "0000000000000000000000000000000000000000000000000000000000000000",
+                                &key,
+                                mbedtls_ctr_drbg_random, &g_ctr_drbg,
+                                cert_buf, &cert_len,
+                                &status, &fail_info);
+    TEST_ASSERT_NOT_EQUAL(0, rc);
+    mbedtls_pk_free(&key);
+}
+
+/* All-zeros buffer (structurally invalid) */
+void test_parse_certrep_all_zeros_returns_error(void)
+{
+    mbedtls_pk_context key;
+    gen_keypair_or_fail(&key);
+
+    static const uint8_t zeros[64] = {0};
+
+    uint8_t cert_buf[SCEP_MAX_CERT_DER];
+    size_t  cert_len = sizeof(cert_buf);
+    scep_pki_status_t status = SCEP_PKI_STATUS_UNKNOWN;
+    int fail_info = SCEP_FAIL_INFO_NONE;
+
+    int rc = scep_parse_certrep(zeros, sizeof(zeros),
+                                "0000000000000000000000000000000000000000000000000000000000000000",
+                                &key,
+                                mbedtls_ctr_drbg_random, &g_ctr_drbg,
+                                cert_buf, &cert_len,
+                                &status, &fail_info);
+    TEST_ASSERT_NOT_EQUAL(0, rc);
+    mbedtls_pk_free(&key);
+}
+
+/* =========================================================================
+ * 22. scep_parse_getcacert -- single byte / empty SEQUENCE
+ * ======================================================================= */
+
+/* Single-byte input is too short to be any useful ASN.1 ContentInfo */
+void test_parse_getcacert_single_byte_returns_error(void)
+{
+    static const uint8_t one[] = { 0x30 };
+    scep_cacert_bundle_t bundle;
+    int rc = scep_parse_getcacert(one, 1, &bundle);
+    TEST_ASSERT_NOT_EQUAL(0, rc);
+}
+
+/* An empty SEQUENCE (30 00) -- valid DER but not a ContentInfo */
+void test_parse_getcacert_empty_sequence_returns_error(void)
+{
+    static const uint8_t empty_seq[] = { 0x30, 0x00 };
+    scep_cacert_bundle_t bundle;
+    int rc = scep_parse_getcacert(empty_seq, sizeof(empty_seq), &bundle);
+    TEST_ASSERT_NOT_EQUAL(0, rc);
+}
+
+/* =========================================================================
  * Main
  * ======================================================================= */
 
@@ -1259,6 +1440,18 @@ int main(void)
 
     /* scep_parse_getcacert RSA key_encipherment selection */
     RUN_TEST(test_parse_getcacert_rsa_key_encipherment_cert_is_selected_for_ra_encrypt);
+
+    /* Additional scep_proto edge cases */
+    RUN_TEST(test_transaction_id_single_byte_spki_produces_valid_hex);
+    RUN_TEST(test_transaction_id_length_64_bytes_spki_produces_valid_hex);
+    RUN_TEST(test_transaction_id_exact_capacity_plus_one_succeeds);
+    RUN_TEST(test_csr_cn_with_special_chars_ascii_printable);
+    RUN_TEST(test_csr_cn_with_spaces_no_crash);
+    RUN_TEST(test_self_signed_cert_tiny_buf_returns_error);
+    RUN_TEST(test_parse_certrep_wrong_outer_tag_returns_error);
+    RUN_TEST(test_parse_certrep_all_zeros_returns_error);
+    RUN_TEST(test_parse_getcacert_single_byte_returns_error);
+    RUN_TEST(test_parse_getcacert_empty_sequence_returns_error);
 
     /* Cleanup global RNG */
     if (g_rng_init) {

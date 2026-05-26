@@ -398,6 +398,63 @@ void test_modebp_ntp_required_unsynced_one_attempt_remaining(void)
     TEST_ASSERT_EQUAL_INT(WIFI_DECISION_BOOTSTRAP_NTP_ONLY, d);
 }
 
+/* ==========================================================================
+ * Additional boundary / regression cases
+ * ========================================================================== */
+
+/* retry_max == 1, zero attempts: still ENTERPRISE (0 < 1) */
+void test_retry_max_one_zero_attempts_returns_enterprise(void)
+{
+    wifi_decision_t d = decide(true, false, true, false, 0, 1);
+    TEST_ASSERT_EQUAL_INT(WIFI_DECISION_ENTERPRISE, d);
+}
+
+/* retry_max == INT_MAX, huge attempts (but < INT_MAX) -> still ENTERPRISE */
+void test_retry_max_intmax_large_attempts_returns_enterprise(void)
+{
+    wifi_decision_t d = decide(true, false, true, false, 1000000, 0x7FFFFFFF);
+    TEST_ASSERT_EQUAL_INT(WIFI_DECISION_ENTERPRISE, d);
+}
+
+/* cert_expired=true beats retry exhaustion (expired checked first) */
+void test_expired_cert_at_max_still_bootstrap_full(void)
+{
+    wifi_decision_t d = decide(true, true, true, false, 5, 5);
+    TEST_ASSERT_EQUAL_INT(WIFI_DECISION_BOOTSTRAP_FULL, d);
+}
+
+/* no_ntp_mode=true beats retry exhaustion */
+void test_no_ntp_mode_beats_retry_exhaustion(void)
+{
+    wifi_decision_t d = wifi_decide_next_step(
+        true, false, true, false, true, 5, 5);
+    TEST_ASSERT_EQUAL_INT(WIFI_DECISION_BOOTSTRAP_FULL, d);
+}
+
+/* no_ntp_mode=false, cert_present=false, retry_max=0 -> still FULL (no cert) */
+void test_no_cert_unlimited_retries_returns_bootstrap_full(void)
+{
+    wifi_decision_t d = decide(false, false, false, false, 0, 0);
+    TEST_ASSERT_EQUAL_INT(WIFI_DECISION_BOOTSTRAP_FULL, d);
+}
+
+/* cert valid, ntp_req=true, ntp_synced=true, attempts=max-1 -> ENTERPRISE */
+void test_cert_valid_ntp_synced_one_below_max_returns_enterprise(void)
+{
+    wifi_decision_t d = decide(true, false, true, true, 4, 5);
+    TEST_ASSERT_EQUAL_INT(WIFI_DECISION_ENTERPRISE, d);
+}
+
+/* Rule ordering: expired (rule 2) fires before retry-budget (rule 3) */
+void test_rule_ordering_expired_before_retry(void)
+{
+    /* Attempts=10 out of max=3 (budget exceeded), but cert_expired=true.
+     * Both rule 2 and rule 3 lead to BOOTSTRAP_FULL, but rule 2 must fire first.
+     * Since outcomes are the same, confirm the result is correct regardless. */
+    wifi_decision_t d = decide(true, true, true, false, 10, 3);
+    TEST_ASSERT_EQUAL_INT(WIFI_DECISION_BOOTSTRAP_FULL, d);
+}
+
 /* -------------------------------------------------------------------------- */
 int main(void)
 {
@@ -424,7 +481,7 @@ int main(void)
     RUN_TEST(test_no_ntp_mode_no_cert_bootstrap_full);
     RUN_TEST(test_no_ntp_mode_expired_cert_bootstrap_full);
     RUN_TEST(test_no_ntp_mode_with_ntp_req_still_bootstrap_full);
-    /* New edge-case tests */
+    /* Edge-case tests */
     RUN_TEST(test_enterprise_attempts_negative_is_below_max);
     RUN_TEST(test_enterprise_attempts_negative_unlimited_retries);
     RUN_TEST(test_enterprise_at_max_overrides_ntp_only);
@@ -441,5 +498,13 @@ int main(void)
     RUN_TEST(test_modebp_no_ntp_mode_overrides_embedded_cert);
     RUN_TEST(test_modebp_first_boot_unlimited_retries_returns_enterprise);
     RUN_TEST(test_modebp_ntp_required_unsynced_one_attempt_remaining);
+    /* Additional boundary / regression cases */
+    RUN_TEST(test_retry_max_one_zero_attempts_returns_enterprise);
+    RUN_TEST(test_retry_max_intmax_large_attempts_returns_enterprise);
+    RUN_TEST(test_expired_cert_at_max_still_bootstrap_full);
+    RUN_TEST(test_no_ntp_mode_beats_retry_exhaustion);
+    RUN_TEST(test_no_cert_unlimited_retries_returns_bootstrap_full);
+    RUN_TEST(test_cert_valid_ntp_synced_one_below_max_returns_enterprise);
+    RUN_TEST(test_rule_ordering_expired_before_retry);
     return UNITY_END();
 }

@@ -1881,3 +1881,217 @@ class TestPendingResponseAdditional:
         from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
         assert isinstance(ra_enc_cert.public_key(), RSAPublicKey), \
             "RA encryption cert must have RSA key (SCEP KTRI recipient requirement)"
+
+
+# ── Additional E2E: pathological NDES responses ───────────────────────────────
+
+
+class FakeNdesCaOnlyEC:
+    """
+    Pathological NDES: responds with a single EC CA cert (no RA certs).
+    Used to verify GetCACert single-cert aliasing logic.
+    """
+    def __init__(self):
+        self._ca_key = ec.generate_private_key(ec.SECP256R1())
+        self._ca_cert = _self_signed("EC-Only-CA", self._ca_key, days=365, is_ca=True)
+
+    def respond_get_cacert(self) -> bytes:
+        return serialize_certificates([self._ca_cert], Encoding.DER)
+
+    @property
+    def ca_cert(self):
+        return self._ca_cert
+
+
+class TestPathologicalNdesResponses:
+    """Test GetCACert parser with unusual / malformed NDES responses."""
+
+    def test_zero_certs_bundle_raises(self):
+        """A GetCACert response containing zero certs raises ValueError."""
+        # Build a degenerate SignedData with NO certs inside.
+        # We produce a minimal PKCS7 with no content cert list.
+        client = SCEPClient(cn="zero-ca-test", challenge_password=CHALLENGE_PW)
+        client.generate_key()
+
+        # The cryptography library's serialize_certificates doesn't support
+        # an empty list, so we craft a minimal degenerate PKCS7 by hand.
+        # A 0-cert response is invalid SCEP (NDES always sends >= 1 cert).
+        # We simulate parse_getcacert receiving a PKCS7 with an empty SET.
+        # The simplest way: send random bytes that look like a SEQUENCE but
+        # decode to 0 certs.
+        with pytest.raises(Exception):
+            client.parse_getcacert(b"\x30\x00")  # Empty SEQUENCE → no certs
+
+    def test_only_ec_ca_cert_single_slot_aliasing(self):
+        """Single EC CA cert: all three slots alias the same cert."""
+        ndes = FakeNdesCaOnlyEC()
+        client = SCEPClient(cn="ec-ca-only", challenge_password=CHALLENGE_PW)
+        client.generate_key()
+
+        bundle = client.parse_getcacert(ndes.respond_get_cacert())
+        assert bundle["single_cert"] is True
+        assert bundle["ca_cert"] is bundle["ra_sign_cert"]
+        assert bundle["ca_cert"] is bundle["ra_enc_cert"]
+
+        cn = bundle["ca_cert"].subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+        assert cn[0].value == "EC-Only-CA"
+
+    def test_two_cert_bundle_uses_first_as_ca_slot(self, ca):
+        """A 2-cert GetCACert response: parse_getcacert assigns correctly."""
+        # Serialize 2 certs: CA + RA-Sign (no RA-Enc)
+        two_cert_der = serialize_certificates(
+            [ca._ca_cert, ca._ra_sign_cert], Encoding.DER
+        )
+        client = SCEPClient(cn="two-cert-test", challenge_password=CHALLENGE_PW)
+        client.generate_key()
+        bundle = client.parse_getcacert(two_cert_der)
+
+        # parse_getcacert considers len >= 3 as "3-cert bundle"; 2 falls through
+        # to the else branch with certs[2] if len >= 3 else certs[1]
+        assert bundle["ca_cert"] is not None
+        assert bundle["ra_sign_cert"] is not None
+        # ra_enc_cert falls back to certs[1] (= ra_sign_cert in our 2-cert bundle)
+        assert bundle["ra_enc_cert"] is not None
+
+    def test_transaction_id_is_sha256_of_spki(self):
+        """TransactionID must be SHA-256 of SPKI DER (RFC 8894 §3.1)."""
+        client = SCEPClient(cn="txid-verify", challenge_password=CHALLENGE_PW)
+        client.generate_key()
+
+        spki_der = client._private_key.public_key().public_bytes(
+            Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+        expected_txid = hashlib.sha256(spki_der).hexdigest()
+        assert client.transaction_id == expected_txid, (
+            "transactionID must be hex(SHA-256(SPKI DER))"
+        )
+
+    def test_sender_nonce_is_16_bytes(self):
+        """senderNonce is exactly 16 bytes (random)."""
+        client = SCEPClient(cn="nonce-len", challenge_password=CHALLENGE_PW)
+        client.generate_key()
+        assert len(client._sender_nonce) == 16, (
+            f"senderNonce must be 16 bytes, got {len(client._sender_nonce)}"
+        )
+
+    def test_message_type_pkcsreq_is_19(self, ca):
+        """PKCSReq pkiMessage must carry messageType=19."""
+        client = SCEPClient(cn="msgtype-test", challenge_password=CHALLENGE_PW)
+        client.generate_key()
+        bundle = client.parse_getcacert(ca.respond_get_cacert())
+        pkcsreq_der = client.build_pkcsreq(bundle["ra_enc_cert"])
+
+        # Parse out the messageType signed attribute
+        _, _, signed_attrs_raw = _parse_signed_data_der(pkcsreq_der)
+        attrs = _extract_signed_attrs(signed_attrs_raw)
+        assert attrs.get(_OID_MESSAGE_TYPE) == _MSG_TYPE_PKCSREQ, (
+            f"PKCSReq messageType should be '19', got {attrs.get(_OID_MESSAGE_TYPE)!r}"
+        )
+
+    def test_message_type_certrep_is_3(self, ca):
+        """CertRep pkiMessage must carry messageType=3."""
+        client = SCEPClient(cn="certrep-msgtype", challenge_password=CHALLENGE_PW)
+        client.generate_key()
+        bundle = client.parse_getcacert(ca.respond_get_cacert())
+        pkcsreq = client.build_pkcsreq(bundle["ra_enc_cert"])
+        certrep = ca.respond_pki_operation(pkcsreq)
+
+        _, _, signed_attrs_raw = _parse_signed_data_der(certrep)
+        attrs = _extract_signed_attrs(signed_attrs_raw)
+        assert attrs.get(_OID_MESSAGE_TYPE) == _MSG_TYPE_CERTREP, (
+            f"CertRep messageType should be '3', got {attrs.get(_OID_MESSAGE_TYPE)!r}"
+        )
+
+    def test_certrep_recipient_nonce_matches_sender_nonce(self, ca):
+        """CertRep recipientNonce must echo the client's senderNonce."""
+        client = SCEPClient(cn="nonce-echo-test", challenge_password=CHALLENGE_PW)
+        client.generate_key()
+        bundle = client.parse_getcacert(ca.respond_get_cacert())
+        pkcsreq = client.build_pkcsreq(bundle["ra_enc_cert"])
+        certrep = ca.respond_pki_operation(pkcsreq)
+
+        _, _, signed_attrs_raw = _parse_signed_data_der(certrep)
+        attrs = _extract_signed_attrs(signed_attrs_raw)
+        recipient_nonce = attrs.get(_OID_RECIPIENT_NONCE, b"")
+        assert recipient_nonce == client._sender_nonce, (
+            "CertRep recipientNonce must echo the PKCSReq senderNonce"
+        )
+
+    def test_challenge_password_oid_in_csr(self, ca):
+        """CSR built by SCEPClient carries challengePassword OID 1.2.840.113549.1.9.7."""
+        client = SCEPClient(cn="csr-attr-test", challenge_password=CHALLENGE_PW)
+        client.generate_key()
+        csr = client._build_csr()
+
+        OID_CHALLENGE_PW_OBJ = x509.ObjectIdentifier(_OID_CHALLENGE_PW)
+        found = False
+        for attr in csr.attributes:
+            if attr.oid == OID_CHALLENGE_PW_OBJ:
+                found = True
+                break
+        assert found, "CSR must contain challengePassword attribute (OID 1.2.840.113549.1.9.7)"
+
+    def test_csr_key_type_is_rsa(self):
+        """SCEPClient generates an RSA key (not EC) for the CSR."""
+        from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
+        client = SCEPClient(cn="key-type-test", challenge_password=CHALLENGE_PW)
+        client.generate_key()
+        assert isinstance(client._private_key.public_key(), RSAPublicKey), \
+            "SCEPClient must use RSA (not EC) for NDES interoperability"
+
+    def test_csr_key_size_is_2048(self):
+        """SCEPClient key is RSA-2048 (matches firmware scep_generate_keypair)."""
+        client = SCEPClient(cn="keysize-test", challenge_password=CHALLENGE_PW)
+        client.generate_key()
+        assert client._private_key.key_size == 2048, (
+            f"Key size must be 2048, got {client._private_key.key_size}"
+        )
+
+    def test_success_certrep_carries_pki_status_0(self, ca):
+        """SUCCESS CertRep carries pkiStatus='0'."""
+        client = SCEPClient(cn="status-0-test", challenge_password=CHALLENGE_PW)
+        client.generate_key()
+        bundle = client.parse_getcacert(ca.respond_get_cacert())
+        pkcsreq = client.build_pkcsreq(bundle["ra_enc_cert"])
+        certrep = ca.respond_pki_operation(pkcsreq)
+
+        _, _, signed_attrs_raw = _parse_signed_data_der(certrep)
+        attrs = _extract_signed_attrs(signed_attrs_raw)
+        assert attrs.get(_OID_PKI_STATUS) == _PKI_STATUS_SUCCESS, (
+            f"SUCCESS CertRep pkiStatus must be '0', got {attrs.get(_OID_PKI_STATUS)!r}"
+        )
+
+    def test_failure_certrep_carries_pki_status_2(self, ca):
+        """FAILURE CertRep carries pkiStatus='2'."""
+        client = SCEPClient(cn="status-2-test", challenge_password=CHALLENGE_PW)
+        client.generate_key()
+        bundle = client.parse_getcacert(ca.respond_get_cacert())
+        pkcsreq = client.build_pkcsreq(bundle["ra_enc_cert"])
+        certrep = ca.respond_pki_operation(pkcsreq, force_fail_info=_FAIL_BAD_REQUEST)
+
+        _, _, signed_attrs_raw = _parse_signed_data_der(certrep)
+        attrs = _extract_signed_attrs(signed_attrs_raw)
+        assert attrs.get(_OID_PKI_STATUS) == _PKI_STATUS_FAILURE, (
+            f"FAILURE CertRep pkiStatus must be '2', got {attrs.get(_OID_PKI_STATUS)!r}"
+        )
+
+    def test_ca_cert_has_basic_constraints_ca_true(self, ca):
+        """FakeNdesCA CA cert has BasicConstraints CA=True."""
+        ca_cert = ca.ca_cert
+        try:
+            bc = ca_cert.extensions.get_extension_for_class(
+                x509.BasicConstraints
+            ).value
+            assert bc.ca is True, "CA cert must have BasicConstraints CA=True"
+        except x509.ExtensionNotFound:
+            pytest.fail("CA cert missing BasicConstraints extension")
+
+    def test_two_different_clients_have_different_transaction_ids(self):
+        """Two independent clients generate different transactionIDs."""
+        c1 = SCEPClient(cn="dev-1", challenge_password=CHALLENGE_PW)
+        c2 = SCEPClient(cn="dev-2", challenge_password=CHALLENGE_PW)
+        c1.generate_key()
+        c2.generate_key()
+        assert c1.transaction_id != c2.transaction_id, (
+            "Different RSA-2048 keys must yield different transactionIDs"
+        )

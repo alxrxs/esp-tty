@@ -309,6 +309,131 @@ void test_bridge_stop_observed_before_next_read(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* NEW tests                                                           */
+
+/* bridge_pump terminates on read returning 0 (EOF), not just negative. */
+
+static int eof_read_cb(void *ctx, uint8_t *buf, size_t cap)
+{
+    (void)buf; (void)cap;
+    int *calls = (int *)ctx;
+    (*calls)++;
+    /* Return 0 immediately: EOF */
+    return 0;
+}
+
+static int sink_write_cb(void *ctx, const uint8_t *buf, size_t len)
+{
+    (void)ctx; (void)buf;
+    return (int)len;
+}
+
+void test_bridge_terminates_on_read_eof(void)
+{
+    int read_calls = 0;
+    volatile bool stop = false;
+
+    bridge_pump(eof_read_cb,  &read_calls,
+                sink_write_cb, NULL,
+                &stop);
+
+    /* Must call read exactly once, get 0, and exit */
+    TEST_ASSERT_EQUAL_INT(1, read_calls);
+    TEST_ASSERT_FALSE(stop);  /* stop flag was not set by us */
+}
+
+/* Pre-set stop flag: bridge_pump must not read or write at all. */
+void test_bridge_stop_flag_preset_skips_all_io(void)
+{
+    counted_read_ctx_t rctx = {.call_count = 0, .bytes_per_call = 4};
+    fail_write_ctx_t   wctx = {.call_count = 0, .fail_on_call = 1};
+    volatile bool stop = true;
+
+    bridge_pump(counted_read_cb, &rctx,
+                fail_write_cb,   &wctx,
+                &stop);
+
+    TEST_ASSERT_EQUAL_INT(0, rctx.call_count);
+    TEST_ASSERT_EQUAL_INT(0, wctx.call_count);
+}
+
+/* Write returns exactly 0 (not -1): bridge_pump must also exit. */
+static int zero_write_cb(void *ctx, const uint8_t *buf, size_t len)
+{
+    (void)ctx; (void)buf; (void)len;
+    return 0;
+}
+
+void test_bridge_terminates_on_write_zero(void)
+{
+    counted_read_ctx_t rctx = {.call_count = 0, .bytes_per_call = 4};
+    volatile bool stop = false;
+
+    bridge_pump(counted_read_cb, &rctx,
+                zero_write_cb,   NULL,
+                &stop);
+
+    /* One read, one write (returns 0), then bridge exits */
+    TEST_ASSERT_EQUAL_INT(1, rctx.call_count);
+}
+
+/* Single-byte pump: reader returns 1 byte, writer accepts it, then
+ * reader returns EOF.  Verify byte value is forwarded unchanged.    */
+static uint8_t s_forwarded_byte = 0;
+
+static int one_byte_read(void *ctx, uint8_t *buf, size_t cap)
+{
+    (void)cap;
+    int *calls = (int *)ctx;
+    if (*calls == 0) {
+        buf[0] = 0xCA;
+        (*calls)++;
+        return 1;
+    }
+    return 0;
+}
+
+static int capture_write(void *ctx, const uint8_t *buf, size_t len)
+{
+    (void)ctx;
+    if (len > 0) s_forwarded_byte = buf[0];
+    return (int)len;
+}
+
+void test_bridge_forwards_single_byte_exact_value(void)
+{
+    int calls = 0;
+    volatile bool stop = false;
+    s_forwarded_byte = 0;
+
+    bridge_pump(one_byte_read, &calls,
+                capture_write, NULL,
+                &stop);
+
+    TEST_ASSERT_EQUAL_UINT8(0xCA, s_forwarded_byte);
+}
+
+/* Read error (negative return) must terminate without invoking write. */
+static int error_read_cb(void *ctx, uint8_t *buf, size_t cap)
+{
+    (void)ctx; (void)buf; (void)cap;
+    return -1;
+}
+
+void test_bridge_terminates_on_read_error(void)
+{
+    fail_write_ctx_t wctx = {.call_count = 0, .fail_on_call = 99};
+    volatile bool stop = false;
+
+    bridge_pump(error_read_cb, NULL,
+                fail_write_cb, &wctx,
+                &stop);
+
+    /* Read returned -1 immediately; write must never have been called */
+    TEST_ASSERT_EQUAL_INT(0, wctx.call_count);
+}
+
+/* ------------------------------------------------------------------ */
 int main(void)
 {
     UNITY_BEGIN();
@@ -317,5 +442,11 @@ int main(void)
     RUN_TEST(test_bridge_full_duplex_no_drops);
     RUN_TEST(test_bridge_terminates_on_write_error);
     RUN_TEST(test_bridge_stop_observed_before_next_read);
+    /* NEW tests */
+    RUN_TEST(test_bridge_terminates_on_read_eof);
+    RUN_TEST(test_bridge_stop_flag_preset_skips_all_io);
+    RUN_TEST(test_bridge_terminates_on_write_zero);
+    RUN_TEST(test_bridge_forwards_single_byte_exact_value);
+    RUN_TEST(test_bridge_terminates_on_read_error);
     return UNITY_END();
 }

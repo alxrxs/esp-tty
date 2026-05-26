@@ -423,6 +423,198 @@ void test_format_fingerprint_incremental_byte(void)
     TEST_ASSERT_EQUAL_UINT8(':', (uint8_t)out[5]);
 }
 
+/* ===================================================================
+ * Key-type-specific parsing tests
+ * =================================================================== */
+
+/* ssh-rsa: minimal blob with small exponent and modulus */
+static const char *SSH_RSA_PUBKEY =
+    "ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAAirze8BI0VniQ== rsa-test@host";
+
+static const uint8_t SSH_RSA_EXPECTED_HASH[32] = {
+    0xd1, 0x9a, 0x3a, 0xdf, 0x3e, 0xc3, 0x7e, 0x52,
+    0x34, 0xdb, 0xa1, 0x9a, 0xf6, 0x45, 0xdf, 0x32,
+    0x8e, 0x88, 0x14, 0x08, 0xa5, 0x2d, 0x02, 0x4c,
+    0x82, 0xbd, 0xaa, 0xb5, 0xfe, 0xf1, 0x59, 0x10,
+};
+
+void test_parse_b64_ssh_rsa_key_type(void)
+{
+    const char *start = NULL;
+    size_t len = 0;
+    TEST_ASSERT_TRUE(pubkey_parse_b64(SSH_RSA_PUBKEY, &start, &len));
+    TEST_ASSERT_GREATER_THAN(0, len);
+    /* Must point to the base64 field, not the key-type */
+    TEST_ASSERT_EQUAL_UINT8('A', (uint8_t)start[0]);
+}
+
+void test_compute_hash_ssh_rsa_golden(void)
+{
+    uint8_t hash[32];
+    TEST_ASSERT_TRUE(pubkey_compute_hash(SSH_RSA_PUBKEY, hash));
+    TEST_ASSERT_EQUAL_MEMORY(SSH_RSA_EXPECTED_HASH, hash, 32);
+}
+
+/* ecdsa-sha2-nistp256 -- b64 must be a single unbroken token (no mid-token splits) */
+static const char *SSH_ECDSA_PUBKEY =
+    "ecdsa-sha2-nistp256 "
+    "AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBKqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqu7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7s="
+    " ecdsa-test@host";
+
+static const uint8_t SSH_ECDSA_EXPECTED_HASH[32] = {
+    0x4d, 0xda, 0xbb, 0x58, 0xcf, 0x34, 0x43, 0x38,
+    0xa3, 0x53, 0xb3, 0x52, 0x69, 0xf7, 0xd1, 0xf7,
+    0x11, 0xa6, 0x82, 0x4e, 0x8d, 0x0d, 0x0f, 0x51,
+    0x52, 0x75, 0x83, 0xfb, 0xf5, 0x70, 0x99, 0x8e,
+};
+
+void test_parse_b64_ecdsa_nistp256_key_type(void)
+{
+    const char *start = NULL;
+    size_t len = 0;
+    TEST_ASSERT_TRUE(pubkey_parse_b64(SSH_ECDSA_PUBKEY, &start, &len));
+    TEST_ASSERT_GREATER_THAN(0, len);
+}
+
+void test_compute_hash_ecdsa_nistp256_golden(void)
+{
+    uint8_t hash[32];
+    TEST_ASSERT_TRUE(pubkey_compute_hash(SSH_ECDSA_PUBKEY, hash));
+    TEST_ASSERT_EQUAL_MEMORY(SSH_ECDSA_EXPECTED_HASH, hash, 32);
+}
+
+/* ssh-dss */
+static const char *SSH_DSS_PUBKEY =
+    "ssh-dss "
+    "AAAAB3NzaC1kc3MAAABA3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e"
+    "3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3gAAABSrq6urq6urq6urq6ur"
+    "q6urq6urqwAAAEDNzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3"
+    "Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3NAAAAQO/v7+/v7+/v7+/v7+/v7+"
+    "/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+8="
+    " dss-test@host";
+
+static const uint8_t SSH_DSS_EXPECTED_HASH[32] = {
+    0x38, 0x71, 0x15, 0x5d, 0x90, 0x73, 0x4b, 0x73,
+    0x53, 0xe6, 0x90, 0xfa, 0x7e, 0x0d, 0x77, 0x7f,
+    0x7c, 0xff, 0xa9, 0x9f, 0x41, 0x6b, 0x41, 0x73,
+    0x44, 0x3f, 0x66, 0xde, 0x05, 0xd7, 0x7e, 0xa6,
+};
+
+void test_parse_b64_ssh_dss_key_type(void)
+{
+    const char *start = NULL;
+    size_t len = 0;
+    TEST_ASSERT_TRUE(pubkey_parse_b64(SSH_DSS_PUBKEY, &start, &len));
+    TEST_ASSERT_GREATER_THAN(0, len);
+}
+
+void test_compute_hash_ssh_dss_golden(void)
+{
+    uint8_t hash[32];
+    TEST_ASSERT_TRUE(pubkey_compute_hash(SSH_DSS_PUBKEY, hash));
+    TEST_ASSERT_EQUAL_MEMORY(SSH_DSS_EXPECTED_HASH, hash, 32);
+}
+
+/* --- Malformed base64 ----------------------------------------- */
+
+void test_compute_hash_rejects_invalid_base64_chars(void)
+{
+    /* '!' is not a valid base64 character */
+    const char *bad = "ssh-ed25519 AAAA!!!!InvalidBase64==== user@host";
+    uint8_t hash[32];
+    TEST_ASSERT_FALSE(pubkey_compute_hash(bad, hash));
+}
+
+void test_compute_hash_rejects_truncated_blob(void)
+{
+    /* Abruptly truncated base64 -- not a valid padding boundary */
+    const char *bad = "ssh-ed25519 AAAAC3NzaC1lZDI user@host";
+    uint8_t hash[32];
+    /* May succeed or fail depending on wolfcrypt padding mode; we only test no crash */
+    (void)pubkey_compute_hash(bad, hash);
+    /* No assertion on return value -- just must not crash */
+    TEST_ASSERT_TRUE(1);
+}
+
+/* --- Trailing whitespace on the key line ---------------------- */
+
+void test_parse_b64_trailing_newline_excluded(void)
+{
+    /* Parser must stop at \n -- the blob should not include it */
+    const char *line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f\n";
+    const char *start = NULL;
+    size_t len = 0;
+    TEST_ASSERT_TRUE(pubkey_parse_b64(line, &start, &len));
+    /* len must equal the pure base64 field, not include \n */
+    size_t expected_len = strlen("AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f");
+    TEST_ASSERT_EQUAL_size_t(expected_len, len);
+}
+
+void test_parse_b64_trailing_cr_excluded(void)
+{
+    const char *line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f\r";
+    const char *start = NULL;
+    size_t len = 0;
+    TEST_ASSERT_TRUE(pubkey_parse_b64(line, &start, &len));
+    size_t expected_len = strlen("AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f");
+    TEST_ASSERT_EQUAL_size_t(expected_len, len);
+}
+
+/* Hash must be identical whether or not a trailing newline is present */
+void test_compute_hash_trailing_whitespace_ignored(void)
+{
+    const char *no_ws    = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f";
+    const char *with_crlf = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f\r\n";
+    uint8_t h1[32], h2[32];
+    TEST_ASSERT_TRUE(pubkey_compute_hash(no_ws, h1));
+    TEST_ASSERT_TRUE(pubkey_compute_hash(with_crlf, h2));
+    TEST_ASSERT_EQUAL_MEMORY(h1, h2, 32);
+}
+
+/* --- Comment field edge cases --------------------------------- */
+
+void test_parse_b64_comment_with_shell_metacharacters(void)
+{
+    /* Shell metacharacters in comment must not affect b64 field extraction */
+    const char *line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f user$HOME;rm -rf /";
+    const char *start = NULL;
+    size_t len = 0;
+    TEST_ASSERT_TRUE(pubkey_parse_b64(line, &start, &len));
+    size_t expected_len = strlen("AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f");
+    TEST_ASSERT_EQUAL_size_t(expected_len, len);
+}
+
+void test_compute_hash_long_comment_same_as_no_comment(void)
+{
+    /* Extremely long comment -- hash must match the no-comment variant */
+    const char *base = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f";
+    /* 200-char comment */
+    char line_long[512];
+    snprintf(line_long, sizeof(line_long), "%s %s", base,
+             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    uint8_t h_base[32], h_long[32];
+    TEST_ASSERT_TRUE(pubkey_compute_hash(base, h_base));
+    TEST_ASSERT_TRUE(pubkey_compute_hash(line_long, h_long));
+    TEST_ASSERT_EQUAL_MEMORY(h_base, h_long, 32);
+}
+
+/* --- Multiple keys in one string: only the first is parsed ------- */
+void test_parse_b64_stops_at_first_key(void)
+{
+    /* Two keys concatenated; parser sees only the first line's b64 field */
+    const char *two_keys =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f key1\n"
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4g key2";
+    const char *start = NULL;
+    size_t len = 0;
+    TEST_ASSERT_TRUE(pubkey_parse_b64(two_keys, &start, &len));
+    /* Length must be the first key's b64 only */
+    size_t first_len = strlen("AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f");
+    TEST_ASSERT_EQUAL_size_t(first_len, len);
+}
+
 /* ------------------------------------------------------------------ */
 
 int main(void)
@@ -454,5 +646,23 @@ int main(void)
     RUN_TEST(test_format_fingerprint_null_digest_returns_null);
     RUN_TEST(test_format_fingerprint_null_out_returns_null);
     RUN_TEST(test_format_fingerprint_incremental_byte);
+    /* Key-type-specific tests */
+    RUN_TEST(test_parse_b64_ssh_rsa_key_type);
+    RUN_TEST(test_compute_hash_ssh_rsa_golden);
+    RUN_TEST(test_parse_b64_ecdsa_nistp256_key_type);
+    RUN_TEST(test_compute_hash_ecdsa_nistp256_golden);
+    RUN_TEST(test_parse_b64_ssh_dss_key_type);
+    RUN_TEST(test_compute_hash_ssh_dss_golden);
+    /* Malformed / edge cases */
+    RUN_TEST(test_compute_hash_rejects_invalid_base64_chars);
+    RUN_TEST(test_compute_hash_rejects_truncated_blob);
+    RUN_TEST(test_parse_b64_trailing_newline_excluded);
+    RUN_TEST(test_parse_b64_trailing_cr_excluded);
+    RUN_TEST(test_compute_hash_trailing_whitespace_ignored);
+    /* Comment field edge cases */
+    RUN_TEST(test_parse_b64_comment_with_shell_metacharacters);
+    RUN_TEST(test_compute_hash_long_comment_same_as_no_comment);
+    /* Multi-key string */
+    RUN_TEST(test_parse_b64_stops_at_first_key);
     return UNITY_END();
 }

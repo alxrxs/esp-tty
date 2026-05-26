@@ -436,3 +436,346 @@ def test_run_ota_protocol_no_result_byte_returns_5():
         stdout=_Sink(),
     )
     assert rc == 5
+
+
+# ---- Handshake failure injection tests ---------------------------------------
+
+def _make_device_hello():
+    """Return (valid_hello_bytes, dev_priv) for a freshly generated device keypair."""
+    dev_priv = X25519PrivateKey.generate()
+    dev_pub = dev_priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    return bytes([0x02]) + dev_pub, dev_priv
+
+
+def _run_with_static_device(hello_bytes, result_byte=b"\x00", firmware=b"x" * 64):
+    """
+    Drive run_ota_protocol with a fully static 'device': sends hello_bytes
+    then result_byte.  Swallows all client writes.  Returns exit code.
+    """
+    import queue as _q
+    q = _q.SimpleQueue()
+    q.put(hello_bytes)
+    q.put(result_byte)
+
+    buf = bytearray()
+
+    def sendall(data):
+        pass
+
+    def recv_exact(n):
+        while len(buf) < n:
+            chunk = q.get(timeout=2)
+            buf.extend(chunk)
+        out = bytes(buf[:n])
+        del buf[:n]
+        return out
+
+    return ota_send.run_ota_protocol(
+        sendall_fn=sendall,
+        recv_exact_fn=recv_exact,
+        firmware=firmware,
+        stderr=_Sink(),
+        stdout=_Sink(),
+    )
+
+
+def test_malformed_hello_short_version_byte_only():
+    """Premature EOF after version byte (hello too short) must raise from recv_exact."""
+    # Send only 10 bytes instead of 33; recv_exact will block and then raise.
+    import queue as _q
+    q = _q.SimpleQueue()
+    q.put(bytes(10))  # Only 10 bytes -- can't read 33
+
+    buf = bytearray()
+    calls = [0]
+
+    def sendall(data):
+        pass
+
+    def recv_exact(n):
+        calls[0] += 1
+        while len(buf) < n:
+            try:
+                chunk = q.get(timeout=0.1)
+                buf.extend(chunk)
+            except _q.Empty:
+                raise IOError("premature EOF")
+        out = bytes(buf[:n])
+        del buf[:n]
+        return out
+
+    with pytest.raises(Exception):
+        ota_send.run_ota_protocol(
+            sendall_fn=sendall,
+            recv_exact_fn=recv_exact,
+            firmware=b"fw" * 32,
+            stderr=_Sink(),
+            stdout=_Sink(),
+        )
+
+
+def test_wrong_version_0x00():
+    """Version byte 0x00 in device hello must return exit code 3."""
+    bad_hello = bytes([0x00]) + bytes(32)
+    rc = _run_with_static_device(bad_hello)
+    assert rc == 3
+
+
+def test_wrong_version_0xff():
+    """Version byte 0xFF in device hello must return exit code 3."""
+    bad_hello = bytes([0xFF]) + bytes(32)
+    rc = _run_with_static_device(bad_hello)
+    assert rc == 3
+
+
+def test_wrong_version_0x01():
+    """Version byte 0x01 (old protocol) must return exit code 3."""
+    bad_hello = bytes([0x01]) + bytes(32)
+    rc = _run_with_static_device(bad_hello)
+    assert rc == 3
+
+
+def test_device_failure_response_read_tail():
+    """0xFF result byte with a reason line must return exit 4 and surface the reason."""
+    hello, _ = _make_device_hello()
+
+    import queue as _q
+    q = _q.SimpleQueue()
+    q.put(hello)
+    reason_bytes = b"\xfftoo small firmware\n"
+    for byte in reason_bytes:
+        q.put(bytes([byte]))
+
+    buf = bytearray()
+
+    def sendall(data):
+        pass
+
+    def recv_exact(n):
+        while len(buf) < n:
+            chunk = q.get(timeout=2)
+            buf.extend(chunk)
+        out = bytes(buf[:n])
+        del buf[:n]
+        return out
+
+    rc = ota_send.run_ota_protocol(
+        sendall_fn=sendall,
+        recv_exact_fn=recv_exact,
+        firmware=b"x" * 64,
+        stderr=_Sink(),
+        stdout=_Sink(),
+    )
+    assert rc == 4
+
+
+def test_result_byte_0x7e_returns_6():
+    """A result byte of 0x7e (not 0x00 or 0xff) must return exit 6."""
+    hello, _ = _make_device_hello()
+    rc = _run_with_static_device(hello, result_byte=b"\x7e")
+    assert rc == 6
+
+
+# ---- E2E: firmware size boundaries -------------------------------------------
+
+def test_e2e_exactly_one_byte_firmware():
+    """A 1-byte firmware must be accepted by the fake device."""
+    rc, device = _spawn(b"\xAB")
+    assert rc == 0
+    assert device.received_plaintext == b"\xAB"
+
+
+def test_e2e_exactly_max_minus_one():
+    """A firmware of MAX_OTA_PLAINTEXT - 1 bytes must be accepted."""
+    # Use a repeated byte pattern to avoid allocating 4MB of random data.
+    size = MAX_OTA_PLAINTEXT - 1
+    firmware = bytes(range(256)) * (size // 256) + bytes(range(size % 256))
+    rc, device = _spawn(firmware)
+    assert rc == 0
+    assert device.received_plaintext == firmware
+
+
+def test_e2e_max_plaintext_len_plus_one_rejected():
+    """A firmware announced as MAX_OTA_PLAINTEXT + 1 must be rejected."""
+    firmware = b"a" * 1024
+    rc, device = _spawn(firmware, override_plaintext_len=MAX_OTA_PLAINTEXT + 1)
+    assert rc == 4
+    assert device.failure_reason == "bad plaintext length"
+
+
+# ---- Failure-injection: sendall raises mid-stream ----------------------------
+
+def test_sendall_failure_mid_firmware_propagates():
+    """If sendall raises after sending the header, run_ota_protocol propagates the error."""
+    import queue as _q
+    dev_priv = X25519PrivateKey.generate()
+    dev_pub = dev_priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    hello = bytes([0x02]) + dev_pub
+
+    q = _q.SimpleQueue()
+    q.put(hello)
+
+    buf = bytearray()
+    sends = [0]
+
+    def recv_exact(n):
+        while len(buf) < n:
+            chunk = q.get(timeout=2)
+            buf.extend(chunk)
+        out = bytes(buf[:n])
+        del buf[:n]
+        return out
+
+    def sendall(data):
+        sends[0] += 1
+        if sends[0] >= 3:
+            raise IOError("connection reset")
+
+    with pytest.raises(IOError):
+        ota_send.run_ota_protocol(
+            sendall_fn=sendall,
+            recv_exact_fn=recv_exact,
+            firmware=b"big firmware" * 100,
+            stderr=_Sink(),
+            stdout=_Sink(),
+        )
+
+
+# ---- E2E: multiple sequential sessions (key freshness) -----------------------
+
+def test_e2e_two_sessions_use_different_keys():
+    """Two back-to-back OTA sessions must succeed independently (ephemeral keys)."""
+    firmware = os.urandom(1024)
+    for _ in range(2):
+        rc, device = _spawn(firmware)
+        assert rc == 0
+        assert device.received_plaintext == firmware
+
+
+# ---- Failure-injection: recv_exact EOF at various handshake stages -----------
+
+def test_eof_before_any_hello_byte():
+    """Immediate EOF from the server before any byte raises IOError."""
+    def sendall(data):
+        pass
+
+    def recv_exact(n):
+        raise IOError("immediate EOF")
+
+    with pytest.raises(IOError):
+        ota_send.run_ota_protocol(
+            sendall_fn=sendall,
+            recv_exact_fn=recv_exact,
+            firmware=b"fw" * 32,
+            stderr=_Sink(),
+            stdout=_Sink(),
+        )
+
+
+def test_eof_after_hello_before_result():
+    """EOF after successful hello but before result byte returns exit 5."""
+    hello, _ = _make_device_hello()
+
+    import queue as _q
+    q = _q.SimpleQueue()
+    q.put(hello)
+
+    buf = bytearray()
+    hello_consumed = [False]
+
+    def sendall(data):
+        pass
+
+    def recv_exact(n):
+        # After the hello is consumed, simulate EOF
+        if hello_consumed[0]:
+            raise IOError("EOF mid-stream")
+        while len(buf) < n:
+            try:
+                chunk = q.get(timeout=0.1)
+                buf.extend(chunk)
+            except _q.Empty:
+                raise IOError("EOF mid-stream")
+        out = bytes(buf[:n])
+        del buf[:n]
+        if len(buf) == 0:
+            hello_consumed[0] = True
+        return out
+
+    rc = ota_send.run_ota_protocol(
+        sendall_fn=sendall,
+        recv_exact_fn=recv_exact,
+        firmware=b"fw" * 32,
+        stderr=_Sink(),
+        stdout=_Sink(),
+    )
+    assert rc == 5
+
+
+# ---- Device sends 0xFF with no trailing newline (partial reason) --------------
+
+def test_device_failure_no_newline_returns_4():
+    """0xFF followed by reason without newline must still exit 4."""
+    hello, _ = _make_device_hello()
+
+    import queue as _q
+    q = _q.SimpleQueue()
+    q.put(hello)
+    q.put(b"\xfferror reason no newline")
+    # No newline -- recv loop will eventually raise (timeout/EOF) and exit with rc=4.
+
+    buf = bytearray()
+    exhausted = [False]
+
+    def sendall(data):
+        pass
+
+    def recv_exact(n):
+        if exhausted[0]:
+            raise IOError("EOF")
+        while len(buf) < n:
+            try:
+                chunk = q.get(timeout=0.05)
+                buf.extend(chunk)
+            except _q.Empty:
+                exhausted[0] = True
+                raise IOError("EOF")
+        out = bytes(buf[:n])
+        del buf[:n]
+        return out
+
+    rc = ota_send.run_ota_protocol(
+        sendall_fn=sendall,
+        recv_exact_fn=recv_exact,
+        firmware=b"fw" * 32,
+        stderr=_Sink(),
+        stdout=_Sink(),
+    )
+    assert rc == 4
+
+
+# ---- SSH mock: paramiko auth / connect error paths ---------------------------
+
+def test_ota_send_ssh_auth_failure_returns_7(tmp_path):
+    """SSH authentication failure must surface as exit code 7 from main()."""
+    import unittest.mock as mock
+    fw = tmp_path / "fw.bin"
+    fw.write_bytes(b"x" * 64)
+
+    import paramiko
+    with mock.patch("paramiko.SSHClient") as mock_cls:
+        mock_cls.return_value.connect.side_effect = paramiko.AuthenticationException("denied")
+        rc = ota_send.main(["host", str(fw)])
+    assert rc == 7
+
+
+def test_ota_send_ssh_connect_generic_failure_returns_8(tmp_path):
+    """A generic SSH connection error must surface as exit code 8 from main()."""
+    import unittest.mock as mock
+    fw = tmp_path / "fw.bin"
+    fw.write_bytes(b"x" * 64)
+
+    with mock.patch("paramiko.SSHClient") as mock_cls:
+        mock_cls.return_value.connect.side_effect = OSError("connection refused")
+        rc = ota_send.main(["host", str(fw)])
+    assert rc == 8

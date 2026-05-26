@@ -448,6 +448,82 @@ void test_accum_overflow_followed_by_overflow_packs_two_dgrams(void)
 }
 
 /* --------------------------------------------------------------------------
+ * Additional tests
+ * -------------------------------------------------------------------------- */
+
+/* Format-string injection resistance: %n in a message is a literal substring,
+ * not a format directive (because we call hook_impl with "%s", user_data). */
+void test_format_string_injection_resistance(void)
+{
+    /* Simulate safe call: format is "%s", arg is the user-controlled string.
+     * "%n" in the arg must appear verbatim in output, NOT cause a crash. */
+    hook_impl("%s", "evil %n payload %x here");
+
+    TEST_ASSERT_EQUAL_INT(1, g_sendto_calls);
+    TEST_ASSERT_NOT_NULL(strstr(g_sent_buf, "evil %n payload %x here"));
+}
+
+/* Null-equivalent empty string arg: produces zero-length, no send. */
+void test_percent_s_empty_arg_no_send(void)
+{
+    hook_impl("%s", "");
+    TEST_ASSERT_EQUAL_INT(0, g_sendto_calls);
+}
+
+/* Multiple integer specifiers in one call. */
+void test_multiple_format_args(void)
+{
+    hook_impl("a=%d b=%d c=%d\n", 1, 2, 3);
+    TEST_ASSERT_EQUAL_INT(1, g_sendto_calls);
+    TEST_ASSERT_NOT_NULL(strstr(g_sent_buf, "a=1 b=2 c=3"));
+}
+
+/* Accumulator: sequence number is correct after many overflows. */
+void test_accum_sequence_large_count(void)
+{
+    accum_reset();
+    char chunk[1300]; /* exactly DGRAM_MAX */
+    memset(chunk, 'q', sizeof(chunk));
+    for (int i = 0; i < 10; i++) {
+        accum_append(chunk, sizeof(chunk));
+        accum_flush_idle();
+    }
+    TEST_ASSERT_EQUAL_INT(10, g_dgram_count);
+    TEST_ASSERT_EQUAL_UINT32(10, g_acc_seq);
+    /* Verify header of last dgram */
+    TEST_ASSERT_TRUE(strncmp(g_dgrams[9].data, "#9\n", 3) == 0);
+}
+
+/* Accumulator: fd going -1 mid-stream: seq bumps, no dgrams emitted. */
+void test_accum_fd_goes_down_mid_stream(void)
+{
+    accum_reset();
+    /* First flush succeeds. */
+    accum_append("line1\n", 6);
+    accum_flush_idle();
+    TEST_ASSERT_EQUAL_INT(1, g_dgram_count);
+    TEST_ASSERT_EQUAL_UINT32(1, g_acc_seq);
+
+    /* Socket goes away. */
+    g_acc_fd = -1;
+    accum_append("line2\n", 6);
+    accum_flush_idle();
+
+    TEST_ASSERT_EQUAL_INT(1, g_dgram_count); /* no new datagram */
+    TEST_ASSERT_EQUAL_UINT32(2, g_acc_seq);  /* but seq advanced */
+}
+
+/* Accumulator: append zero-length line is silently ignored. */
+void test_accum_append_zero_len_ignored(void)
+{
+    accum_reset();
+    accum_append("data\n", 0); /* explicit zero len */
+    accum_flush_idle();
+    TEST_ASSERT_EQUAL_INT(0, g_dgram_count);
+    TEST_ASSERT_EQUAL_UINT32(0, g_acc_seq); /* nothing flushed */
+}
+
+/* --------------------------------------------------------------------------
  * Test runner
  * -------------------------------------------------------------------------- */
 int main(void)
@@ -463,7 +539,7 @@ int main(void)
     RUN_TEST(test_integer_formatting);
     RUN_TEST(test_empty_format_no_send);
 
-    /* New 8 -- accumulator coalescing + sequence numbers */
+    /* Accumulator coalescing + sequence numbers */
     RUN_TEST(test_accum_single_short_line_buffers_no_send);
     RUN_TEST(test_accum_idle_flush_emits_one_datagram_with_header);
     RUN_TEST(test_accum_overflow_triggers_inline_flush);
@@ -472,6 +548,14 @@ int main(void)
     RUN_TEST(test_accum_fd_unavailable_still_bumps_seq);
     RUN_TEST(test_accum_oversize_line_truncated_standalone);
     RUN_TEST(test_accum_overflow_followed_by_overflow_packs_two_dgrams);
+
+    /* Additional cases */
+    RUN_TEST(test_format_string_injection_resistance);
+    RUN_TEST(test_percent_s_empty_arg_no_send);
+    RUN_TEST(test_multiple_format_args);
+    RUN_TEST(test_accum_sequence_large_count);
+    RUN_TEST(test_accum_fd_goes_down_mid_stream);
+    RUN_TEST(test_accum_append_zero_len_ignored);
 
     return UNITY_END();
 }

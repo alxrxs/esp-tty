@@ -36,6 +36,9 @@
 /* esp_heap_caps stub: on native this maps MALLOC_CAP_* to plain malloc. */
 #include "esp_heap_caps.h"
 
+/* scep_proto constants used in allocation tests */
+#include "scep_proto.h"
+
 void setUp(void)    {}
 void tearDown(void) {}
 
@@ -319,16 +322,18 @@ void test_alloc_buf_zero_size_returns_non_null_or_null_gracefully(void)
 
 void test_alloc_buf_large_allocation_succeeds(void)
 {
-    /* Sizes matching SCEP_MAX_P7_LEN + SCEP_MAX_CERT_DER (from scep_proto.h) */
-    const size_t SCEP_MAX_P7_LEN    = 8192;
-    const size_t SCEP_MAX_CERT_DER  = 2048;
-    const size_t CRED_DEV_KEY_MAX   = 2048; /* matches cred_store.h */
+    /* Sizes matching SCEP_MAX_P7_LEN + SCEP_MAX_CERT_DER (from scep_proto.h).
+     * Use numeric literals to avoid redefinition of the macros now pulled in
+     * via scep_proto.h. */
+    const size_t sz_p7  = 8192;
+    const size_t sz_cer = 2048;
+    const size_t sz_key = 2048;
 
     /* Simulate the ALLOC_BUF sequence from scep_enroll */
     void *bufs[8];
     size_t sizes[8] = {
-        4096, 4096, CRED_DEV_KEY_MAX, SCEP_MAX_CERT_DER,
-        SCEP_MAX_P7_LEN, 320, SCEP_MAX_P7_LEN, SCEP_MAX_CERT_DER,
+        4096, 4096, sz_key, sz_cer,
+        sz_p7, 320, sz_p7, sz_cer,
     };
     for (int i = 0; i < 8; i++) {
         bufs[i] = alloc_buf_like_scep_enroll(sizes[i]);
@@ -383,6 +388,48 @@ void test_alloc_buf_spiram_before_internal_in_source(void)
 }
 
 /* =========================================================================
+ * 4. Additional pk_context and allocation tests
+ * ======================================================================= */
+
+/* Calling pk_free on a context that was only pk_init'd (never setup) must
+ * not crash.  This mirrors the early-error path in scep_enroll. */
+void test_pk_free_on_init_only_context_does_not_crash(void)
+{
+    mbedtls_pk_context key;
+    mbedtls_pk_init(&key);
+    /* No setup, no keygen -- should be a safe no-op */
+    mbedtls_pk_free(&key);
+    /* Calling again must also not crash */
+    mbedtls_pk_free(&key);
+    TEST_PASS();
+}
+
+/* Allocate a buffer, fill it with a pattern, free it -- verifies that the
+ * stub does not return overlapping or zero-page addresses. */
+void test_alloc_buf_fill_pattern_survives_free(void)
+{
+    const size_t SZ = 256;
+    void *buf = alloc_buf_like_scep_enroll(SZ);
+    TEST_ASSERT_NOT_NULL(buf);
+    /* Write a recognizable pattern */
+    uint8_t *p = (uint8_t *)buf;
+    for (size_t i = 0; i < SZ; i++) p[i] = (uint8_t)(i ^ 0xCC);
+    /* Verify it reads back correctly (no aliasing / zero-page collision) */
+    for (size_t i = 0; i < SZ; i++)
+        TEST_ASSERT_EQUAL_HEX8((uint8_t)(i ^ 0xCC), p[i]);
+    free(buf);
+}
+
+/* Allocation of SCEP_MAX_CSR_DER bytes mirrors the real scep_enroll scratch */
+void test_alloc_buf_scep_max_csr_der_size(void)
+{
+    void *buf = alloc_buf_like_scep_enroll(SCEP_MAX_CSR_DER);
+    TEST_ASSERT_NOT_NULL_MESSAGE(buf,
+        "ALLOC_BUF for SCEP_MAX_CSR_DER must succeed on host");
+    free(buf);
+}
+
+/* =========================================================================
  * Main
  * ======================================================================= */
 
@@ -404,6 +451,11 @@ int main(void)
     RUN_TEST(test_alloc_buf_zero_size_returns_non_null_or_null_gracefully);
     RUN_TEST(test_alloc_buf_large_allocation_succeeds);
     RUN_TEST(test_alloc_buf_spiram_before_internal_in_source);
+
+    /* Additional pk_context lifecycle and allocation tests */
+    RUN_TEST(test_pk_free_on_init_only_context_does_not_crash);
+    RUN_TEST(test_alloc_buf_fill_pattern_survives_free);
+    RUN_TEST(test_alloc_buf_scep_max_csr_der_size);
 
     /* Cleanup */
     if (g_rng_init) {

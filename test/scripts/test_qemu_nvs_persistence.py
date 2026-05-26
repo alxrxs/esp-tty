@@ -68,6 +68,8 @@ from test_qemu_boot import (
     FLASH_SIZE,
 )
 
+import pytest
+
 FLASH_IMG_PERSIST = "/tmp/esp-tty-persist-flash.bin"
 
 # Pattern definitions
@@ -177,6 +179,113 @@ def run_qemu_persist(timeout_secs, flash_img, label,
     print(f"\n[{label}] FAIL -- timed out")
     return dict(success=False, fingerprint=fingerprint,
                 stored_seen=stored_seen, loaded_seen=loaded_seen)
+
+
+# ---------------------------------------------------------------------------
+# Pytest-native NVS/partition structure tests (no QEMU required)
+# ---------------------------------------------------------------------------
+
+PARTITIONS_CSV = os.path.join(PROJECT_DIR, "partitions.csv")
+
+
+def _parse_partitions(csv_path):
+    partitions = []
+    with open(csv_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) >= 5:
+                name, ptype, subtype, offset, size = parts[:5]
+                try:
+                    partitions.append({
+                        "name":    name,
+                        "type":    ptype,
+                        "subtype": subtype,
+                        "offset":  int(offset, 16) if offset.startswith("0x") else int(offset),
+                        "size":    int(size, 16) if size.startswith("0x") else int(size),
+                    })
+                except ValueError:
+                    pass
+    return partitions
+
+
+def test_nvs_partition_reachable():
+    """NVS partition is reachable at offset 0x9000 (immediately after 0x8000 partition table)."""
+    parts = _parse_partitions(PARTITIONS_CSV)
+    nvs = next((p for p in parts if p["name"] == "nvs"), None)
+    assert nvs is not None, "nvs partition missing from partitions.csv"
+    assert nvs["offset"] == 0x9000, f"NVS offset should be 0x9000, got 0x{nvs['offset']:x}"
+    assert nvs["size"] >= 0x3000, \
+        f"NVS partition size 0x{nvs['size']:x} too small -- IDF minimum is 3 sectors (0x3000)"
+
+
+def test_nvs_keys_partition_exists_and_sized():
+    """nvs_keys partition exists and is at least one sector (4 KB) for AES-XTS-256 key storage."""
+    parts = _parse_partitions(PARTITIONS_CSV)
+    nvs_keys = next((p for p in parts if p["name"] == "nvs_keys"), None)
+    assert nvs_keys is not None, "nvs_keys partition missing"
+    assert nvs_keys["size"] >= 0x1000, \
+        f"nvs_keys size 0x{nvs_keys['size']:x} too small -- minimum 4 KB"
+
+
+def test_nvs_and_nvs_keys_do_not_overlap():
+    """nvs and nvs_keys partitions must not overlap."""
+    parts = _parse_partitions(PARTITIONS_CSV)
+    nvs      = next((p for p in parts if p["name"] == "nvs"), None)
+    nvs_keys = next((p for p in parts if p["name"] == "nvs_keys"), None)
+    if nvs and nvs_keys:
+        nvs_end      = nvs["offset"]      + nvs["size"]
+        nvs_keys_end = nvs_keys["offset"] + nvs_keys["size"]
+        overlap = (nvs["offset"] < nvs_keys_end) and (nvs_keys["offset"] < nvs_end)
+        assert not overlap, (
+            f"nvs (0x{nvs['offset']:x}..0x{nvs_end:x}) and "
+            f"nvs_keys (0x{nvs_keys['offset']:x}..0x{nvs_keys_end:x}) overlap"
+        )
+
+
+def test_nvs_key_persistence_documented_limitation():
+    """
+    Document the QEMU nvs_keys limitation: nvs_keys partition cannot persist
+    across QEMU boots due to HW flash-encryption emulation.  This test
+    verifies the module docstring explains the limitation.
+    """
+    # Read this file's own docstring (module-level) and check that the
+    # limitation is documented -- guards against accidental deletion.
+    this_file = os.path.abspath(__file__)
+    with open(this_file) as f:
+        content = f.read()
+    assert "nvs_keys" in content, \
+        "Module docstring should explain the nvs_keys QEMU limitation"
+    assert "QEMU" in content, \
+        "Module docstring should mention QEMU"
+    assert "AES-XTS" in content or "encrypt" in content.lower(), \
+        "Module docstring should mention encryption (nvs_keys stores the AES-XTS key)"
+
+
+def test_nvs_fingerprint_patterns_are_valid_regex():
+    """The regex patterns used to parse boot log fingerprints are valid and match a sample."""
+    sample_fp  = "aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99:" \
+                 "aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99"
+    sample_log = f"Host key SHA-256 fingerprint: {sample_fp}"
+    m = FINGERPRINT_PATTERN.search(sample_log)
+    assert m is not None, "FINGERPRINT_PATTERN does not match a well-formed fingerprint line"
+    assert m.group(1) == sample_fp
+
+
+def test_nvs_boot1_stored_pattern_is_valid_regex():
+    """BOOT1_STORED_PATTERN matches the expected firmware log line."""
+    sample = "I (1234) ssh_server: Generated and stored new ED25519 host key"
+    assert BOOT1_STORED_PATTERN.search(sample), \
+        "BOOT1_STORED_PATTERN does not match expected log line"
+
+
+def test_nvs_boot2_loaded_pattern_is_valid_regex():
+    """BOOT2_LOADED_PATTERN matches the expected firmware log line."""
+    sample = "I (1234) ssh_server: Loaded ED25519 host key from NVS"
+    assert BOOT2_LOADED_PATTERN.search(sample), \
+        "BOOT2_LOADED_PATTERN does not match expected log line"
 
 
 def main():

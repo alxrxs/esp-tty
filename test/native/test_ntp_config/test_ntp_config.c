@@ -132,6 +132,54 @@ void test_tz_buffer_fits_timezone(void)
     TEST_ASSERT_LESS_THAN_INT((int)sizeof(buf), n + 1);
 }
 
+/* NTP_TIMEZONE must not contain a raw newline (would break POSIX TZ setenv). */
+void test_timezone_no_newline(void)
+{
+    const char *tz = NTP_TIMEZONE;
+    for (size_t i = 0; i < strlen(tz); i++) {
+        TEST_ASSERT_NOT_EQUAL_MESSAGE('\n', (int)(unsigned char)tz[i],
+            "NTP_TIMEZONE must not contain a newline");
+    }
+}
+
+/* NTP_SYNC_TIMEOUT_SEC is not zero (would cause immediate timeout). */
+void test_sync_timeout_nonzero(void)
+{
+    TEST_ASSERT_NOT_EQUAL(0, NTP_SYNC_TIMEOUT_SEC);
+}
+
+/* NTP_TIMEZONE fits in a POSIX TZ env variable (no null bytes inside). */
+void test_timezone_is_printable_ascii(void)
+{
+    const char *tz = NTP_TIMEZONE;
+    size_t len = strlen(tz);
+    TEST_ASSERT_GREATER_THAN_size_t(0, len);
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)tz[i];
+        TEST_ASSERT_TRUE_MESSAGE(c >= 0x20 && c <= 0x7E,
+            "NTP_TIMEZONE contains non-printable or non-ASCII byte");
+    }
+}
+
+/* Each server name must be non-trivial (at least 3 chars like "a.b"). */
+void test_server_names_reasonable_length(void)
+{
+    const char *const servers[] = { NTP_SERVERS };
+    size_t n = sizeof(servers) / sizeof(servers[0]);
+    for (size_t i = 0; i < n; i++) {
+        TEST_ASSERT_GREATER_OR_EQUAL_size_t(3, strlen(servers[i]));
+    }
+}
+
+/* NTP_SYNC_TIMEOUT_SEC is representable as uint32_t without truncation. */
+void test_sync_timeout_fits_uint32(void)
+{
+    /* NTP_SYNC_TIMEOUT_SEC <= 3600 (already asserted at compile time),
+     * which is well within uint32_t range. This is a runtime smoke-check. */
+    uint32_t t = (uint32_t)NTP_SYNC_TIMEOUT_SEC;
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)NTP_SYNC_TIMEOUT_SEC, t);
+}
+
 /* ------------------------------------------------------------------ */
 int main(void)
 {
@@ -143,5 +191,11 @@ int main(void)
     RUN_TEST(test_sync_timeout_in_range);
     RUN_TEST(test_default_server_contains_pool_ntp);
     RUN_TEST(test_tz_buffer_fits_timezone);
+    /* Additional cases */
+    RUN_TEST(test_timezone_no_newline);
+    RUN_TEST(test_sync_timeout_nonzero);
+    RUN_TEST(test_timezone_is_printable_ascii);
+    RUN_TEST(test_server_names_reasonable_length);
+    RUN_TEST(test_sync_timeout_fits_uint32);
     return UNITY_END();
 }

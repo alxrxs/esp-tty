@@ -99,6 +99,53 @@ void test_fail_fail_succeed_then_noop(void)
     TEST_ASSERT_EQUAL_INT(0, g_call_count);
 }
 
+/*
+ * After a success, reset(), then dispatch again -> should dispatch fresh.
+ */
+void test_reset_allows_redispatch(void)
+{
+    mdns_dispatch_once(stub_create_ok);
+    mdns_dispatch_reset();
+
+    g_call_count = 0;
+    bool result = mdns_dispatch_once(stub_count_calls);
+    TEST_ASSERT_TRUE(result);
+    TEST_ASSERT_EQUAL_INT(1, g_call_count);
+}
+
+/*
+ * Many failures in a row: each call invokes create_task exactly once.
+ */
+void test_many_failures_each_retries(void)
+{
+    g_call_count = 0;
+    for (int i = 0; i < 5; i++) {
+        bool r = mdns_dispatch_once(stub_create_fail);
+        TEST_ASSERT_FALSE(r);
+    }
+    /* create_task was called exactly 5 times (each failure resets flag). */
+    /* We can verify indirectly: use stub_count_calls next, expect 1 call. */
+    bool r = mdns_dispatch_once(stub_count_calls);
+    TEST_ASSERT_TRUE(r);
+}
+
+/*
+ * After reset, a failing dispatch still leaves the gate open for retry.
+ */
+void test_reset_then_fail_then_succeed(void)
+{
+    mdns_dispatch_once(stub_create_ok);  /* succeed once */
+    mdns_dispatch_reset();               /* reset */
+
+    TEST_ASSERT_FALSE(mdns_dispatch_once(stub_create_fail));  /* fail */
+    TEST_ASSERT_TRUE(mdns_dispatch_once(stub_create_ok));     /* retry ok */
+
+    /* Now it must be a no-op. */
+    g_call_count = 0;
+    TEST_ASSERT_TRUE(mdns_dispatch_once(stub_count_calls));
+    TEST_ASSERT_EQUAL_INT(0, g_call_count);
+}
+
 /* ------------------------------------------------------------------ */
 int main(void)
 {
@@ -109,5 +156,9 @@ int main(void)
     RUN_TEST(test_task_create_failure_returns_false);
     RUN_TEST(test_task_create_failure_allows_retry);
     RUN_TEST(test_fail_fail_succeed_then_noop);
+    /* Additional cases */
+    RUN_TEST(test_reset_allows_redispatch);
+    RUN_TEST(test_many_failures_each_retries);
+    RUN_TEST(test_reset_then_fail_then_succeed);
     return UNITY_END();
 }

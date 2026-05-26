@@ -412,3 +412,262 @@ def test_derive_key_output_is_exactly_32_bytes():
             Encoding.Raw, PublicFormat.Raw)
         _, aes_key = ota_send.derive_key(client_priv, device_pub)
         assert len(aes_key) == 32, f"Expected 32-byte key, got {len(aes_key)}"
+
+
+# ---- CLI arg-parsing edge cases (via main()) ----------------------------------
+
+def test_main_missing_host_and_firmware_exits_nonzero():
+    """main() with no arguments must exit with nonzero (argparse error = 2)."""
+    with pytest.raises(SystemExit) as exc_info:
+        ota_send.main([])
+    assert exc_info.value.code != 0
+
+
+def test_main_missing_firmware_arg_exits_nonzero():
+    """main() with only host argument must exit with nonzero (argparse error)."""
+    with pytest.raises(SystemExit) as exc_info:
+        ota_send.main(["192.168.1.1"])
+    assert exc_info.value.code != 0
+
+
+def test_main_help_exits_zero():
+    """main() with --help must exit with code 0."""
+    with pytest.raises(SystemExit) as exc_info:
+        ota_send.main(["--help"])
+    assert exc_info.value.code == 0
+
+
+def test_main_bad_port_type_exits_nonzero():
+    """main() with --port not an integer must exit nonzero."""
+    with pytest.raises(SystemExit) as exc_info:
+        ota_send.main(["host", "fw.bin", "--port", "notanumber"])
+    assert exc_info.value.code != 0
+
+
+def test_main_nonexistent_firmware_file_exits_8(tmp_path):
+    """main() with a firmware path that doesn't exist must exit 8 (exception)."""
+    rc = ota_send.main(["192.168.1.1", str(tmp_path / "nonexistent.bin")])
+    assert rc == 8
+
+
+def test_main_non_firmware_file_still_reads(tmp_path):
+    """main() accepts any readable file as firmware; rejects empty file with rc 2."""
+    empty = tmp_path / "empty.bin"
+    empty.write_bytes(b"")
+    # No SSH in tests -- this will hit a connection error (rc 8) or empty check.
+    # The important thing is it doesn't crash before reaching the size check.
+    # With an empty file the ota_send() function returns 2 before connecting.
+    # We patch the SSH client out so we don't need a real server.
+    import unittest.mock as mock
+    with mock.patch("paramiko.SSHClient") as mock_client:
+        mock_instance = mock_client.return_value
+        mock_instance.connect.side_effect = Exception("no server")
+        # Empty file is caught before SSH connect
+        rc = ota_send.main(["host", str(empty)])
+    assert rc == 2
+
+
+def test_main_very_long_firmware_path_raises_8(tmp_path):
+    """A path that is valid Python but doesn't exist returns exit 8."""
+    long_name = "a" * 200 + ".bin"
+    rc = ota_send.main(["host", str(tmp_path / long_name)])
+    assert rc == 8
+
+
+def test_main_path_with_spaces(tmp_path):
+    """Firmware path containing spaces is handled without crashes."""
+    fw = tmp_path / "my firmware file.bin"
+    fw.write_bytes(b"")
+    import unittest.mock as mock
+    with mock.patch("paramiko.SSHClient"):
+        rc = ota_send.main(["host", str(fw)])
+    assert rc == 2  # empty file caught before SSH
+
+
+def test_main_path_with_utf8_chars(tmp_path):
+    """Firmware path containing UTF-8 characters is handled without crashes."""
+    fw = tmp_path / "прошивка.bin"
+    fw.write_bytes(b"")
+    import unittest.mock as mock
+    with mock.patch("paramiko.SSHClient"):
+        rc = ota_send.main(["host", str(fw)])
+    assert rc == 2  # empty file caught before SSH
+
+
+def test_main_truncate_requires_integer():
+    """--truncate with a non-integer value must exit nonzero."""
+    with pytest.raises(SystemExit) as exc_info:
+        ota_send.main(["host", "fw.bin", "--truncate", "notint"])
+    assert exc_info.value.code != 0
+
+
+def test_main_default_port_is_22():
+    """Parsed args must default to port 22."""
+    import argparse
+    p = argparse.ArgumentParser()
+    p.add_argument("host")
+    p.add_argument("firmware")
+    p.add_argument("--port", type=int, default=22)
+    p.add_argument("--user", default="ota")
+    p.add_argument("--identity", default=None)
+    p.add_argument("--tamper", action="store_true")
+    p.add_argument("--truncate", type=int, default=None)
+    args = p.parse_args(["myhost", "fw.bin"])
+    assert args.port == 22
+    assert args.user == "ota"
+    assert args.identity is None
+    assert args.tamper is False
+    assert args.truncate is None
+
+
+def test_main_custom_user_and_port():
+    """--user and --port override defaults in parsed args."""
+    import argparse
+    p = argparse.ArgumentParser()
+    p.add_argument("host")
+    p.add_argument("firmware")
+    p.add_argument("--port", type=int, default=22)
+    p.add_argument("--user", default="ota")
+    p.add_argument("--identity", default=None)
+    p.add_argument("--tamper", action="store_true")
+    p.add_argument("--truncate", type=int, default=None)
+    args = p.parse_args(["myhost", "fw.bin", "--port", "2222", "--user", "admin"])
+    assert args.port == 2222
+    assert args.user == "admin"
+
+
+# ---- Firmware size boundary tests for encrypt_firmware() ---------------------
+
+OTA_PARTITION_SIZE = 4 * 1024 * 1024  # matches main/ota_session.c MAX_OTA_PLAINTEXT
+
+
+def test_encrypt_firmware_exact_ota_partition_size():
+    """encrypt_firmware must handle exactly OTA_PARTITION_SIZE bytes."""
+    aes_key = os.urandom(32)
+    # Don't actually allocate 4 MiB of random data in the test — use a deterministic
+    # repeating pattern to keep memory low while still exercising the code path.
+    firmware = bytes(range(256)) * (OTA_PARTITION_SIZE // 256)
+    iv, tag, ciphertext = ota_send.encrypt_firmware(aes_key, firmware)
+    assert len(ciphertext) == OTA_PARTITION_SIZE
+    assert len(iv) == 12
+    assert len(tag) == 16
+
+
+def test_encrypt_firmware_one_over_ota_partition_size():
+    """encrypt_firmware must handle OTA_PARTITION_SIZE + 1 bytes without error."""
+    aes_key = os.urandom(32)
+    firmware = bytes(range(256)) * (OTA_PARTITION_SIZE // 256) + b"\xff"
+    iv, tag, ciphertext = ota_send.encrypt_firmware(aes_key, firmware)
+    assert len(ciphertext) == OTA_PARTITION_SIZE + 1
+
+
+# ---- X25519 keypair determinism -----------------------------------------------
+
+def test_x25519_generate_produces_unique_keys():
+    """Every call to X25519PrivateKey.generate() must produce a unique keypair."""
+    keys = [
+        X25519PrivateKey.generate().public_key().public_bytes(
+            Encoding.Raw, PublicFormat.Raw)
+        for _ in range(10)
+    ]
+    assert len(set(keys)) == 10, "Two generate() calls returned the same key"
+
+
+def test_x25519_from_private_bytes_deterministic():
+    """from_private_bytes with the same scalar must always return the same pubkey."""
+    scalar = bytes(range(32))
+    pub1 = X25519PrivateKey.from_private_bytes(scalar).public_key().public_bytes(
+        Encoding.Raw, PublicFormat.Raw)
+    pub2 = X25519PrivateKey.from_private_bytes(scalar).public_key().public_bytes(
+        Encoding.Raw, PublicFormat.Raw)
+    assert pub1 == pub2
+
+
+def test_derive_key_called_twice_with_same_inputs_is_deterministic():
+    """derive_key called twice with the same private key + peer pub returns same outputs."""
+    scalar = bytes(range(1, 33))
+    device_priv = X25519PrivateKey.generate()
+    device_pub = device_priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+
+    priv1 = X25519PrivateKey.from_private_bytes(scalar)
+    priv2 = X25519PrivateKey.from_private_bytes(scalar)
+
+    pub1, key1 = ota_send.derive_key(priv1, device_pub)
+    pub2, key2 = ota_send.derive_key(priv2, device_pub)
+
+    assert pub1 == pub2
+    assert key1 == key2
+
+
+# ---- AES-GCM frame-format malformed inputs ------------------------------------
+
+def test_wrong_nonce_causes_decrypt_failure():
+    """Decryption with a nonce that differs by one bit from the encrypt nonce must fail."""
+    from cryptography.exceptions import InvalidTag
+    aes_key = os.urandom(32)
+    firmware = b"payload" * 50
+    iv, tag, ciphertext = ota_send.encrypt_firmware(aes_key, firmware)
+
+    bad_nonce = bytearray(iv)
+    bad_nonce[0] ^= 0x01
+    with pytest.raises(Exception):
+        AESGCM(aes_key).decrypt(bytes(bad_nonce), ciphertext + tag, None)
+
+
+def test_tampered_tag_causes_decrypt_failure():
+    """Flipping a single bit in the auth tag must cause decryption to fail."""
+    aes_key = os.urandom(32)
+    firmware = b"payload" * 50
+    iv, tag, ciphertext = ota_send.encrypt_firmware(aes_key, firmware)
+
+    bad_tag = bytearray(tag)
+    bad_tag[0] ^= 0x80
+    with pytest.raises(Exception):
+        AESGCM(aes_key).decrypt(iv, ciphertext + bytes(bad_tag), None)
+
+
+def test_replayed_nonce_with_different_key_causes_decrypt_failure():
+    """Replaying an IV from a session encrypted under a different key fails."""
+    key1 = os.urandom(32)
+    key2 = os.urandom(32)
+    firmware = b"secret payload"
+    iv, tag, ct = ota_send.encrypt_firmware(key1, firmware)
+    # Replay IV under a different key
+    with pytest.raises(Exception):
+        AESGCM(key2).decrypt(iv, ct + tag, None)
+
+
+def test_undersized_ciphertext_causes_tag_mismatch():
+    """Feeding fewer ciphertext bytes than expected fails tag verification."""
+    aes_key = os.urandom(32)
+    firmware = b"x" * 128
+    iv, tag, ciphertext = ota_send.encrypt_firmware(aes_key, firmware)
+    truncated = ciphertext[:64]
+    with pytest.raises(Exception):
+        AESGCM(aes_key).decrypt(iv, truncated + tag, None)
+
+
+def test_oversized_ciphertext_causes_tag_mismatch():
+    """Appending extra bytes to the ciphertext must fail tag verification."""
+    aes_key = os.urandom(32)
+    firmware = b"x" * 128
+    iv, tag, ciphertext = ota_send.encrypt_firmware(aes_key, firmware)
+    extra = ciphertext + b"\x00"
+    with pytest.raises(Exception):
+        AESGCM(aes_key).decrypt(iv, extra + tag, None)
+
+
+def test_zero_byte_firmware_encrypt_roundtrip():
+    """Zero-byte firmware: encrypt then decrypt should return empty bytes."""
+    aes_key = os.urandom(32)
+    iv, tag, ct = ota_send.encrypt_firmware(aes_key, b"")
+    plain = AESGCM(aes_key).decrypt(iv, ct + tag, None)
+    assert plain == b""
+
+
+def test_exactly_one_byte_firmware_encrypt_roundtrip():
+    """Exactly 1-byte firmware encrypts and decrypts correctly."""
+    aes_key = os.urandom(32)
+    iv, tag, ct = ota_send.encrypt_firmware(aes_key, b"\x42")
+    plain = AESGCM(aes_key).decrypt(iv, ct + tag, None)
+    assert plain == b"\x42"

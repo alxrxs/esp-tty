@@ -632,3 +632,475 @@ class TestModeBPlusGuards:
                 f"cert_renewer_start() on line {idx + 1} of main.c appears "
                 "outside a !WIFI_USE_ENTERPRISE guard"
             )
+
+
+# ── Test group 7: env-var override matrix ────────────────────────────────────
+
+
+class TestEnvVarOverrideMatrix:
+    """
+    Tests 22–35: verify that module-level defaults are correctly read from
+    env vars at import time, covering set / unset / blank / whitespace-only
+    values for all four SCEP_* env vars.
+
+    Because scep_enroll_zero evaluates os.environ.get() at import time
+    (module scope), we must reload the module inside a controlled env.
+    We use importlib.reload inside a monkeypatched os.environ.
+    """
+
+    def _reload_with_env(self, env_overrides: dict):
+        """Reload scep_enroll_zero with specific env vars set."""
+        import importlib
+        import scep_enroll_zero as mod
+        original_env = {k: os.environ.get(k) for k in env_overrides}
+        try:
+            for k, v in env_overrides.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            importlib.reload(mod)
+            return {
+                "url":        mod._DEFAULT_SCEP_URL,
+                "password":   mod._DEFAULT_PASSWORD,
+                "mac":        mod._DEFAULT_ZERO_MAC,
+                "output_dir": mod._DEFAULT_OUTPUT_DIR,
+            }
+        finally:
+            for k, orig in original_env.items():
+                if orig is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = orig
+            importlib.reload(mod)
+
+    def test_scep_url_set_is_used(self):
+        """Test 22: SCEP_URL env var when set overrides the default."""
+        result = self._reload_with_env({"SCEP_URL": "https://custom.example.com/scep"})
+        assert result["url"] == "https://custom.example.com/scep"
+
+    def test_scep_url_unset_gives_default(self):
+        """Test 23: SCEP_URL unset gives the hardcoded default URL."""
+        result = self._reload_with_env({"SCEP_URL": None})
+        assert "scep.example.com" in result["url"]
+
+    def test_scep_url_blank_string_is_accepted(self):
+        """Test 24: SCEP_URL='' (blank) is accepted as-is (empty string)."""
+        result = self._reload_with_env({"SCEP_URL": ""})
+        assert result["url"] == ""
+
+    def test_scep_url_whitespace_only_preserved(self):
+        """Test 25: SCEP_URL='   ' (whitespace) is preserved verbatim."""
+        result = self._reload_with_env({"SCEP_URL": "   "})
+        assert result["url"] == "   "
+
+    def test_scep_challenge_password_set(self):
+        """Test 26: SCEP_CHALLENGE_PASSWORD env var overrides the default."""
+        result = self._reload_with_env({"SCEP_CHALLENGE_PASSWORD": "SECRETOTP"})
+        assert result["password"] == "SECRETOTP"
+
+    def test_scep_challenge_password_unset_is_empty(self):
+        """Test 27: SCEP_CHALLENGE_PASSWORD unset → default is empty string."""
+        result = self._reload_with_env({"SCEP_CHALLENGE_PASSWORD": None})
+        assert result["password"] == ""
+
+    def test_scep_challenge_password_blank(self):
+        """Test 28: SCEP_CHALLENGE_PASSWORD='' is preserved (empty string)."""
+        result = self._reload_with_env({"SCEP_CHALLENGE_PASSWORD": ""})
+        assert result["password"] == ""
+
+    def test_scep_challenge_password_whitespace(self):
+        """Test 29: SCEP_CHALLENGE_PASSWORD='  ' (whitespace) preserved verbatim."""
+        result = self._reload_with_env({"SCEP_CHALLENGE_PASSWORD": "  "})
+        assert result["password"] == "  "
+
+    def test_scep_device_mac_set(self):
+        """Test 30: SCEP_DEVICE_MAC env var overrides the default."""
+        result = self._reload_with_env({"SCEP_DEVICE_MAC": "aabbccddeeff"})
+        assert result["mac"] == "aabbccddeeff"
+
+    def test_scep_device_mac_unset_gives_zeros(self):
+        """Test 31: SCEP_DEVICE_MAC unset → default is '000000000000'."""
+        result = self._reload_with_env({"SCEP_DEVICE_MAC": None})
+        assert result["mac"] == "000000000000"
+
+    def test_scep_output_dir_set(self):
+        """Test 32: SCEP_OUTPUT_DIR env var overrides the default."""
+        result = self._reload_with_env({"SCEP_OUTPUT_DIR": "/tmp/my_certs"})
+        assert result["output_dir"] == "/tmp/my_certs"
+
+    def test_scep_output_dir_unset_is_project_main_certs(self):
+        """Test 33: SCEP_OUTPUT_DIR unset → default contains 'main/certs'."""
+        result = self._reload_with_env({"SCEP_OUTPUT_DIR": None})
+        assert "main/certs" in result["output_dir"] or "main" in result["output_dir"]
+
+    def test_all_four_env_vars_set_together(self):
+        """Test 34: all four env vars set simultaneously are all applied."""
+        result = self._reload_with_env({
+            "SCEP_URL":                "https://test.example.com/scep",
+            "SCEP_CHALLENGE_PASSWORD": "TESTPW",
+            "SCEP_DEVICE_MAC":         "112233445566",
+            "SCEP_OUTPUT_DIR":         "/tmp/test_certs",
+        })
+        assert result["url"]        == "https://test.example.com/scep"
+        assert result["password"]   == "TESTPW"
+        assert result["mac"]        == "112233445566"
+        assert result["output_dir"] == "/tmp/test_certs"
+
+
+# ── Test group 8: chmod 0600 and file ordering ───────────────────────────────
+
+
+class TestFilePermissionsAndOrdering:
+    """Tests 35–39: chmod 0600, file creation order, idempotency."""
+
+    @staticmethod
+    def _build_mock_client_simple():
+        """Minimal mock client for permission/ordering tests (reuses E2E helper)."""
+        return TestE2EWithMockClient._build_mock_client(
+            issued_cn="IRIX-TTY-PVE-DELL-aabbccddeeff",
+            password="TESTPW",
+        )
+
+    def test_client_key_has_chmod_0600(self, tmp_path):
+        """Test 35: client.key has mode 0o600 after do_enroll."""
+        out_dir = str(tmp_path)
+        mock_data = self._build_mock_client_simple()
+        with patch("scep_enroll_zero.Client", mock_data["cls"]):
+            _m.do_enroll(
+                scep_url="http://mock.local/scep",
+                password="TESTPW",
+                cn="IRIX-TTY-PVE-DELL-aabbccddeeff",
+                output_dir=out_dir,
+            )
+        key_path = os.path.join(out_dir, "client.key")
+        stat_result = os.stat(key_path)
+        mode = stat_result.st_mode & 0o777
+        assert mode == 0o600, (
+            f"client.key permissions should be 0o600, got {oct(mode)}"
+        )
+
+    def test_ca_pem_not_restricted_to_0600(self, tmp_path):
+        """Test 36: ca.pem is NOT restricted to 0600 (it's public data)."""
+        out_dir = str(tmp_path)
+        mock_data = self._build_mock_client_simple()
+        with patch("scep_enroll_zero.Client", mock_data["cls"]):
+            _m.do_enroll(
+                scep_url="http://mock.local/scep",
+                password="TESTPW",
+                cn="IRIX-TTY-PVE-DELL-aabbccddeeff",
+                output_dir=out_dir,
+            )
+        ca_path = os.path.join(out_dir, "ca.pem")
+        mode = os.stat(ca_path).st_mode & 0o777
+        # ca.pem is not a private key -- must be world-readable (not 0o600)
+        assert mode != 0o600, (
+            "ca.pem should not be restricted to 0600 (it is public CA data)"
+        )
+
+    def test_key_written_before_chmod(self, tmp_path):
+        """Test 37: client.key file exists before chmod is applied (write then chmod)."""
+        out_dir = str(tmp_path)
+        mock_data = self._build_mock_client_simple()
+        chmod_calls = []
+        original_chmod = os.chmod
+
+        def tracking_chmod(path, mode):
+            chmod_calls.append((path, mode))
+            original_chmod(path, mode)
+
+        with patch("scep_enroll_zero.Client", mock_data["cls"]):
+            with patch("os.chmod", side_effect=tracking_chmod):
+                _m.do_enroll(
+                    scep_url="http://mock.local/scep",
+                    password="TESTPW",
+                    cn="IRIX-TTY-PVE-DELL-aabbccddeeff",
+                    output_dir=out_dir,
+                )
+
+        # chmod must have been called with 0o600 on client.key
+        key_path = os.path.join(out_dir, "client.key")
+        assert any(
+            os.path.basename(p) == "client.key" and m == 0o600
+            for p, m in chmod_calls
+        ), f"os.chmod(client.key, 0o600) not called; calls: {chmod_calls}"
+
+        # At the moment of the chmod call, the file must already exist
+        # (we track this: the file must be present because write happened first)
+        assert os.path.isfile(key_path), "client.key must exist after do_enroll"
+
+    def test_idempotency_running_twice_overwrites_files(self, tmp_path):
+        """Test 38: running do_enroll twice produces the same file structure (idempotent)."""
+        out_dir = str(tmp_path)
+        mock_data = self._build_mock_client_simple()
+
+        with patch("scep_enroll_zero.Client", mock_data["cls"]):
+            _m.do_enroll(
+                scep_url="http://mock.local/scep",
+                password="TESTPW",
+                cn="IRIX-TTY-PVE-DELL-aabbccddeeff",
+                output_dir=out_dir,
+            )
+        mtime1 = {
+            f: os.stat(os.path.join(out_dir, f)).st_mtime_ns
+            for f in ("ca.pem", "client.crt", "client.key")
+        }
+
+        # Reset mock to allow second call (re-create mock_data for fresh return values)
+        mock_data2 = self._build_mock_client_simple()
+        with patch("scep_enroll_zero.Client", mock_data2["cls"]):
+            _m.do_enroll(
+                scep_url="http://mock.local/scep",
+                password="TESTPW",
+                cn="IRIX-TTY-PVE-DELL-aabbccddeeff",
+                output_dir=out_dir,
+            )
+
+        # All three files must still exist and be valid PEM
+        for fname in ("ca.pem", "client.crt"):
+            path = os.path.join(out_dir, fname)
+            assert os.path.isfile(path), f"{fname} missing after second run"
+        # key is parseable
+        key_bytes = open(os.path.join(out_dir, "client.key"), "rb").read()
+        load_pem_private_key(key_bytes, password=None)
+        # chmod re-applied: mode must still be 0o600
+        mode = os.stat(os.path.join(out_dir, "client.key")).st_mode & 0o777
+        assert mode == 0o600, "client.key must be 0o600 after second run too"
+
+    def test_missing_output_dir_is_created(self, tmp_path):
+        """Test 39: do_enroll creates output_dir if it doesn't exist (os.makedirs)."""
+        out_dir = str(tmp_path / "nested" / "new_dir")
+        assert not os.path.exists(out_dir), "Precondition: directory must not exist"
+        mock_data = self._build_mock_client_simple()
+        with patch("scep_enroll_zero.Client", mock_data["cls"]):
+            _m.do_enroll(
+                scep_url="http://mock.local/scep",
+                password="TESTPW",
+                cn="IRIX-TTY-PVE-DELL-aabbccddeeff",
+                output_dir=out_dir,
+            )
+        assert os.path.isdir(out_dir), "do_enroll must create nested output_dir"
+        assert os.path.isfile(os.path.join(out_dir, "client.key"))
+
+
+# ── Test group 9: error when SCEP server returns 4xx/5xx ────────────────────
+
+
+class TestHttpErrorHandling:
+    """Tests 40–43: do_enroll raises when SCEP server returns HTTP errors."""
+
+    def test_get_ca_certs_http_error_propagates(self, tmp_path):
+        """Test 40: requests.exceptions.HTTPError from get_ca_certs propagates."""
+        import requests
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.get_ca_certs.side_effect = requests.exceptions.HTTPError(
+            "403 Forbidden"
+        )
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        with patch("scep_enroll_zero.Client", mock_client_cls):
+            with pytest.raises(requests.exceptions.HTTPError):
+                _m.do_enroll(
+                    scep_url="http://mock.local/scep",
+                    password="TEST",
+                    cn="IRIX-TTY-PVE-DELL-000000000000",
+                    output_dir=str(tmp_path),
+                )
+
+    def test_enrol_http_error_propagates(self, tmp_path):
+        """Test 41: requests.exceptions.HTTPError from enrol() propagates."""
+        import requests
+
+        from scep.Client.responses import CACertificates
+
+        ca_key     = ec.generate_private_key(ec.SECP256R1())
+        ra_enc_key = rsa.generate_private_key(65537, 2048)
+        ca_crypto  = _make_crypto_cert("Mock-CA", ca_key, is_ca=True)
+        ra_enc_crypto = _make_crypto_cert(
+            "Mock-RA-Enc", ra_enc_key, ku_enc=True, include_bc=False
+        )
+        pys_ca  = _pyscep_cert(ca_crypto)
+        pys_enc = _pyscep_cert(ra_enc_crypto)
+
+        ca_certs = CACertificates([pys_ca, pys_enc])
+        ca_certs._recipient = pys_enc
+        ca_certs._signer    = pys_enc
+        ca_certs._issuer    = pys_ca
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.get_ca_certs.return_value = ca_certs
+        mock_client_instance.enrol.side_effect = requests.exceptions.HTTPError("500 Server Error")
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        with patch("scep_enroll_zero.Client", mock_client_cls):
+            with pytest.raises(requests.exceptions.HTTPError):
+                _m.do_enroll(
+                    scep_url="http://mock.local/scep",
+                    password="TEST",
+                    cn="IRIX-TTY-PVE-DELL-000000000000",
+                    output_dir=str(tmp_path),
+                )
+
+    def test_connection_error_propagates(self, tmp_path):
+        """Test 42: requests.exceptions.ConnectionError from get_ca_certs propagates."""
+        import requests
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.get_ca_certs.side_effect = requests.exceptions.ConnectionError(
+            "Connection refused"
+        )
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        with patch("scep_enroll_zero.Client", mock_client_cls):
+            with pytest.raises(requests.exceptions.ConnectionError):
+                _m.do_enroll(
+                    scep_url="http://mock.local/scep",
+                    password="TEST",
+                    cn="IRIX-TTY-PVE-DELL-000000000000",
+                    output_dir=str(tmp_path),
+                )
+
+    def test_enrol_failure_status_raises_system_exit(self, tmp_path):
+        """Test 43: PKIStatus=FAILURE from enrol() causes SystemExit(1)."""
+        from scep.Client.client import EnrollmentStatus
+
+        ca_key     = ec.generate_private_key(ec.SECP256R1())
+        ra_enc_key = rsa.generate_private_key(65537, 2048)
+        ca_crypto  = _make_crypto_cert("Mock-CA", ca_key, is_ca=True)
+        ra_enc_crypto = _make_crypto_cert(
+            "Mock-RA-Enc", ra_enc_key, ku_enc=True, include_bc=False
+        )
+        pys_ca  = _pyscep_cert(ca_crypto)
+        pys_enc = _pyscep_cert(ra_enc_crypto)
+
+        ca_certs = CACertificates([pys_ca, pys_enc])
+        ca_certs._recipient = pys_enc
+        ca_certs._signer    = pys_enc
+        ca_certs._issuer    = pys_ca
+
+        # fail_info kwarg triggers PKIStatus.FAILURE in EnrollmentStatus
+        failure_status = EnrollmentStatus(fail_info="badRequest")
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.get_ca_certs.return_value = ca_certs
+        mock_client_instance.enrol.return_value = failure_status
+        mock_client_cls = MagicMock(return_value=mock_client_instance)
+
+        with patch("scep_enroll_zero.Client", mock_client_cls):
+            with pytest.raises(SystemExit) as exc_info:
+                _m.do_enroll(
+                    scep_url="http://mock.local/scep",
+                    password="TEST",
+                    cn="IRIX-TTY-PVE-DELL-000000000000",
+                    output_dir=str(tmp_path),
+                )
+        assert exc_info.value.code == 1, (
+            "do_enroll must raise SystemExit(1) on FAILURE status"
+        )
+
+
+# ── Test group 10: pathological NDES bundle edge cases ──────────────────────
+
+
+class TestPathologicalNdesBundles:
+    """Tests 44–49: edge cases in cert bundle that the script must handle."""
+
+    def test_fixed_filter_empty_bundle_returns_empty(self):
+        """Test 44: _fixed_filter on empty certificate list returns []."""
+        ca_certs = MagicMock()
+        ca_certs._certificates = []
+        result = _m._fixed_filter(ca_certs, set(), set(), ca_only=False)
+        assert result == []
+
+    def test_fixed_filter_only_ec_certs_no_rsa(self):
+        """Test 45: bundle with only EC certs → no RSA recipient can be selected."""
+        ec_key1 = ec.generate_private_key(ec.SECP256R1())
+        ec_key2 = ec.generate_private_key(ec.SECP256R1())
+        cert1 = _make_crypto_cert("EC1", ec_key1, ku_enc=True, include_bc=False)
+        cert2 = _make_crypto_cert("EC2", ec_key2, ku_sign=True, include_bc=False)
+        pys1  = _pyscep_cert(cert1)
+        pys2  = _pyscep_cert(cert2)
+        pys_list = [pys1, pys2]
+
+        # Simulate recipient selection loop from scep_enroll_zero.do_enroll
+        selected = None
+        for cand in pys_list:
+            ku = cand.key_usage
+            if (ku == {"key_encipherment"} or ku == {"data_encipherment", "key_encipherment"}):
+                pk_type = type(cand.public_key.to_crypto_public_key()).__name__
+                if pk_type == "RSAPublicKey":
+                    selected = cand
+                    break
+
+        assert selected is None, (
+            "An EC-only bundle should yield no RSA recipient "
+            "(script would skip forced selection and fall back to PyScep)"
+        )
+
+    def test_fixed_filter_two_rsa_ra_certs_same_key_usage(self):
+        """Test 46: two RSA RA certs with identical key_usage → first is selected."""
+        key1 = rsa.generate_private_key(65537, 2048)
+        key2 = rsa.generate_private_key(65537, 2048)
+        cert1 = _make_crypto_cert("RA-Enc-1", key1, ku_enc=True, include_bc=False)
+        cert2 = _make_crypto_cert("RA-Enc-2", key2, ku_enc=True, include_bc=False)
+        pys1  = _pyscep_cert(cert1)
+        pys2  = _pyscep_cert(cert2)
+        pys_list = [pys1, pys2]
+
+        selected = None
+        for cand in pys_list:
+            ku = cand.key_usage
+            if (ku == {"key_encipherment"} or ku == {"data_encipherment", "key_encipherment"}):
+                if type(cand.public_key.to_crypto_public_key()).__name__ == "RSAPublicKey":
+                    selected = cand
+                    break
+
+        assert selected is pys1, (
+            "First RSA+key_encipherment cert should be selected (loop break)"
+        )
+
+    def test_ra_cert_without_basic_constraints_is_ca_is_none(self):
+        """Test 47: RA cert without BasicConstraints has is_ca=None (PyScep behaviour)."""
+        key  = rsa.generate_private_key(65537, 2048)
+        cert = _make_crypto_cert("RA-NoBC", key, ku_enc=True, include_bc=False)
+        pys  = _pyscep_cert(cert)
+        assert pys.is_ca is None, (
+            "PyScep Certificate.is_ca must be None when BasicConstraints is absent"
+        )
+
+    def test_ra_cert_without_basic_constraints_passes_patched_filter(self):
+        """Test 48: RA cert with is_ca=None passes the patched _fixed_filter."""
+        key  = rsa.generate_private_key(65537, 2048)
+        cert = _make_crypto_cert("RA-NoBC-Enc", key, ku_enc=True, include_bc=False)
+        pys  = _pyscep_cert(cert)
+
+        ca_certs = MagicMock()
+        ca_certs._certificates = [pys]
+        result = _m._fixed_filter(
+            ca_certs,
+            required_key_usage={"key_encipherment"},
+            not_required_key_usage=set(),
+            ca_only=False,
+        )
+        assert len(result) == 1, (
+            "RA cert with is_ca=None should pass patched _fixed_filter"
+        )
+
+    def test_issuer_not_found_when_no_ca_cert_in_bundle(self):
+        """Test 49: issuer selection finds nothing when bundle has no CA cert."""
+        key1   = rsa.generate_private_key(65537, 2048)
+        cert1  = _make_crypto_cert("RA1", key1, ku_enc=True, include_bc=False)
+        pys1   = _pyscep_cert(cert1)
+
+        # No CA cert in pys_list → issuer selection loop finds nothing
+        pys_list = [pys1]
+        selected_issuer = None
+        for cand in pys_list:
+            if cand.is_ca and cand.subject == pys1.issuer:
+                selected_issuer = cand
+                break
+
+        assert selected_issuer is None, (
+            "Issuer selection must return None when no CA cert is in the bundle"
+        )

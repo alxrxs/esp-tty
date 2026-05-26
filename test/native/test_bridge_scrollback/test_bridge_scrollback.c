@@ -266,7 +266,145 @@ void test_ssh_session_replay_20_of_50(void)
     free(sb);
 }
 
-/* -- Main ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ */
+/* NEW tests                                                           */
+
+/* scrollback_get_lines on a buffer that exactly hit capacity: the
+ * returned byte count equals the capacity, not more.                 */
+void test_scrollback_exactly_full_correct_length(void)
+{
+    const size_t CAP = 128;
+    scrollback_t *sb = scrollback_create(CAP);
+    TEST_ASSERT_NOT_NULL(sb);
+
+    /* Fill exactly CAP bytes with one push */
+    uint8_t data[CAP];
+    memset(data, 0x33, CAP);
+    scrollback_push(sb, data, CAP);
+
+    size_t len = 0;
+    uint8_t *out = scrollback_get_lines(sb, 100000, &len);
+    TEST_ASSERT_NOT_NULL(out);
+    TEST_ASSERT_EQUAL_size_t(CAP, len);
+    TEST_ASSERT_EACH_EQUAL_UINT8(0x33, out, CAP);
+
+    free(out);
+    free(sb);
+}
+
+/* Replaying scrollback after several overlapping pushes (wrap scenario):
+ * verify first and last byte of the retained window are correct.      */
+void test_scrollback_wrap_first_and_last_byte(void)
+{
+    const size_t CAP = 32;
+    scrollback_t *sb = scrollback_create(CAP);
+    TEST_ASSERT_NOT_NULL(sb);
+
+    /* Push CAP+4 bytes in three parts to cause wrap-around */
+    uint8_t a[20], b[16];
+    memset(a, 'A', sizeof(a));
+    memset(b, 'B', sizeof(b));
+    scrollback_push(sb, a, sizeof(a));  /* head=20, used=20 */
+    scrollback_push(sb, b, sizeof(b));  /* total=36 > CAP=32 -> wraps */
+
+    size_t len = 0;
+    uint8_t *out = scrollback_get_lines(sb, 100000, &len);
+    TEST_ASSERT_NOT_NULL(out);
+    TEST_ASSERT_EQUAL_size_t(CAP, len);
+
+    /* The last 16 bytes must be 'B' (most recent) */
+    for (size_t i = len - 16; i < len; i++)
+        TEST_ASSERT_EQUAL_UINT8('B', out[i]);
+
+    free(out);
+    free(sb);
+}
+
+/* scrollback_format_header + scrollback_count_newlines integration:
+ * the header has "\r\n" at start and end, so it contains exactly 2 '\n'.
+ * This test documents the actual format: any parser counting lines must
+ * account for the 2 framing newlines.                                  */
+void test_header_contains_exactly_two_newlines(void)
+{
+    char buf[64];
+    int n = scrollback_format_header(100, buf, sizeof(buf));
+    TEST_ASSERT_GREATER_THAN_INT(0, n);
+    TEST_ASSERT_EQUAL_INT(2,
+        scrollback_count_newlines((const uint8_t *)buf, (size_t)n));
+}
+
+/* SCROLLBACK_FOOTER does not contain a '\n' inside the ANSI body, but
+ * ends with \r\n.  Verify exactly one '\n' is present.               */
+void test_footer_contains_exactly_one_newline(void)
+{
+    const char *f = SCROLLBACK_FOOTER;
+    TEST_ASSERT_EQUAL_INT(1,
+        scrollback_count_newlines((const uint8_t *)f, strlen(f)));
+}
+
+/* Push lines incrementally via bridge_pump, then replay only the last
+ * 1 line -- verifies the off-by-one boundary at exactly 1.           */
+void test_bridge_scrollback_last_one_line(void)
+{
+    const int    LINES = 10;
+    const size_t RING  = 512;
+    const size_t SB    = 4096;
+
+    ring_t       *ab = ring_create(RING);
+    ring_t       *ba = ring_create(RING);
+    scrollback_t *sb  = scrollback_create(SB);
+    TEST_ASSERT_NOT_NULL(ab);
+    TEST_ASSERT_NOT_NULL(ba);
+    TEST_ASSERT_NOT_NULL(sb);
+
+    /* Compute total bytes */
+    size_t total = 0;
+    for (int i = 0; i < LINES; i++) {
+        char line[32];
+        int ln = snprintf(line, sizeof(line), "line%d\n", i);
+        total += (size_t)ln;
+    }
+
+    /* Start pump and consumer */
+    pump_arg_t parg = {.src = ab, .dst = ba, .stop = false};
+    pthread_t pump_thr;
+    pthread_create(&pump_thr, NULL, pump_thread, &parg);
+
+    consumer_arg_t carg = {.src = ba, .sb = sb,
+                           .total_expected = total, .result = 99};
+    pthread_t cons_thr;
+    pthread_create(&cons_thr, NULL, consumer_thread, &carg);
+
+    for (int i = 0; i < LINES; i++) {
+        char line[32];
+        int ln = snprintf(line, sizeof(line), "line%d\n", i);
+        ring_send(ab, (const uint8_t *)line, (size_t)ln);
+    }
+
+    pthread_join(cons_thr, NULL);
+    TEST_ASSERT_EQUAL_INT(0, carg.result);
+
+    parg.stop = true;
+    ring_close(ab);
+    pthread_join(pump_thr, NULL);
+
+    size_t len = 0;
+    uint8_t *out = scrollback_get_lines(sb, 1, &len);
+    TEST_ASSERT_NOT_NULL(out);
+    TEST_ASSERT_EQUAL_INT(1, count_newlines(out, len));
+
+    char last[32];
+    int ll = snprintf(last, sizeof(last), "line%d\n", LINES - 1);
+    TEST_ASSERT_EQUAL_MEMORY(last, out + len - (size_t)ll, (size_t)ll);
+
+    free(out);
+    ring_free(ab);
+    ring_free(ba);
+    free(sb);
+}
+
+/* ------------------------------------------------------------------ */
+/* Main ---------------------------------------------------------------- */
 
 int main(void)
 {
@@ -275,5 +413,11 @@ int main(void)
     RUN_TEST(test_get_more_lines_than_stored_returns_all);
     RUN_TEST(test_bridge_pump_into_scrollback);
     RUN_TEST(test_ssh_session_replay_20_of_50);
+    /* NEW tests */
+    RUN_TEST(test_scrollback_exactly_full_correct_length);
+    RUN_TEST(test_scrollback_wrap_first_and_last_byte);
+    RUN_TEST(test_header_contains_exactly_two_newlines);
+    RUN_TEST(test_footer_contains_exactly_one_newline);
+    RUN_TEST(test_bridge_scrollback_last_one_line);
     return UNITY_END();
 }

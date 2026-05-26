@@ -151,6 +151,165 @@ void test_match_resets_state_so_next_byte_starts_fresh(void)
     TEST_ASSERT_EQUAL_size_t(0, t.matched);
 }
 
+/* ------------------------------------------------------------------ */
+/* NEW: adversarial partial-prefix mismatch sequences                  */
+
+/* Feed magic[0..k-1] then a byte that differs from magic[k] at each
+ * position k.  None should trigger; a subsequent full magic must still
+ * match cleanly.                                                       */
+void test_mismatch_at_every_position_no_spurious_fire(void)
+{
+    const uint8_t *m    = usb_cdc_boot_trigger_magic();
+    size_t         mlen = usb_cdc_boot_trigger_magic_len();
+
+    for (size_t k = 1; k < mlen; k++) {
+        usb_cdc_boot_trigger_t s;
+        usb_cdc_boot_trigger_init(&s);
+
+        /* Feed matching prefix up to position k-1 */
+        for (size_t j = 0; j < k; j++) {
+            bool fire = usb_cdc_boot_trigger_feed(&s, m[j]);
+            TEST_ASSERT_FALSE(fire);
+        }
+
+        /* Feed a definitely-wrong byte (complement of m[k], avoiding '\n'
+         * which is the restart-byte and would set matched=1).           */
+        uint8_t bad = (uint8_t)(~m[k]);
+        if (bad == '\n') bad = '?';
+        bool fire = usb_cdc_boot_trigger_feed(&s, bad);
+        TEST_ASSERT_FALSE(fire);
+
+        /* Now feed a full correct magic: must fire exactly once */
+        int fires = 0;
+        for (size_t j = 0; j < mlen; j++)
+            if (usb_cdc_boot_trigger_feed(&s, m[j])) fires++;
+        TEST_ASSERT_EQUAL_INT(1, fires);
+    }
+}
+
+/* An almost-correct sequence that diverges only on the LAST byte
+ * (magic[mlen-1]) must not fire.                                       */
+void test_diverge_on_last_byte_no_fire(void)
+{
+    const uint8_t *m    = usb_cdc_boot_trigger_magic();
+    size_t         mlen = usb_cdc_boot_trigger_magic_len();
+
+    /* Feed all but the last byte correctly */
+    for (size_t i = 0; i < mlen - 1; i++) {
+        TEST_ASSERT_FALSE(usb_cdc_boot_trigger_feed(&t, m[i]));
+    }
+    /* Feed a wrong final byte (magic ends with '\n'; send a non-'\n') */
+    TEST_ASSERT_FALSE(usb_cdc_boot_trigger_feed(&t, 'X'));
+}
+
+/* Interleaved noise between correct magic bytes: no fire.             */
+void test_noise_interleaved_in_magic_no_fire(void)
+{
+    const uint8_t *m    = usb_cdc_boot_trigger_magic();
+    size_t         mlen = usb_cdc_boot_trigger_magic_len();
+    bool fire = false;
+
+    /* Alternate: correct byte, noise byte -- should never fire because
+     * the noise breaks the match at each second byte.                 */
+    for (size_t i = 0; i < mlen; i++) {
+        if (usb_cdc_boot_trigger_feed(&t, m[i])) fire = true;
+        if (i < mlen - 1)
+            if (usb_cdc_boot_trigger_feed(&t, 'Q')) fire = true;
+    }
+    TEST_ASSERT_FALSE(fire);
+}
+
+/* Five consecutive full magic sequences: must fire exactly five times. */
+void test_five_consecutive_matches(void)
+{
+    const uint8_t *m    = usb_cdc_boot_trigger_magic();
+    size_t         mlen = usb_cdc_boot_trigger_magic_len();
+    int fires = 0;
+
+    for (int rep = 0; rep < 5; rep++)
+        for (size_t i = 0; i < mlen; i++)
+            if (usb_cdc_boot_trigger_feed(&t, m[i])) fires++;
+
+    TEST_ASSERT_EQUAL_INT(5, fires);
+}
+
+/* Magic with '\n' start byte: feed the magic as if it were preceded by
+ * an unrelated '\n' in the stream (the '\n' is magic[0], so the
+ * preceding '\n' starts a fresh match attempt).                        */
+void test_magic_immediately_after_stray_newline(void)
+{
+    /* Feed a stray '\n' -- which IS magic[0], so matched becomes 1 */
+    bool fire = usb_cdc_boot_trigger_feed(&t, '\n');
+    TEST_ASSERT_FALSE(fire);
+
+    const uint8_t *m    = usb_cdc_boot_trigger_magic();
+    size_t         mlen = usb_cdc_boot_trigger_magic_len();
+
+    /* The stray '\n' already matched magic[0].  Now feed magic[1..end].
+     * This must complete the sequence and fire exactly once.           */
+    int fires = 0;
+    for (size_t i = 1; i < mlen; i++)
+        if (usb_cdc_boot_trigger_feed(&t, m[i])) fires++;
+
+    TEST_ASSERT_EQUAL_INT(1, fires);
+}
+
+/* Partial prefix match where the mismatching byte happens to be '\n'
+ * (start byte).  The spec says matched resets to 1 in that case.
+ * Verify the matcher correctly transitions, then completes on a
+ * subsequently fed full magic-sans-first-byte.                        */
+void test_mismatch_byte_is_newline_restarts_at_1(void)
+{
+    const uint8_t *m    = usb_cdc_boot_trigger_magic();
+    size_t         mlen = usb_cdc_boot_trigger_magic_len();
+
+    /* Feed magic[0..3] (partial) */
+    for (size_t i = 0; i < 4; i++)
+        TEST_ASSERT_FALSE(usb_cdc_boot_trigger_feed(&t, m[i]));
+
+    /* Feed '\n' as the mismatching byte at position 4.
+     * '\n' == magic[0], so matched should become 1.              */
+    TEST_ASSERT_FALSE(usb_cdc_boot_trigger_feed(&t, '\n'));
+    TEST_ASSERT_EQUAL_size_t(1, t.matched);
+
+    /* Now feed magic[1..end] to complete the match */
+    int fires = 0;
+    for (size_t i = 1; i < mlen; i++)
+        if (usb_cdc_boot_trigger_feed(&t, m[i])) fires++;
+    TEST_ASSERT_EQUAL_INT(1, fires);
+}
+
+/* After a match the state resets to 0; the very next byte that is not
+ * magic[0] must leave matched at 0 (no phantom partial state).       */
+void test_after_match_non_start_byte_stays_zero(void)
+{
+    const uint8_t *m    = usb_cdc_boot_trigger_magic();
+    size_t         mlen = usb_cdc_boot_trigger_magic_len();
+
+    /* Complete one match */
+    for (size_t i = 0; i < mlen; i++)
+        usb_cdc_boot_trigger_feed(&t, m[i]);
+
+    TEST_ASSERT_EQUAL_size_t(0, t.matched);
+
+    /* Feed a non-start byte; matched must remain 0 */
+    usb_cdc_boot_trigger_feed(&t, 'Z');
+    TEST_ASSERT_EQUAL_size_t(0, t.matched);
+}
+
+/* Feed every possible single-byte value; none should trigger a match
+ * on its own (magic is longer than 1 byte).                          */
+void test_single_byte_never_triggers_match(void)
+{
+    for (int b = 0; b < 256; b++) {
+        usb_cdc_boot_trigger_t s;
+        usb_cdc_boot_trigger_init(&s);
+        bool fire = usb_cdc_boot_trigger_feed(&s, (uint8_t)b);
+        TEST_ASSERT_FALSE(fire);
+    }
+}
+
+/* ------------------------------------------------------------------ */
 int app_main(void)
 {
     UNITY_BEGIN();
@@ -165,6 +324,15 @@ int app_main(void)
     RUN_TEST(test_magic_is_nl_bracketed_body_has_no_nl);
     RUN_TEST(test_magic_reasonable_length);
     RUN_TEST(test_match_resets_state_so_next_byte_starts_fresh);
+    /* NEW adversarial tests */
+    RUN_TEST(test_mismatch_at_every_position_no_spurious_fire);
+    RUN_TEST(test_diverge_on_last_byte_no_fire);
+    RUN_TEST(test_noise_interleaved_in_magic_no_fire);
+    RUN_TEST(test_five_consecutive_matches);
+    RUN_TEST(test_magic_immediately_after_stray_newline);
+    RUN_TEST(test_mismatch_byte_is_newline_restarts_at_1);
+    RUN_TEST(test_after_match_non_start_byte_stays_zero);
+    RUN_TEST(test_single_byte_never_triggers_match);
     return UNITY_END();
 }
 

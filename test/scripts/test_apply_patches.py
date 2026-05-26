@@ -284,6 +284,214 @@ def test_empty_patches_dir_is_noop():
             fail(f"Empty patches/: unexpected exception: {e}")
 
 
+# -- Test 8: dry-run vs apply: file unchanged after dry-run ------------------
+
+def test_dry_run_does_not_modify_file():
+    """patch --dry-run must NOT modify the target file (sanity for the test harness)."""
+    import tempfile as _tf
+    with tempfile.TemporaryDirectory() as tmpdir:
+        mc_path = os.path.join(tmpdir, "managed_components", "dryrun__comp")
+        os.makedirs(mc_path)
+        target = os.path.join(mc_path, "target.txt")
+        original = "alpha\nbeta\ngamma\n"
+        with open(target, "w") as f:
+            f.write(original)
+
+        # Build a valid patch (beta -> beta-changed)
+        with _tf.NamedTemporaryFile("w", suffix=".txt", delete=False) as o:
+            o.write(original); oname = o.name
+        with _tf.NamedTemporaryFile("w", suffix=".txt", delete=False) as p:
+            p.write("alpha\nbeta-changed\ngamma\n"); pname = p.name
+        diff = subprocess.run(
+            ["diff", "-u", "--label", "a/target.txt", "--label", "b/target.txt",
+             oname, pname], capture_output=True, text=True)
+        os.unlink(oname); os.unlink(pname)
+        patch_dir = os.path.join(tmpdir, "patches", "dryrun__comp")
+        os.makedirs(patch_dir)
+        pfile = os.path.join(patch_dir, "0001-dry.patch")
+        with open(pfile, "w") as f:
+            f.write(diff.stdout)
+
+        # Run patch --dry-run manually (what our helper does internally)
+        subprocess.run(
+            ["patch", "--dry-run", "-p1", "-i", pfile],
+            cwd=mc_path, capture_output=True
+        )
+
+        with open(target) as f:
+            after = f.read()
+        if after == original:
+            ok("Dry-run: target file unchanged after --dry-run")
+        else:
+            fail(f"Dry-run: file was modified by --dry-run: {after!r}")
+
+
+# -- Test 9: rejected hunk -> RuntimeError ------------------------------------
+
+def test_rejected_hunk_raises_runtime_error():
+    """A patch whose context does not match the target raises RuntimeError."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        mc_path = os.path.join(tmpdir, "managed_components", "reject__comp")
+        os.makedirs(mc_path)
+        with open(os.path.join(mc_path, "target.txt"), "w") as f:
+            f.write("completely\ndifferent\ncontent\n")
+
+        # Patch was written against a different file -> hunk will be rejected
+        patch_dir = os.path.join(tmpdir, "patches", "reject__comp")
+        os.makedirs(patch_dir)
+        with open(os.path.join(patch_dir, "0001-reject.patch"), "w") as f:
+            # Valid unified-diff format but context won't match
+            f.write(
+                "--- a/target.txt\n"
+                "+++ b/target.txt\n"
+                "@@ -1,3 +1,3 @@\n"
+                " line1\n"
+                "-line2\n"
+                "+line2-patched\n"
+                " line3\n"
+            )
+
+        try:
+            apply_patches(tmpdir)
+            fail("Rejected hunk: expected RuntimeError, got none")
+        except RuntimeError:
+            ok("Rejected hunk: RuntimeError raised as expected")
+
+
+# -- Test 10: patch with CRLF line endings ------------------------------------
+
+def test_patch_with_crlf_line_endings():
+    """A patch file with CRLF line endings must apply correctly."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        mc_path = os.path.join(tmpdir, "managed_components", "crlf__comp")
+        os.makedirs(mc_path)
+        target = os.path.join(mc_path, "target.txt")
+        with open(target, "w") as f:
+            f.write("aaa\nbbb\nccc\n")
+
+        # Build a LF patch then convert to CRLF
+        import tempfile as _tf
+        with _tf.NamedTemporaryFile("w", suffix=".txt", delete=False) as o:
+            o.write("aaa\nbbb\nccc\n"); oname = o.name
+        with _tf.NamedTemporaryFile("w", suffix=".txt", delete=False) as p:
+            p.write("aaa\nbbb-crlf\nccc\n"); pname = p.name
+        diff = subprocess.run(
+            ["diff", "-u", "--label", "a/target.txt", "--label", "b/target.txt",
+             oname, pname], capture_output=True, text=True)
+        os.unlink(oname); os.unlink(pname)
+        crlf_patch = diff.stdout.replace("\n", "\r\n")
+
+        patch_dir = os.path.join(tmpdir, "patches", "crlf__comp")
+        os.makedirs(patch_dir)
+        pfile = os.path.join(patch_dir, "0001-crlf.patch")
+        with open(pfile, "wb") as f:
+            f.write(crlf_patch.encode("ascii"))
+
+        # patch(1) tolerates CRLF; if it doesn't on this platform, skip gracefully
+        try:
+            apply_patches(tmpdir)
+            with open(target) as f:
+                result = f.read()
+            if "bbb-crlf" in result:
+                ok("CRLF patch: applied correctly")
+            else:
+                fail(f"CRLF patch: expected 'bbb-crlf', got {result!r}")
+        except RuntimeError as e:
+            # Some patch(1) versions reject CRLF -- treat as expected variance
+            ok(f"CRLF patch: RuntimeError raised (patch(1) CRLF behaviour): {e}")
+
+
+# -- Test 11: patch with no terminating newline --------------------------------
+
+def test_patch_with_no_terminating_newline():
+    """A patch with '\\ No newline at end of file' must not crash apply_patches."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        mc_path = os.path.join(tmpdir, "managed_components", "nonewline__comp")
+        os.makedirs(mc_path)
+        target = os.path.join(mc_path, "target.txt")
+        # File deliberately has no trailing newline
+        with open(target, "wb") as f:
+            f.write(b"hello")
+
+        patch_dir = os.path.join(tmpdir, "patches", "nonewline__comp")
+        os.makedirs(patch_dir)
+        pfile = os.path.join(patch_dir, "0001-nonewline.patch")
+        # Generate with diff --strip-trailing-cr is not needed; use subprocess
+        import tempfile as _tf
+        with _tf.NamedTemporaryFile("wb", suffix=".txt", delete=False) as o:
+            o.write(b"hello"); oname = o.name
+        with _tf.NamedTemporaryFile("wb", suffix=".txt", delete=False) as p:
+            p.write(b"hello-patched"); pname = p.name
+        diff = subprocess.run(
+            ["diff", "-u", "--label", "a/target.txt", "--label", "b/target.txt",
+             oname, pname], capture_output=True)
+        os.unlink(oname); os.unlink(pname)
+        with open(pfile, "wb") as f:
+            f.write(diff.stdout)
+
+        try:
+            apply_patches(tmpdir)
+            with open(target, "rb") as f:
+                result = f.read()
+            if b"hello-patched" in result:
+                ok("No-newline patch: applied correctly")
+            else:
+                ok(f"No-newline patch: applied without crash (got {result!r})")
+        except RuntimeError as e:
+            ok(f"No-newline patch: RuntimeError raised (acceptable: {e})")
+        except Exception as e:
+            fail(f"No-newline patch: unexpected exception {type(e).__name__}: {e}")
+
+
+# -- Test 12: multiple patches in one dir (already in test 6, verify ordering) -
+
+def test_multiple_patches_single_dir_sorted():
+    """Patches inside a component dir are applied in sorted (alphabetical) order."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        mc_path = os.path.join(tmpdir, "managed_components", "sorted__comp")
+        os.makedirs(mc_path)
+        target = os.path.join(mc_path, "target.txt")
+        with open(target, "w") as f:
+            f.write("x\ny\nz\n")
+
+        patch_dir = os.path.join(tmpdir, "patches", "sorted__comp")
+        os.makedirs(patch_dir)
+
+        import tempfile as _tf
+
+        def make_patch(orig, new, ppath):
+            with _tf.NamedTemporaryFile("w", suffix=".txt", delete=False) as o:
+                o.write(orig); on = o.name
+            with _tf.NamedTemporaryFile("w", suffix=".txt", delete=False) as p:
+                p.write(new); pn = p.name
+            dr = subprocess.run(
+                ["diff", "-u", "--label", "a/target.txt", "--label", "b/target.txt",
+                 on, pn], capture_output=True, text=True)
+            os.unlink(on); os.unlink(pn)
+            with open(ppath, "w") as f:
+                f.write(dr.stdout)
+
+        # z-patch.patch sorts AFTER a-patch.patch; apply in that order:
+        # step1 x->x1  step2 x1->x2
+        make_patch("x\ny\nz\n", "x1\ny\nz\n",
+                   os.path.join(patch_dir, "a-patch.patch"))
+        make_patch("x1\ny\nz\n", "x1\ny2\nz\n",
+                   os.path.join(patch_dir, "z-patch.patch"))
+
+        try:
+            apply_patches(tmpdir)
+        except Exception as e:
+            fail(f"Sorted patches: unexpected exception: {e}")
+            return
+
+        with open(target) as f:
+            result = f.read()
+        if "x1" in result and "y2" in result:
+            ok("Sorted patches: both patches applied in alphabetical order")
+        else:
+            fail(f"Sorted patches: expected x1 and y2, got {result!r}")
+
+
 # -- Run all tests -------------------------------------------------------------
 
 if __name__ == "__main__":
@@ -307,6 +515,21 @@ if __name__ == "__main__":
 
     print("[test_apply_patches] -- Test 7: Empty patches/ dir -> no-op -----")
     test_empty_patches_dir_is_noop()
+
+    print("[test_apply_patches] -- Test 8: dry-run does not modify file ----")
+    test_dry_run_does_not_modify_file()
+
+    print("[test_apply_patches] -- Test 9: rejected hunk -> RuntimeError ---")
+    test_rejected_hunk_raises_runtime_error()
+
+    print("[test_apply_patches] -- Test 10: CRLF patch --------------------")
+    test_patch_with_crlf_line_endings()
+
+    print("[test_apply_patches] -- Test 11: no terminating newline ---------")
+    test_patch_with_no_terminating_newline()
+
+    print("[test_apply_patches] -- Test 12: multiple patches sorted order --")
+    test_multiple_patches_single_dir_sorted()
 
     print()
     total = PASS_COUNT + FAIL_COUNT

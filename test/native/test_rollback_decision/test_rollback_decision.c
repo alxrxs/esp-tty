@@ -72,6 +72,48 @@ void test_pending_verify_is_distinct_from_zero(void)
     TEST_ASSERT_NOT_EQUAL(0, (int)ESP_OTA_IMG_PENDING_VERIFY);
 }
 
+/* Only PENDING_VERIFY is MARK_VALID -- enum constants have the right values. */
+void test_enum_values_match_esp_idf_spec(void)
+{
+    TEST_ASSERT_EQUAL_INT(0x0,        (int)ESP_OTA_IMG_NEW);
+    TEST_ASSERT_EQUAL_INT(0x1,        (int)ESP_OTA_IMG_PENDING_VERIFY);
+    TEST_ASSERT_EQUAL_INT(0x2,        (int)ESP_OTA_IMG_VALID);
+    TEST_ASSERT_EQUAL_INT(0x3,        (int)ESP_OTA_IMG_INVALID);
+    TEST_ASSERT_EQUAL_INT(0x4,        (int)ESP_OTA_IMG_ABORTED);
+    TEST_ASSERT_EQUAL_INT((int)0xFFFFFFFF, (int)ESP_OTA_IMG_UNDEFINED);
+}
+
+/* VALID does NOT accidentally equal PENDING_VERIFY. */
+void test_valid_not_equal_pending_verify(void)
+{
+    TEST_ASSERT_NOT_EQUAL((int)ESP_OTA_IMG_PENDING_VERIFY,
+                          (int)ESP_OTA_IMG_VALID);
+}
+
+/* Calling twice with PENDING_VERIFY always gives MARK_VALID (pure function). */
+void test_pending_verify_idempotent(void)
+{
+    TEST_ASSERT_EQUAL_INT(ROLLBACK_DECISION_MARK_VALID,
+                          rollback_decide(ESP_OTA_IMG_PENDING_VERIFY));
+    TEST_ASSERT_EQUAL_INT(ROLLBACK_DECISION_MARK_VALID,
+                          rollback_decide(ESP_OTA_IMG_PENDING_VERIFY));
+}
+
+/* Every non-PENDING_VERIFY value produces NOOP -- confirm no false positives. */
+void test_all_non_pending_states_are_noop(void)
+{
+    esp_ota_img_states_t states[] = {
+        ESP_OTA_IMG_NEW,
+        ESP_OTA_IMG_VALID,
+        ESP_OTA_IMG_INVALID,
+        ESP_OTA_IMG_ABORTED,
+        ESP_OTA_IMG_UNDEFINED,
+    };
+    for (int i = 0; i < (int)(sizeof(states)/sizeof(states[0])); i++) {
+        TEST_ASSERT_EQUAL_INT(ROLLBACK_DECISION_NOOP, rollback_decide(states[i]));
+    }
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -81,8 +123,12 @@ int main(void)
     RUN_TEST(test_invalid_returns_noop);
     RUN_TEST(test_aborted_returns_noop);
     RUN_TEST(test_undefined_returns_noop);
-    /* New edge-case tests */
     RUN_TEST(test_out_of_range_int_returns_noop);
     RUN_TEST(test_pending_verify_is_distinct_from_zero);
+    /* Additional boundary / regression cases */
+    RUN_TEST(test_enum_values_match_esp_idf_spec);
+    RUN_TEST(test_valid_not_equal_pending_verify);
+    RUN_TEST(test_pending_verify_idempotent);
+    RUN_TEST(test_all_non_pending_states_are_noop);
     return UNITY_END();
 }

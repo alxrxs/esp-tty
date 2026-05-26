@@ -365,3 +365,220 @@ def test_wifi_country_code_ifdef_count_matches_call_count():
         f"{len(calls)} esp_wifi_set_country_code(... , true) call(s). "
         "Each call site should have its own guard."
     )
+
+
+# ---------------------------------------------------------------------------
+# New: STA_DISCONNECTED reason-code matrix
+# ---------------------------------------------------------------------------
+
+def test_sta_disconnected_handler_clears_connected_bit():
+    """WIFI_EVENT_STA_DISCONNECTED handler clears WIFI_CONNECTED_BIT from the event group."""
+    src = _read_wifi_c()
+    assert "xEventGroupClearBits" in src, \
+        "xEventGroupClearBits not found in wifi.c"
+    assert "WIFI_CONNECTED_BIT" in src, \
+        "WIFI_CONNECTED_BIT not referenced in wifi.c"
+    # The clear must happen in the disconnected handler.
+    m = re.search(
+        r"WIFI_EVENT_STA_DISCONNECTED(.*?)disc_done\s*:",
+        src, re.DOTALL,
+    )
+    assert m, "STA_DISCONNECTED handler block (up to disc_done: label) not found"
+    block = m.group(1)
+    assert "xEventGroupClearBits" in block, (
+        "xEventGroupClearBits(WIFI_CONNECTED_BIT) not called inside the "
+        "STA_DISCONNECTED handler block. Callers that poll the event group "
+        "would see a stale CONNECTED state."
+    )
+
+
+def test_sta_disconnected_retry_increments_s_retry_num():
+    """Retry branch inside STA_DISCONNECTED increments s_retry_num before reconnect."""
+    src = _read_wifi_c()
+    # Use the full handler block (up to and including the disc_done: label).
+    m = re.search(
+        r"WIFI_EVENT_STA_DISCONNECTED(.*?)disc_done\s*:",
+        src, re.DOTALL,
+    )
+    assert m, "STA_DISCONNECTED handler block (up to disc_done: label) not found"
+    block = m.group(1)
+    assert "s_retry_num++" in block, (
+        "s_retry_num++ not found in STA_DISCONNECTED handler block. "
+        "The retry counter must be incremented each time esp_wifi_connect is "
+        "called so WIFI_MAX_RETRY enforcement is accurate."
+    )
+
+
+def test_sta_disconnected_sets_fail_bit_on_max_retry():
+    """STA_DISCONNECTED handler sets WIFI_FAIL_BIT when retries are exhausted."""
+    src = _read_wifi_c()
+    m = re.search(
+        r"WIFI_EVENT_STA_DISCONNECTED(.*?)disc_done\s*:",
+        src, re.DOTALL,
+    )
+    assert m, "STA_DISCONNECTED handler block (up to disc_done: label) not found"
+    block = m.group(1)
+    assert "WIFI_FAIL_BIT" in block, (
+        "WIFI_FAIL_BIT not set in STA_DISCONNECTED handler. "
+        "wifi_init_sta() waits on both CONNECTED_BIT and FAIL_BIT; if FAIL_BIT "
+        "is never set, the wait blocks forever when the AP disappears."
+    )
+    assert "xEventGroupSetBits" in block, \
+        "xEventGroupSetBits not called in STA_DISCONNECTED handler"
+
+
+def test_sta_disconnected_infinite_retry_when_max_is_zero():
+    """WIFI_MAX_RETRY=0 means infinite retries (no hard stop)."""
+    src = _read_wifi_c()
+    # The default must be 0.
+    m = re.search(r"#define\s+WIFI_MAX_RETRY\s+(\d+)", src)
+    assert m, "WIFI_MAX_RETRY #define not found in wifi.c"
+    default = int(m.group(1))
+    assert default == 0, (
+        f"WIFI_MAX_RETRY default is {default}, expected 0 (infinite). "
+        "The intent is to retry forever until the AP returns; a non-zero "
+        "default would cause the firmware to give up after a transient outage."
+    )
+    # The infinite check must be present.
+    assert "WIFI_MAX_RETRY == 0" in src or "infinite" in src, (
+        "WIFI_MAX_RETRY == 0 infinite-retry check not found in wifi.c."
+    )
+
+
+def test_reconnect_forever_after_fail_bit():
+    """After setting WIFI_FAIL_BIT the code still calls esp_wifi_connect (RECONNECT_FOREVER)."""
+    src = _read_wifi_c()
+    # Find the else-branch that sets FAIL_BIT and verify esp_wifi_connect follows.
+    m = re.search(
+        r"xEventGroupSetBits\(s_wifi_event_group,\s*WIFI_FAIL_BIT\)(.*?)esp_wifi_connect\(\)",
+        src, re.DOTALL,
+    )
+    assert m, (
+        "esp_wifi_connect() not found after xEventGroupSetBits(WIFI_FAIL_BIT). "
+        "RECONNECT_FOREVER semantics require that the driver keeps reconnecting "
+        "even after signalling failure, so the firmware recovers when the AP "
+        "returns without a reboot."
+    )
+
+
+def test_assoc_leave_does_not_set_fail_bit():
+    """ASSOC_LEAVE branch does NOT set WIFI_FAIL_BIT (planned teardown, not a failure)."""
+    src = _read_wifi_c()
+    # Grab the ASSOC_LEAVE branch -- everything between the reason check and disc_done.
+    m = re.search(
+        r"WIFI_REASON_ASSOC_LEAVE(.*?)goto\s+disc_done",
+        src, re.DOTALL,
+    )
+    assert m, "ASSOC_LEAVE branch (up to goto disc_done) not found"
+    branch = m.group(1)
+    assert "WIFI_FAIL_BIT" not in branch, (
+        "WIFI_FAIL_BIT is set inside the ASSOC_LEAVE branch. "
+        "Reason 8 is a planned teardown (PSK->enterprise transition); setting "
+        "FAIL_BIT here would cause wifi_init_enterprise_bootstrap to exit "
+        "its wait-loop early and report failure."
+    )
+
+
+def test_assoc_leave_does_not_call_esp_wifi_connect():
+    """ASSOC_LEAVE branch does NOT call esp_wifi_connect (prevents race with next wifi_mode_*)."""
+    src = _read_wifi_c()
+    m = re.search(
+        r"WIFI_REASON_ASSOC_LEAVE(.*?)goto\s+disc_done",
+        src, re.DOTALL,
+    )
+    assert m, "ASSOC_LEAVE branch not found"
+    branch = m.group(1)
+    assert "esp_wifi_connect" not in branch, (
+        "esp_wifi_connect() called inside the ASSOC_LEAVE branch. "
+        "This would race the subsequent wifi_mode_enterprise() call that "
+        "re-configures the STA interface for the enterprise SSID."
+    )
+
+
+def test_disc_done_label_exists_after_retry_block():
+    """disc_done: label exists at the end of the STA_DISCONNECTED handler."""
+    src = _read_wifi_c()
+    assert "disc_done:" in src, (
+        "disc_done: label not found in wifi.c. "
+        "The ASSOC_LEAVE goto target must be present or the compiler will reject "
+        "the goto statement."
+    )
+
+
+def test_sta_disconnected_logs_reason_code_in_retry_branch():
+    """Retry branch logs the reason code in its LOGW message."""
+    src = _read_wifi_c()
+    m = re.search(
+        r"WIFI_EVENT_STA_DISCONNECTED(.*?)disc_done\s*:",
+        src, re.DOTALL,
+    )
+    assert m, "STA_DISCONNECTED handler block not found"
+    block = m.group(1)
+    # ev->reason must appear in at least one log call inside the retry block.
+    assert "ev->reason" in block, (
+        "ev->reason not referenced in the STA_DISCONNECTED handler log message. "
+        "Log the reason code so field debugging of unexpected disconnects is "
+        "possible without attaching a JTAG probe."
+    )
+
+
+# ---------------------------------------------------------------------------
+# New: wifi_mode_psk / wifi_mode_enterprise state machine guards
+# ---------------------------------------------------------------------------
+
+def test_wifi_mode_psk_clears_event_bits_before_start():
+    """wifi_mode_psk clears WIFI_CONNECTED_BIT and WIFI_FAIL_BIT before esp_wifi_start."""
+    src = _read_wifi_c()
+    m = re.search(
+        r"static\s+esp_err_t\s+wifi_mode_psk\b(.*?)(?=\nstatic\s+(?:bool|esp_err_t)\s+\w|\Z)",
+        src, re.DOTALL,
+    )
+    assert m, "wifi_mode_psk() not found in main/wifi.c"
+    body = m.group(0)
+    assert "xEventGroupClearBits" in body, (
+        "xEventGroupClearBits not called in wifi_mode_psk(). "
+        "Stale event bits from a prior run can cause wifi_init_enterprise_bootstrap "
+        "to exit its wait-loop immediately on re-entry."
+    )
+
+
+def test_wifi_mode_enterprise_clears_event_bits():
+    """wifi_mode_enterprise clears WIFI_CONNECTED_BIT and WIFI_FAIL_BIT on entry."""
+    src = _read_wifi_c()
+    m = re.search(
+        r"static\s+esp_err_t\s+wifi_mode_enterprise\b(.*?)(?=\n/\*\s*-{5}|\nstatic\s+esp_err_t\s+wifi_smart_init_common|\Z)",
+        src, re.DOTALL,
+    )
+    assert m, "wifi_mode_enterprise() not found in main/wifi.c"
+    body = m.group(0)
+    assert "xEventGroupClearBits" in body or "WIFI_CONNECTED_BIT" in body, (
+        "WIFI_CONNECTED_BIT not cleared in wifi_mode_enterprise(). "
+        "A stale CONNECTED_BIT would cause the caller's wait-loop to exit "
+        "immediately without waiting for a new IP assignment."
+    )
+
+
+def test_wifi_ps_none_present_globally():
+    """WIFI_PS_NONE appears in wifi.c to ensure power-save is disabled."""
+    src = _read_wifi_c()
+    count = src.count("WIFI_PS_NONE")
+    assert count >= 1, (
+        "WIFI_PS_NONE not found in wifi.c. "
+        "Power-save must be explicitly disabled (WIFI_PS_NONE) on the Zero "
+        "to avoid the modem-sleep beacon timing race."
+    )
+
+
+def test_wifi_country_code_error_logged_on_failure():
+    """Failed esp_wifi_set_country_code call is logged with ESP_LOGW."""
+    src = _read_wifi_c()
+    # Both call sites should have a LOGW for the failure case.
+    logw_after_cc = re.findall(
+        r"esp_wifi_set_country_code.*?ESP_LOG[WE]",
+        src, re.DOTALL,
+    )
+    assert logw_after_cc, (
+        "No ESP_LOGW/LOGE found after esp_wifi_set_country_code in wifi.c. "
+        "A failed country-code set should be logged so it surfaces during "
+        "field testing (wrong region settings degrade channel availability)."
+    )

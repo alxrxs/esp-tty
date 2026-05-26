@@ -441,6 +441,126 @@ static void test_parse_x509_time_not_after_ne_not_before(void)
 }
 
 /* --------------------------------------------------------------------------
+ * Test: max-length dev_key (CRED_DEV_KEY_MAX bytes) is preserved
+ * -------------------------------------------------------------------------- */
+static void test_max_dev_key_preserves_all_bytes(void)
+{
+    cred_store_t in;
+    memset(&in, 0, sizeof(in));
+    in.dev_key_len = CRED_DEV_KEY_MAX;
+    for (size_t i = 0; i < CRED_DEV_KEY_MAX; i++)
+        in.dev_key[i] = (uint8_t)(i ^ 0xA5);
+    in.dev_cert_len = 1; in.dev_cert[0] = 0x01;
+    in.ca_chain_len = 1; in.ca_chain[0] = 0x02;
+    in.not_after    = 9999;
+
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cred_store_save(&in));
+    cred_store_t out;
+    memset(&out, 0, sizeof(out));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cred_store_load(&out));
+    TEST_ASSERT_EQUAL_size_t(CRED_DEV_KEY_MAX, out.dev_key_len);
+    TEST_ASSERT_EQUAL_MEMORY(in.dev_key, out.dev_key, CRED_DEV_KEY_MAX);
+}
+
+/* --------------------------------------------------------------------------
+ * Test: max-length dev_cert (CRED_DEV_CERT_MAX bytes) is preserved
+ * -------------------------------------------------------------------------- */
+static void test_max_dev_cert_preserves_all_bytes(void)
+{
+    cred_store_t in;
+    memset(&in, 0, sizeof(in));
+    in.dev_key_len = 1; in.dev_key[0] = 0x01;
+    in.dev_cert_len = CRED_DEV_CERT_MAX;
+    for (size_t i = 0; i < CRED_DEV_CERT_MAX; i++)
+        in.dev_cert[i] = (uint8_t)(i ^ 0x5A);
+    in.ca_chain_len = 1; in.ca_chain[0] = 0x02;
+    in.not_after = 1234567890;
+
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cred_store_save(&in));
+    cred_store_t out;
+    memset(&out, 0, sizeof(out));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cred_store_load(&out));
+    TEST_ASSERT_EQUAL_size_t(CRED_DEV_CERT_MAX, out.dev_cert_len);
+    TEST_ASSERT_EQUAL_MEMORY(in.dev_cert, out.dev_cert, CRED_DEV_CERT_MAX);
+}
+
+/* --------------------------------------------------------------------------
+ * Test: ca_chain of length 1 (minimum non-empty) round-trips
+ * -------------------------------------------------------------------------- */
+static void test_min_ca_chain_one_byte_roundtrips(void)
+{
+    cred_store_t in;
+    memset(&in, 0, sizeof(in));
+    in.dev_key_len = 1; in.dev_key[0] = 0x10;
+    in.dev_cert_len = 1; in.dev_cert[0] = 0x20;
+    in.ca_chain_len = 1; in.ca_chain[0] = 0xAB;
+    in.not_after = 42;
+
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cred_store_save(&in));
+    cred_store_t out;
+    memset(&out, 0, sizeof(out));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cred_store_load(&out));
+    TEST_ASSERT_EQUAL_size_t(1, out.ca_chain_len);
+    TEST_ASSERT_EQUAL_HEX8(0xAB, out.ca_chain[0]);
+}
+
+/* --------------------------------------------------------------------------
+ * Test: parse_not_after on a 1-byte input returns FAIL (too short to be valid DER)
+ * -------------------------------------------------------------------------- */
+static void test_parse_not_after_one_byte_returns_fail(void)
+{
+    static const uint8_t one_byte[] = { 0x30 };
+    uint64_t epoch = 0;
+    esp_err_t err = cred_store_parse_not_after(one_byte, 1, &epoch);
+    TEST_ASSERT_NOT_EQUAL(ESP_OK, err);
+}
+
+/* --------------------------------------------------------------------------
+ * Test: parse_not_after on random-looking bytes returns FAIL
+ * -------------------------------------------------------------------------- */
+static void test_parse_not_after_garbage_returns_fail(void)
+{
+    static const uint8_t garbage[] = {
+        0xFF, 0xFE, 0xFD, 0xFC, 0xFB, 0xFA, 0xF9, 0xF8,
+        0xF7, 0xF6, 0xF5, 0xF4, 0xF3, 0xF2, 0xF1, 0xF0,
+    };
+    uint64_t epoch = 0;
+    esp_err_t err = cred_store_parse_not_after(garbage, sizeof(garbage), &epoch);
+    TEST_ASSERT_NOT_EQUAL(ESP_OK, err);
+}
+
+/* --------------------------------------------------------------------------
+ * Test: multiple sequential clears are all idempotent (returns ESP_OK each time)
+ * -------------------------------------------------------------------------- */
+static void test_multiple_clears_all_idempotent(void)
+{
+    for (int i = 0; i < 3; i++) {
+        TEST_ASSERT_EQUAL_INT(ESP_OK, cred_store_clear());
+    }
+    cred_store_t out;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_NVS_NOT_FOUND, cred_store_load(&out));
+}
+
+/* --------------------------------------------------------------------------
+ * Test: not_after UINT64_MAX is stored and loaded exactly (boundary sentinel)
+ * -------------------------------------------------------------------------- */
+static void test_not_after_uint64_max_preserved(void)
+{
+    cred_store_t in;
+    memset(&in, 0, sizeof(in));
+    in.dev_key_len = 1; in.dev_key[0] = 0x01;
+    in.dev_cert_len = 1; in.dev_cert[0] = 0x02;
+    in.ca_chain_len = 1; in.ca_chain[0] = 0x03;
+    in.not_after = UINT64_MAX;
+
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cred_store_save(&in));
+    cred_store_t out;
+    memset(&out, 0, sizeof(out));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cred_store_load(&out));
+    TEST_ASSERT_EQUAL_UINT64(UINT64_MAX, out.not_after);
+}
+
+/* --------------------------------------------------------------------------
  * main
  * -------------------------------------------------------------------------- */
 int main(void)
@@ -468,5 +588,13 @@ int main(void)
     RUN_TEST(test_parse_not_before_is_earlier_than_not_after);
     /* parse_x509_time routing */
     RUN_TEST(test_parse_x509_time_not_after_ne_not_before);
+    /* Additional NVS round-trip and boundary tests */
+    RUN_TEST(test_max_dev_key_preserves_all_bytes);
+    RUN_TEST(test_max_dev_cert_preserves_all_bytes);
+    RUN_TEST(test_min_ca_chain_one_byte_roundtrips);
+    RUN_TEST(test_parse_not_after_one_byte_returns_fail);
+    RUN_TEST(test_parse_not_after_garbage_returns_fail);
+    RUN_TEST(test_multiple_clears_all_idempotent);
+    RUN_TEST(test_not_after_uint64_max_preserved);
     return UNITY_END();
 }

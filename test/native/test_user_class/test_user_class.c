@@ -174,6 +174,83 @@ void test_classify_partial_match_with_extra_byte(void)
     TEST_ASSERT_EQUAL_INT(PUBKEY_USER_REJECTED, c);
 }
 
+/* -- Additional coverage: all enum values, length-boundary cases ----------- */
+
+/* Verify the enum values are distinct */
+void test_classify_enum_values_distinct(void)
+{
+    TEST_ASSERT_NOT_EQUAL((int)PUBKEY_USER_TTY,      (int)PUBKEY_USER_OTA);
+    TEST_ASSERT_NOT_EQUAL((int)PUBKEY_USER_TTY,      (int)PUBKEY_USER_REJECTED);
+    TEST_ASSERT_NOT_EQUAL((int)PUBKEY_USER_OTA,      (int)PUBKEY_USER_REJECTED);
+}
+
+/* "ota" with length 2 (o+t) must be rejected -- not a prefix match */
+void test_classify_ota_prefix_length_2_rejected(void)
+{
+    pubkey_user_class_t c = pubkey_classify_user("ota", 2);
+    TEST_ASSERT_EQUAL_INT(PUBKEY_USER_REJECTED, c);
+}
+
+/* "tty" with length 2 (t+t) must be rejected */
+void test_classify_tty_prefix_length_2_rejected(void)
+{
+    pubkey_user_class_t c = pubkey_classify_user("tty", 2);
+    TEST_ASSERT_EQUAL_INT(PUBKEY_USER_REJECTED, c);
+}
+
+/* Length 1 inputs: "t", "o", "a" all rejected */
+void test_classify_single_char_t_rejected(void)
+{
+    TEST_ASSERT_EQUAL_INT(PUBKEY_USER_REJECTED, pubkey_classify_user("t", 1));
+}
+
+void test_classify_single_char_o_rejected(void)
+{
+    TEST_ASSERT_EQUAL_INT(PUBKEY_USER_REJECTED, pubkey_classify_user("o", 1));
+}
+
+/* "OTA" uppercase -> rejected (case-sensitive spec) */
+void test_classify_Ota_mixed_case_rejected(void)
+{
+    TEST_ASSERT_EQUAL_INT(PUBKEY_USER_REJECTED, pubkey_classify_user("Ota", 3));
+}
+
+/* "TTY" -> rejected */
+void test_classify_Tty_mixed_case_rejected(void)
+{
+    TEST_ASSERT_EQUAL_INT(PUBKEY_USER_REJECTED, pubkey_classify_user("Tty", 3));
+}
+
+/* Null pointer with nonzero length -- must not crash */
+void test_classify_null_nonzero_length_rejected(void)
+{
+    pubkey_user_class_t c = pubkey_classify_user(NULL, 3);
+    TEST_ASSERT_EQUAL_INT(PUBKEY_USER_REJECTED, c);
+}
+
+/* Only-username-no-host: "tty" -> TTY (already covered, extra assertion) */
+void test_classify_tty_returns_tty_not_ota(void)
+{
+    pubkey_user_class_t c = pubkey_classify_user("tty", 3);
+    TEST_ASSERT_NOT_EQUAL((int)PUBKEY_USER_OTA, (int)c);
+    TEST_ASSERT_EQUAL_INT(PUBKEY_USER_TTY, c);
+}
+
+/* "ota" returns OTA not TTY */
+void test_classify_ota_returns_ota_not_tty(void)
+{
+    pubkey_user_class_t c = pubkey_classify_user("ota", 3);
+    TEST_ASSERT_NOT_EQUAL((int)PUBKEY_USER_TTY, (int)c);
+    TEST_ASSERT_EQUAL_INT(PUBKEY_USER_OTA, c);
+}
+
+/* Control chars: \x01\x02\x03 (len 3) -- rejected */
+void test_classify_control_chars_rejected(void)
+{
+    const char ctrl[3] = {'\x01', '\x02', '\x03'};
+    TEST_ASSERT_EQUAL_INT(PUBKEY_USER_REJECTED, pubkey_classify_user(ctrl, 3));
+}
+
 /* -- Main ------------------------------------------------------------------ */
 
 int main(void)
@@ -202,5 +279,17 @@ int main(void)
     RUN_TEST(test_classify_unicode_bytes);
     RUN_TEST(test_classify_username_with_embedded_nul);
     RUN_TEST(test_classify_partial_match_with_extra_byte);
+    /* Additional coverage */
+    RUN_TEST(test_classify_enum_values_distinct);
+    RUN_TEST(test_classify_ota_prefix_length_2_rejected);
+    RUN_TEST(test_classify_tty_prefix_length_2_rejected);
+    RUN_TEST(test_classify_single_char_t_rejected);
+    RUN_TEST(test_classify_single_char_o_rejected);
+    RUN_TEST(test_classify_Ota_mixed_case_rejected);
+    RUN_TEST(test_classify_Tty_mixed_case_rejected);
+    RUN_TEST(test_classify_null_nonzero_length_rejected);
+    RUN_TEST(test_classify_tty_returns_tty_not_ota);
+    RUN_TEST(test_classify_ota_returns_ota_not_tty);
+    RUN_TEST(test_classify_control_chars_rejected);
     return UNITY_END();
 }

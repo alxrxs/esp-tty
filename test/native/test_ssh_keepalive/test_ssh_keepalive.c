@@ -247,6 +247,157 @@ void test_ka_count_max_zero_drops_immediately(void)
         ssh_keepalive_tick(&ka, 2000, false));
 }
 
+/* --- Large interval (near UINT32_MAX/2) -- must not overflow comparison --- */
+
+void test_ka_large_interval_no_spurious_send(void)
+{
+    /* interval_ticks = UINT32_MAX/2: only half a wrap should not trigger */
+    uint32_t big = 0x7FFFFFFFu;
+    ssh_keepalive_t ka;
+    ssh_keepalive_init(&ka, big, 3, 0);
+
+    /* Advance by big-1: just below threshold */
+    TEST_ASSERT_EQUAL_INT(SSH_KA_IDLE,
+        ssh_keepalive_tick(&ka, big - 1, false));
+}
+
+void test_ka_large_interval_exact_boundary_sends(void)
+{
+    uint32_t big = 0x7FFFFFFFu;
+    ssh_keepalive_t ka;
+    ssh_keepalive_init(&ka, big, 3, 0);
+
+    /* Exactly at threshold */
+    TEST_ASSERT_EQUAL_INT(SSH_KA_SEND,
+        ssh_keepalive_tick(&ka, big, false));
+}
+
+/* --- Interval == 1 (minimum nonzero): every tick without inbound -> send --- */
+
+void test_ka_interval_one_sends_every_tick(void)
+{
+    ssh_keepalive_t ka;
+    ssh_keepalive_init(&ka, 1, 10, 0);
+
+    /* tick 1: elapsed=1 >= interval=1 -> SEND */
+    TEST_ASSERT_EQUAL_INT(SSH_KA_SEND,
+        ssh_keepalive_tick(&ka, 1, false));
+    ssh_keepalive_sent(&ka, 1);
+
+    /* tick 2: elapsed since last_send=1 is 1 >= 1 -> SEND again */
+    TEST_ASSERT_EQUAL_INT(SSH_KA_SEND,
+        ssh_keepalive_tick(&ka, 2, false));
+}
+
+/* --- Monotonic clock skew: now_ticks < last_send (shouldn't happen,
+ *     but wrapping arithmetic must handle it without crashing) ---------- */
+
+void test_ka_now_less_than_last_send_no_crash(void)
+{
+    ssh_keepalive_t ka;
+    ssh_keepalive_init(&ka, 1000, 3, 5000);
+    /* Manually set last_send ahead of "now" (simulated skew) */
+    ka.last_send = 9000;
+
+    /* now=100, last_send=9000 -> (100 - 9000) wraps to 0xFFFFD8EC which
+     * is >> 1000, so it returns SEND.  Just must not crash. */
+    ssh_ka_action_t act = ssh_keepalive_tick(&ka, 100, false);
+    (void)act;  /* result is implementation-defined for skew; no crash is the goal */
+    TEST_ASSERT_TRUE(1);
+}
+
+/* --- Retry exhaustion: count_max probes then permanently DROP ------------ */
+
+void test_ka_retry_exhaustion_permanent_drop(void)
+{
+    /* count_max=5: send 5 probes, then every subsequent tick is DROP */
+    ssh_keepalive_t ka;
+    ssh_keepalive_init(&ka, 100, 5, 0);
+
+    for (uint32_t i = 1; i <= 5; i++) {
+        ssh_keepalive_sent(&ka, i * 100);
+    }
+    TEST_ASSERT_EQUAL_UINT32(5, ka.unanswered);
+
+    /* Every future tick must be DROP */
+    for (uint32_t t = 1000; t <= 5000; t += 1000) {
+        TEST_ASSERT_EQUAL_INT(SSH_KA_DROP,
+            ssh_keepalive_tick(&ka, t, false));
+    }
+}
+
+/* --- Reset-on-traffic: inbound at any point resets unanswered ----------- */
+
+void test_ka_reset_on_traffic_mid_retry(void)
+{
+    /* Send 2 probes (count_max=3 so not yet at limit), then inbound */
+    ssh_keepalive_t ka;
+    ssh_keepalive_init(&ka, 1000, 3, 0);
+
+    ssh_keepalive_sent(&ka, 1000);
+    ssh_keepalive_sent(&ka, 2000);
+    TEST_ASSERT_EQUAL_UINT32(2, ka.unanswered);
+
+    /* Inbound at tick 2500 resets counter */
+    ssh_keepalive_tick(&ka, 2500, true);
+    TEST_ASSERT_EQUAL_UINT32(0, ka.unanswered);
+    TEST_ASSERT_EQUAL_UINT32(2500, ka.last_activity);
+}
+
+/* --- Init sets baseline correctly -------------------------------------- */
+
+void test_ka_init_sets_last_activity_and_send(void)
+{
+    ssh_keepalive_t ka;
+    ssh_keepalive_init(&ka, 500, 2, 12345);
+    TEST_ASSERT_EQUAL_UINT32(12345, ka.last_activity);
+    TEST_ASSERT_EQUAL_UINT32(12345, ka.last_send);
+    TEST_ASSERT_EQUAL_UINT32(0,     ka.unanswered);
+    TEST_ASSERT_EQUAL_UINT32(500,   ka.interval_ticks);
+    TEST_ASSERT_EQUAL_UINT32(2,     ka.count_max);
+}
+
+/* --- interval==0, inbound does not change disabled state --------------- */
+
+void test_ka_disabled_inbound_still_idle(void)
+{
+    ssh_keepalive_t ka;
+    ssh_keepalive_init(&ka, 0, 3, 0);
+
+    /* Any combination of inbound/no-inbound stays IDLE */
+    TEST_ASSERT_EQUAL_INT(SSH_KA_IDLE, ssh_keepalive_tick(&ka, 10000, true));
+    TEST_ASSERT_EQUAL_INT(SSH_KA_IDLE, ssh_keepalive_tick(&ka, 20000, false));
+    TEST_ASSERT_EQUAL_INT(SSH_KA_IDLE, ssh_keepalive_tick(&ka, 30000, true));
+}
+
+/* --- Wrapping: last_activity near UINT32_MAX, inbound resets cleanly ---- */
+
+void test_ka_wrap_last_activity_reset(void)
+{
+    ssh_keepalive_t ka;
+    uint32_t near_max = 0xFFFFFF00u;
+    ssh_keepalive_init(&ka, 100, 3, near_max);
+
+    /* Inbound at tick 0x10 (after wrap): last_activity = 0x10, unanswered = 0 */
+    ssh_keepalive_tick(&ka, 0x10u, true);
+    TEST_ASSERT_EQUAL_UINT32(0, ka.unanswered);
+    TEST_ASSERT_EQUAL_UINT32(0x10u, ka.last_activity);
+
+    /* last_send is still 0xFFFFFF00 from init (> last_activity 0x10 unsigned),
+     * so ref = last_send = 0xFFFFFF00.  To test activity-based timing, explicitly
+     * record a send at 0x10 so last_send matches last_activity. */
+    ssh_keepalive_sent(&ka, 0x10u);
+    ka.unanswered = 0; /* clear the artificial unanswered count */
+
+    /* 99 ticks after send/activity: below threshold -> IDLE */
+    TEST_ASSERT_EQUAL_INT(SSH_KA_IDLE,
+        ssh_keepalive_tick(&ka, 0x10u + 99, false));
+
+    /* 100 ticks after send/activity: exactly at threshold -> SEND */
+    TEST_ASSERT_EQUAL_INT(SSH_KA_SEND,
+        ssh_keepalive_tick(&ka, 0x10u + 100, false));
+}
+
 /* ------------------------------------------------------------------ */
 int main(void)
 {
@@ -268,5 +419,15 @@ int main(void)
     RUN_TEST(test_ka_drop_is_sticky_after_count_max);
     RUN_TEST(test_ka_inbound_after_drop_resets_and_resumes);
     RUN_TEST(test_ka_count_max_zero_drops_immediately);
+    /* Additional edge cases */
+    RUN_TEST(test_ka_large_interval_no_spurious_send);
+    RUN_TEST(test_ka_large_interval_exact_boundary_sends);
+    RUN_TEST(test_ka_interval_one_sends_every_tick);
+    RUN_TEST(test_ka_now_less_than_last_send_no_crash);
+    RUN_TEST(test_ka_retry_exhaustion_permanent_drop);
+    RUN_TEST(test_ka_reset_on_traffic_mid_retry);
+    RUN_TEST(test_ka_init_sets_last_activity_and_send);
+    RUN_TEST(test_ka_disabled_inbound_still_idle);
+    RUN_TEST(test_ka_wrap_last_activity_reset);
     return UNITY_END();
 }

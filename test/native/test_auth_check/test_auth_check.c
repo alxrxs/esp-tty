@@ -286,6 +286,121 @@ void test_auth_check_constant_time_all_bytes_compared(void)
         pubkey_auth_check(DATA_D, sizeof DATA_D, expected1));
 }
 
+/* ===================================================================
+ * Username classification integration tests (pubkey_classify_user via
+ * pubkey_auth.h) -- auth-check layer combined with user routing.
+ * =================================================================== */
+
+/* Helper: simulate full auth decision for a given username string + key */
+static bool auth_decision(const char *username, size_t uname_sz,
+                          const uint8_t *key, size_t key_sz,
+                          const uint8_t expected_hash[PUBKEY_HASH_SIZE])
+{
+    pubkey_user_class_t cls = pubkey_classify_user(username, uname_sz);
+    if (cls == PUBKEY_USER_REJECTED) return false;
+    return pubkey_auth_check(key, key_sz, expected_hash) == PUBKEY_AUTH_OK;
+}
+
+void test_auth_routing_tty_user_accepts_correct_key(void)
+{
+    uint8_t h[PUBKEY_HASH_SIZE];
+    compute_expected_hash(TEST_BLOB, TEST_BLOB_LEN, h);
+    TEST_ASSERT_TRUE(auth_decision("tty", 3, TEST_BLOB, TEST_BLOB_LEN, h));
+}
+
+void test_auth_routing_ota_user_accepts_correct_key(void)
+{
+    uint8_t h[PUBKEY_HASH_SIZE];
+    compute_expected_hash(TEST_BLOB, TEST_BLOB_LEN, h);
+    TEST_ASSERT_TRUE(auth_decision("ota", 3, TEST_BLOB, TEST_BLOB_LEN, h));
+}
+
+void test_auth_routing_unknown_user_rejected_before_key_check(void)
+{
+    /* Even if the key would match, unknown user is rejected first */
+    uint8_t h[PUBKEY_HASH_SIZE];
+    compute_expected_hash(TEST_BLOB, TEST_BLOB_LEN, h);
+    TEST_ASSERT_FALSE(auth_decision("root", 4, TEST_BLOB, TEST_BLOB_LEN, h));
+}
+
+void test_auth_routing_empty_username_rejected(void)
+{
+    uint8_t h[PUBKEY_HASH_SIZE];
+    compute_expected_hash(TEST_BLOB, TEST_BLOB_LEN, h);
+    TEST_ASSERT_FALSE(auth_decision("", 0, TEST_BLOB, TEST_BLOB_LEN, h));
+}
+
+void test_auth_routing_null_username_rejected(void)
+{
+    uint8_t h[PUBKEY_HASH_SIZE];
+    compute_expected_hash(TEST_BLOB, TEST_BLOB_LEN, h);
+    TEST_ASSERT_FALSE(auth_decision(NULL, 0, TEST_BLOB, TEST_BLOB_LEN, h));
+}
+
+void test_auth_routing_username_at_sign_rejected(void)
+{
+    /* "user@host" style username must be rejected */
+    uint8_t h[PUBKEY_HASH_SIZE];
+    compute_expected_hash(TEST_BLOB, TEST_BLOB_LEN, h);
+    TEST_ASSERT_FALSE(auth_decision("tty@host", 8, TEST_BLOB, TEST_BLOB_LEN, h));
+}
+
+void test_auth_routing_username_multiple_at_rejected(void)
+{
+    uint8_t h[PUBKEY_HASH_SIZE];
+    compute_expected_hash(TEST_BLOB, TEST_BLOB_LEN, h);
+    TEST_ASSERT_FALSE(auth_decision("a@b@c", 5, TEST_BLOB, TEST_BLOB_LEN, h));
+}
+
+void test_auth_routing_very_long_username_rejected(void)
+{
+    uint8_t h[PUBKEY_HASH_SIZE];
+    compute_expected_hash(TEST_BLOB, TEST_BLOB_LEN, h);
+    char big[256];
+    memset(big, 'a', sizeof(big));
+    TEST_ASSERT_FALSE(auth_decision(big, sizeof(big), TEST_BLOB, TEST_BLOB_LEN, h));
+}
+
+void test_auth_routing_utf8_username_rejected(void)
+{
+    /* UTF-8 multi-byte in username */
+    uint8_t h[PUBKEY_HASH_SIZE];
+    compute_expected_hash(TEST_BLOB, TEST_BLOB_LEN, h);
+    /* "tta" with first byte being 0xC3 (multi-byte UTF-8 prefix) */
+    const unsigned char u[3] = {0xC3, 0xA9, 'a'};
+    TEST_ASSERT_FALSE(auth_decision((const char *)u, 3, TEST_BLOB, TEST_BLOB_LEN, h));
+}
+
+void test_auth_routing_control_chars_in_username_rejected(void)
+{
+    uint8_t h[PUBKEY_HASH_SIZE];
+    compute_expected_hash(TEST_BLOB, TEST_BLOB_LEN, h);
+    const char ctrl[3] = {'\t', 't', 'y'};
+    TEST_ASSERT_FALSE(auth_decision(ctrl, 3, TEST_BLOB, TEST_BLOB_LEN, h));
+}
+
+void test_auth_routing_leading_whitespace_rejected(void)
+{
+    uint8_t h[PUBKEY_HASH_SIZE];
+    compute_expected_hash(TEST_BLOB, TEST_BLOB_LEN, h);
+    TEST_ASSERT_FALSE(auth_decision(" tty", 4, TEST_BLOB, TEST_BLOB_LEN, h));
+}
+
+void test_auth_routing_trailing_whitespace_rejected(void)
+{
+    uint8_t h[PUBKEY_HASH_SIZE];
+    compute_expected_hash(TEST_BLOB, TEST_BLOB_LEN, h);
+    TEST_ASSERT_FALSE(auth_decision("tty ", 4, TEST_BLOB, TEST_BLOB_LEN, h));
+}
+
+void test_auth_routing_valid_user_wrong_key_rejected(void)
+{
+    /* "tty" user but wrong key hash -> rejected */
+    uint8_t wrong_hash[PUBKEY_HASH_SIZE];
+    memset(wrong_hash, 0xAA, sizeof(wrong_hash));
+    TEST_ASSERT_FALSE(auth_decision("tty", 3, TEST_BLOB, TEST_BLOB_LEN, wrong_hash));
+}
+
 /* ------------------------------------------------------------------ */
 
 int main(void)
@@ -301,5 +416,19 @@ int main(void)
     RUN_TEST(test_auth_check_loop_no_match);
     RUN_TEST(test_auth_check_loop_zero_count);
     RUN_TEST(test_auth_check_constant_time_all_bytes_compared);
+    /* auth_routing: username + key combined */
+    RUN_TEST(test_auth_routing_tty_user_accepts_correct_key);
+    RUN_TEST(test_auth_routing_ota_user_accepts_correct_key);
+    RUN_TEST(test_auth_routing_unknown_user_rejected_before_key_check);
+    RUN_TEST(test_auth_routing_empty_username_rejected);
+    RUN_TEST(test_auth_routing_null_username_rejected);
+    RUN_TEST(test_auth_routing_username_at_sign_rejected);
+    RUN_TEST(test_auth_routing_username_multiple_at_rejected);
+    RUN_TEST(test_auth_routing_very_long_username_rejected);
+    RUN_TEST(test_auth_routing_utf8_username_rejected);
+    RUN_TEST(test_auth_routing_control_chars_in_username_rejected);
+    RUN_TEST(test_auth_routing_leading_whitespace_rejected);
+    RUN_TEST(test_auth_routing_trailing_whitespace_rejected);
+    RUN_TEST(test_auth_routing_valid_user_wrong_key_rejected);
     return UNITY_END();
 }

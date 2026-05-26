@@ -573,6 +573,251 @@ void test_ring_try_send_wrap_around(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* NEW: byte-exact preservation across multiple send/recv cycles       */
+
+/* Verify every byte value 0x00-0xFF round-trips without corruption.   */
+void test_ring_all_byte_values_preserved(void)
+{
+    ring_t *r = ring_create(512);
+    TEST_ASSERT_NOT_NULL(r);
+
+    uint8_t tx[256];
+    for (int i = 0; i < 256; i++) tx[i] = (uint8_t)i;
+    TEST_ASSERT_EQUAL_INT(256, ring_send(r, tx, 256));
+
+    uint8_t rx[256] = {0};
+    int got = 0;
+    while (got < 256) {
+        int n = ring_recv(r, rx + got, (size_t)(256 - got));
+        TEST_ASSERT_GREATER_THAN_INT(0, n);
+        got += n;
+    }
+    TEST_ASSERT_EQUAL_MEMORY(tx, rx, 256);
+
+    ring_free(r);
+}
+
+/* ring_send with zero length: should return 0 (no bytes written) and
+ * leave the ring empty.  Not explicitly documented but the "write
+ * exactly len bytes" contract means len=0 is trivially satisfied.    */
+void test_ring_send_zero_len_is_noop(void)
+{
+    ring_t *r = ring_create(64);
+    TEST_ASSERT_NOT_NULL(r);
+
+    /* ring_send with len=0: must not block, must return 0 */
+    int rc = ring_send(r, (const uint8_t *)"", 0);
+    TEST_ASSERT_EQUAL_INT(0, rc);
+
+    /* Ring still empty -- close it and verify recv returns EOF */
+    ring_close(r);
+    uint8_t buf[4];
+    TEST_ASSERT_EQUAL_INT(-1, ring_recv(r, buf, sizeof(buf)));
+
+    ring_free(r);
+}
+
+/* After close, ring_send with zero len returns 0 or -1 but must not
+ * deadlock.  The native implementation checks closed *inside* the
+ * while(remaining>0) loop, so remaining==0 means the loop never runs
+ * and closed is never checked -- return value is 0.                  */
+void test_ring_send_zero_len_on_closed_ring_does_not_hang(void)
+{
+    ring_t *r = ring_create(64);
+    TEST_ASSERT_NOT_NULL(r);
+    ring_close(r);
+
+    int rc = ring_send(r, (const uint8_t *)"", 0);
+    /* Must not block; result 0 or -1 are both acceptable */
+    TEST_ASSERT_TRUE(rc == 0 || rc == -1);
+
+    ring_free(r);
+}
+
+/* Concurrent producer + consumer race: many small try_send calls
+ * from a helper thread, blocking recv from main -- verify no bytes
+ * are duplicated or dropped over 1000 items.                         */
+
+typedef struct {
+    ring_t   *r;
+    int       n;         /* number of single-byte items to send */
+    int       result;    /* 0 = ok, -1 = ring closed mid-way    */
+} try_send_race_arg_t;
+
+static void *try_send_race_producer(void *arg)
+{
+    try_send_race_arg_t *a = arg;
+    int sent = 0;
+    while (sent < a->n) {
+        uint8_t b = (uint8_t)(sent & 0xFF);
+        int rc = ring_try_send(a->r, &b, 1);
+        if (rc == -1) { a->result = -1; return NULL; }
+        if (rc == 1) sent++;
+        /* rc == 0 means full or contended; retry immediately */
+    }
+    a->result = 0;
+    return NULL;
+}
+
+void test_ring_try_send_race_no_duplication(void)
+{
+    const int N = 1000;
+    ring_t *r = ring_create(32);
+    TEST_ASSERT_NOT_NULL(r);
+
+    try_send_race_arg_t pa = {.r = r, .n = N, .result = 99};
+    pthread_t thr;
+    pthread_create(&thr, NULL, try_send_race_producer, &pa);
+
+    uint8_t buf[1];
+    for (int i = 0; i < N; i++) {
+        int got = ring_recv(r, buf, 1);
+        TEST_ASSERT_EQUAL_INT(1, got);
+        TEST_ASSERT_EQUAL_UINT8((uint8_t)(i & 0xFF), buf[0]);
+    }
+
+    pthread_join(thr, NULL);
+    TEST_ASSERT_EQUAL_INT(0, pa.result);
+    ring_free(r);
+}
+
+/* Repeatedly reopen and reuse the same ring: 5 sessions, each writing
+ * a distinct pattern and verifying it, with no stale data leaking.   */
+void test_ring_multiple_reopen_sessions(void)
+{
+    ring_t *r = ring_create(64);
+    TEST_ASSERT_NOT_NULL(r);
+
+    for (int session = 0; session < 5; session++) {
+        if (session > 0) ring_reopen(r);
+
+        uint8_t tx[8];
+        memset(tx, (int)('A' + session), sizeof(tx));
+        TEST_ASSERT_EQUAL_INT(8, ring_send(r, tx, 8));
+
+        uint8_t rx[8] = {0};
+        int got = 0;
+        while (got < 8) {
+            int n = ring_recv(r, rx + got, (size_t)(8 - got));
+            TEST_ASSERT_GREATER_THAN_INT(0, n);
+            got += n;
+        }
+        TEST_ASSERT_EACH_EQUAL_UINT8((uint8_t)('A' + session), rx, 8);
+
+        ring_close(r);
+    }
+
+    ring_free(r);
+}
+
+/* Blocking send is unblocked when a concurrent reader drains the ring.
+ * This is symmetric to test_ring_close_unblocks_recv.                */
+typedef struct {
+    ring_t  *r;
+    size_t   n_bytes;
+    int      result;
+} blocking_send_arg_t;
+
+static void *blocking_send_thread(void *arg)
+{
+    blocking_send_arg_t *a = arg;
+    uint8_t pattern[64];
+    memset(pattern, 0xBB, sizeof(pattern));
+    size_t sent = 0;
+    while (sent < a->n_bytes) {
+        size_t chunk = a->n_bytes - sent;
+        if (chunk > sizeof(pattern)) chunk = sizeof(pattern);
+        int rc = ring_send(a->r, pattern, chunk);
+        if (rc < 0) { a->result = -1; return NULL; }
+        sent += chunk;
+    }
+    a->result = 0;
+    return NULL;
+}
+
+void test_ring_blocking_send_unblocked_by_reader(void)
+{
+    const size_t TOTAL = 1024;
+    ring_t *r = ring_create(16); /* tiny: forces producer to block */
+    TEST_ASSERT_NOT_NULL(r);
+
+    blocking_send_arg_t sa = {.r = r, .n_bytes = TOTAL, .result = 99};
+    pthread_t thr;
+    pthread_create(&thr, NULL, blocking_send_thread, &sa);
+
+    /* Drain all TOTAL bytes; each recv unblocks the producer */
+    uint8_t buf[64];
+    size_t received = 0;
+    while (received < TOTAL) {
+        int n = ring_recv(r, buf, sizeof(buf));
+        TEST_ASSERT_GREATER_THAN_INT(0, n);
+        received += (size_t)n;
+        for (int i = 0; i < n; i++)
+            TEST_ASSERT_EQUAL_UINT8(0xBB, buf[i]);
+    }
+
+    pthread_join(thr, NULL);
+    TEST_ASSERT_EQUAL_INT(0, sa.result);
+    ring_free(r);
+}
+
+/* Closing a ring that is full while a sender is blocked must unblock
+ * the sender and return -1.                                          */
+typedef struct {
+    ring_t  *r;
+    int      result;
+} send_blocked_arg_t;
+
+static void *send_into_full_ring(void *arg)
+{
+    send_blocked_arg_t *a = arg;
+    /* ring is already full when this thread starts */
+    uint8_t extra = 0xFF;
+    a->result = ring_send(a->r, &extra, 1);  /* should block, then return -1 */
+    return NULL;
+}
+
+void test_ring_close_unblocks_blocked_sender(void)
+{
+    const size_t CAP = 8;
+    ring_t *r = ring_create(CAP);
+    TEST_ASSERT_NOT_NULL(r);
+
+    /* Fill the ring completely */
+    uint8_t fill[8];
+    memset(fill, 0xAA, sizeof(fill));
+    TEST_ASSERT_EQUAL_INT(8, ring_send(r, fill, 8));
+
+    /* Launch a thread that will block trying to write one more byte */
+    send_blocked_arg_t sa = {.r = r, .result = 99};
+    pthread_t thr;
+    pthread_create(&thr, NULL, send_into_full_ring, &sa);
+
+    usleep(20000); /* let thread block on full ring */
+    ring_close(r);
+
+    pthread_join(thr, NULL);
+    TEST_ASSERT_EQUAL_INT(-1, sa.result);
+
+    ring_free(r);
+}
+
+/* ring_try_send on a ring that just became closed (race): check that
+ * the return is -1 and there is no crash.                            */
+void test_ring_try_send_after_close_is_minus_one(void)
+{
+    ring_t *r = ring_create(64);
+    TEST_ASSERT_NOT_NULL(r);
+
+    ring_close(r);
+    uint8_t b = 0x42;
+    int rc = ring_try_send(r, &b, 1);
+    TEST_ASSERT_EQUAL_INT(-1, rc);
+
+    ring_free(r);
+}
+
+/* ------------------------------------------------------------------ */
 int main(void)
 {
     UNITY_BEGIN();
@@ -604,5 +849,14 @@ int main(void)
     /* ring_create edge cases */
     RUN_TEST(test_ring_create_min_capacity);
     RUN_TEST(test_ring_free_null_is_safe);
+    /* NEW: additional coverage */
+    RUN_TEST(test_ring_all_byte_values_preserved);
+    RUN_TEST(test_ring_send_zero_len_is_noop);
+    RUN_TEST(test_ring_send_zero_len_on_closed_ring_does_not_hang);
+    RUN_TEST(test_ring_try_send_race_no_duplication);
+    RUN_TEST(test_ring_multiple_reopen_sessions);
+    RUN_TEST(test_ring_blocking_send_unblocked_by_reader);
+    RUN_TEST(test_ring_close_unblocks_blocked_sender);
+    RUN_TEST(test_ring_try_send_after_close_is_minus_one);
     return UNITY_END();
 }

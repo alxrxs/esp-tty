@@ -117,6 +117,59 @@ void test_ssh_port_fixture_in_range(void)
     TEST_ASSERT_LESS_OR_EQUAL_INT   (65535, FIXTURE_SSH_PORT);
 }
 
+/* OTA rollback delay must be positive (0 would fire immediately). */
+#define FIXTURE_OTA_ROLLBACK_DELAY_MS_MIN  1
+_Static_assert(FIXTURE_OTA_ROLLBACK_DELAY_MS >= FIXTURE_OTA_ROLLBACK_DELAY_MS_MIN,
+               "OTA_ROLLBACK_DELAY_MS must be positive");
+
+void test_ota_rollback_delay_positive(void)
+{
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(1, FIXTURE_OTA_ROLLBACK_DELAY_MS);
+}
+
+void test_ota_rollback_delay_within_max(void)
+{
+    TEST_ASSERT_LESS_OR_EQUAL_INT(300000, FIXTURE_OTA_ROLLBACK_DELAY_MS);
+}
+
+/* EAP identity must be non-empty and within 127 bytes. */
+void test_eap_identity_within_bound(void)
+{
+    size_t len = strlen(FIXTURE_EAP_IDENTITY);
+    TEST_ASSERT_GREATER_THAN_size_t(0, len);
+    TEST_ASSERT_LESS_OR_EQUAL_size_t(127, len);
+}
+
+/* SSH_PORT boundary: port 0 is reserved (must not be used). */
+void test_ssh_port_not_zero(void)
+{
+    TEST_ASSERT_NOT_EQUAL(0, FIXTURE_SSH_PORT);
+}
+
+/* IPv4 fixture must contain exactly 3 dots (valid dotted-quad structure). */
+void test_ipv4_addr_has_three_dots(void)
+{
+    const char *p = FIXTURE_IPV4_ADDR;
+    int dots = 0;
+    while (*p) { if (*p++ == '.') dots++; }
+    TEST_ASSERT_EQUAL_INT(3, dots);
+}
+
+/* IPv6 fixture must contain at least 2 colons (minimal valid IPv6). */
+void test_ipv6_addr_has_colons(void)
+{
+    const char *p = FIXTURE_IPV6_ADDR;
+    int colons = 0;
+    while (*p) { if (*p++ == ':') colons++; }
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(2, colons);
+}
+
+/* SSID fixture must not be empty. */
+void test_ssid_fixture_non_empty(void)
+{
+    TEST_ASSERT_GREATER_THAN_size_t(0, strlen(FIXTURE_SSID));
+}
+
 /* ------------------------------------------------------------------ */
 int main(void)
 {
@@ -128,5 +181,13 @@ int main(void)
     RUN_TEST(test_ipv6_addr_fixture_within_bound);
     RUN_TEST(test_usb_strings_within_bound);
     RUN_TEST(test_ssh_port_fixture_in_range);
+    /* Additional cases */
+    RUN_TEST(test_ota_rollback_delay_positive);
+    RUN_TEST(test_ota_rollback_delay_within_max);
+    RUN_TEST(test_eap_identity_within_bound);
+    RUN_TEST(test_ssh_port_not_zero);
+    RUN_TEST(test_ipv4_addr_has_three_dots);
+    RUN_TEST(test_ipv6_addr_has_colons);
+    RUN_TEST(test_ssid_fixture_non_empty);
     return UNITY_END();
 }

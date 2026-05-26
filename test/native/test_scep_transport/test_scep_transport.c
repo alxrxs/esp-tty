@@ -375,6 +375,124 @@ void test_get_cacert_large_body_forces_buffer_growth(void)
 }
 
 /* ================================================================== */
+/* Section 6: Additional error-path and boundary tests                 */
+/* ================================================================== */
+
+/* HTTP 500 -> SCEP_TRANSPORT_ERR_HTTP_STATUS */
+void test_get_cacert_status_500_returns_http_status_error(void)
+{
+    static const uint8_t body[] = { 0x01 };
+    esp_http_client_stub_set_response_body(body, sizeof(body));
+    esp_http_client_stub_set_status_code(500);
+    uint8_t *p7 = NULL; size_t len = 0;
+    int rc = scep_http_get_cacert("https://scep.example.com/", &p7, &len, malloc, free);
+    TEST_ASSERT_EQUAL_INT(SCEP_TRANSPORT_ERR_HTTP_STATUS, rc);
+    TEST_ASSERT_NULL(p7);
+}
+
+/* HTTP 302 (redirect) -> SCEP_TRANSPORT_ERR_HTTP_STATUS */
+void test_get_cacert_status_302_returns_http_status_error(void)
+{
+    static const uint8_t body[] = { 0x01 };
+    esp_http_client_stub_set_response_body(body, sizeof(body));
+    esp_http_client_stub_set_status_code(302);
+    uint8_t *p7 = NULL; size_t len = 0;
+    int rc = scep_http_get_cacert("https://scep.example.com/", &p7, &len, malloc, free);
+    TEST_ASSERT_EQUAL_INT(SCEP_TRANSPORT_ERR_HTTP_STATUS, rc);
+    TEST_ASSERT_NULL(p7);
+}
+
+/* HTTP 503 (service unavailable) -> SCEP_TRANSPORT_ERR_HTTP_STATUS */
+void test_pkiop_status_503_returns_http_status_error(void)
+{
+    static const uint8_t body[] = { 0x01 };
+    esp_http_client_stub_set_response_body(body, sizeof(body));
+    esp_http_client_stub_set_status_code(503);
+    uint8_t in[4] = {0}; uint8_t *p7 = NULL; size_t len = 0;
+    int rc = scep_http_pkioperation("https://scep.example.com/",
+                                    in, sizeof(in), &p7, &len, malloc, free);
+    TEST_ASSERT_EQUAL_INT(SCEP_TRANSPORT_ERR_HTTP_STATUS, rc);
+    TEST_ASSERT_NULL(p7);
+}
+
+/* HTTP 201 (Created) -> SCEP_TRANSPORT_ERR_HTTP_STATUS (SCEP only uses 200) */
+void test_get_cacert_status_201_returns_http_status_error(void)
+{
+    static const uint8_t body[] = { 0x01 };
+    esp_http_client_stub_set_response_body(body, sizeof(body));
+    esp_http_client_stub_set_status_code(201);
+    uint8_t *p7 = NULL; size_t len = 0;
+    int rc = scep_http_get_cacert("https://scep.example.com/", &p7, &len, malloc, free);
+    TEST_ASSERT_EQUAL_INT(SCEP_TRANSPORT_ERR_HTTP_STATUS, rc);
+    TEST_ASSERT_NULL(p7);
+}
+
+/* Empty body on PKIOperation -> SCEP_TRANSPORT_ERR_EMPTY_BODY */
+void test_pkiop_empty_body_returns_empty_body_error(void)
+{
+    /* No response body set */
+    uint8_t in[4] = {0}; uint8_t *p7 = NULL; size_t len = 0;
+    int rc = scep_http_pkioperation("https://scep.example.com/",
+                                    in, sizeof(in), &p7, &len, malloc, free);
+    TEST_ASSERT_EQUAL_INT(SCEP_TRANSPORT_ERR_EMPTY_BODY, rc);
+    TEST_ASSERT_NULL(p7);
+}
+
+/* PKIOperation init fails -> SCEP_TRANSPORT_ERR_HTTP */
+void test_pkiop_init_fails_returns_http_error(void)
+{
+    esp_http_client_stub_set_init_succeeds(0);
+    uint8_t in[4] = {0}; uint8_t *p7 = NULL; size_t len = 0;
+    int rc = scep_http_pkioperation("https://scep.example.com/",
+                                    in, sizeof(in), &p7, &len, malloc, free);
+    TEST_ASSERT_EQUAL_INT(SCEP_TRANSPORT_ERR_HTTP, rc);
+    TEST_ASSERT_NULL(p7);
+}
+
+/* PKIOperation perform fails -> SCEP_TRANSPORT_ERR_HTTP */
+void test_pkiop_perform_fails_returns_http_error(void)
+{
+    esp_http_client_stub_set_perform_result(ESP_FAIL);
+    uint8_t in[4] = {0}; uint8_t *p7 = NULL; size_t len = 0;
+    int rc = scep_http_pkioperation("https://scep.example.com/",
+                                    in, sizeof(in), &p7, &len, malloc, free);
+    TEST_ASSERT_EQUAL_INT(SCEP_TRANSPORT_ERR_HTTP, rc);
+    TEST_ASSERT_NULL(p7);
+}
+
+/* Exactly 1-byte response is returned correctly */
+void test_get_cacert_one_byte_body_returned(void)
+{
+    static const uint8_t body[] = { 0x42 };
+    esp_http_client_stub_set_response_body(body, sizeof(body));
+    uint8_t *p7 = NULL; size_t len = 0;
+    int rc = scep_http_get_cacert("https://scep.example.com/", &p7, &len, malloc, free);
+    TEST_ASSERT_EQUAL_INT(SCEP_TRANSPORT_OK, rc);
+    TEST_ASSERT_NOT_NULL(p7);
+    TEST_ASSERT_EQUAL_size_t(1, len);
+    TEST_ASSERT_EQUAL_HEX8(0x42, p7[0]);
+    free(p7);
+}
+
+/* PKIOperation null alloc returns INVALID_ARG */
+void test_pkiop_null_alloc_returns_invalid_arg(void)
+{
+    uint8_t in[4] = {0}; uint8_t *p7 = NULL; size_t len = 0;
+    int rc = scep_http_pkioperation("https://scep.example.com/",
+                                    in, sizeof(in), &p7, &len, NULL, free);
+    TEST_ASSERT_EQUAL_INT(SCEP_TRANSPORT_ERR_INVALID_ARG, rc);
+}
+
+/* PKIOperation null free returns INVALID_ARG */
+void test_pkiop_null_free_returns_invalid_arg(void)
+{
+    uint8_t in[4] = {0}; uint8_t *p7 = NULL; size_t len = 0;
+    int rc = scep_http_pkioperation("https://scep.example.com/",
+                                    in, sizeof(in), &p7, &len, malloc, NULL);
+    TEST_ASSERT_EQUAL_INT(SCEP_TRANSPORT_ERR_INVALID_ARG, rc);
+}
+
+/* ================================================================== */
 /* Main                                                                */
 /* ================================================================== */
 
@@ -415,6 +533,18 @@ int main(void)
 
     /* Large response body */
     RUN_TEST(test_get_cacert_large_body_forces_buffer_growth);
+
+    /* Additional HTTP status code coverage */
+    RUN_TEST(test_get_cacert_status_500_returns_http_status_error);
+    RUN_TEST(test_get_cacert_status_302_returns_http_status_error);
+    RUN_TEST(test_pkiop_status_503_returns_http_status_error);
+    RUN_TEST(test_get_cacert_status_201_returns_http_status_error);
+    RUN_TEST(test_pkiop_empty_body_returns_empty_body_error);
+    RUN_TEST(test_pkiop_init_fails_returns_http_error);
+    RUN_TEST(test_pkiop_perform_fails_returns_http_error);
+    RUN_TEST(test_get_cacert_one_byte_body_returned);
+    RUN_TEST(test_pkiop_null_alloc_returns_invalid_arg);
+    RUN_TEST(test_pkiop_null_free_returns_invalid_arg);
 
     return UNITY_END();
 }

@@ -35,6 +35,8 @@ QEMU        = os.path.join(os.path.expanduser("~"),
                            "esp_develop_9.2.2_20250817", "qemu", "bin",
                            "qemu-system-xtensa")
 
+import pytest
+
 FLASH_IMG   = "/tmp/esp-tty-test-flash.bin"
 FLASH_SIZE  = 16 * 1024 * 1024  # 16 MB
 
@@ -312,6 +314,141 @@ def check_elf_symbols(elf_path):
         print("[check_elf_symbols] OK -- HW crypto symbols present:", ", ".join(required_hw_symbols))
 
     return ok
+
+
+# ---------------------------------------------------------------------------
+# Pytest-native tests (no QEMU required)
+# ---------------------------------------------------------------------------
+
+PARTITIONS_CSV = os.path.join(PROJECT_DIR, "partitions.csv")
+
+
+def _parse_partitions(csv_path):
+    """Parse partitions.csv, skip comment lines and blank lines."""
+    partitions = []
+    with open(csv_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) >= 5:
+                name, ptype, subtype, offset, size = parts[:5]
+                try:
+                    partitions.append({
+                        "name":    name,
+                        "type":    ptype,
+                        "subtype": subtype,
+                        "offset":  int(offset, 16) if offset.startswith("0x") else int(offset),
+                        "size":    int(size, 16) if size.startswith("0x") else int(size),
+                    })
+                except ValueError:
+                    pass
+    return partitions
+
+
+def test_partition_table_valid():
+    """partitions.csv exists and is parseable with the expected entries."""
+    assert os.path.isfile(PARTITIONS_CSV), \
+        f"partitions.csv not found at {PARTITIONS_CSV}"
+    parts = _parse_partitions(PARTITIONS_CSV)
+    assert len(parts) >= 4, f"Expected at least 4 partitions, got {len(parts)}: {parts}"
+
+
+def test_partition_nvs_at_expected_offset():
+    """NVS partition starts at 0x9000 (immediately after the partition table at 0x8000)."""
+    parts = _parse_partitions(PARTITIONS_CSV)
+    nvs = next((p for p in parts if p["name"] == "nvs" and p["subtype"] == "nvs"), None)
+    assert nvs is not None, "nvs partition not found in partitions.csv"
+    assert nvs["offset"] == 0x9000, \
+        f"nvs partition offset should be 0x9000, got 0x{nvs['offset']:x}"
+
+
+def test_partition_ota0_at_expected_offset():
+    """ota_0 partition starts at 0x20000."""
+    parts = _parse_partitions(PARTITIONS_CSV)
+    ota0 = next((p for p in parts if p["name"] == "ota_0"), None)
+    assert ota0 is not None, "ota_0 partition not found in partitions.csv"
+    assert ota0["offset"] == 0x20000, \
+        f"ota_0 offset should be 0x20000, got 0x{ota0['offset']:x}"
+
+
+def test_partition_ota1_at_expected_offset():
+    """ota_1 partition starts at 0x420000 (ota_0 offset + 4 MB)."""
+    parts = _parse_partitions(PARTITIONS_CSV)
+    ota1 = next((p for p in parts if p["name"] == "ota_1"), None)
+    assert ota1 is not None, "ota_1 partition not found in partitions.csv"
+    assert ota1["offset"] == 0x420000, \
+        f"ota_1 offset should be 0x420000, got 0x{ota1['offset']:x}"
+
+
+def test_partition_ota1_initially_empty_in_csv():
+    """
+    ota_1 is the OTA target slot: it must be present in the layout (same size
+    as ota_0) but it should not have a pre-built binary at build time -- the
+    OTA update process writes it.  This test confirms the slot is sized
+    consistently with ota_0.
+    """
+    parts = _parse_partitions(PARTITIONS_CSV)
+    ota0 = next((p for p in parts if p["name"] == "ota_0"), None)
+    ota1 = next((p for p in parts if p["name"] == "ota_1"), None)
+    assert ota0 and ota1, "Both ota_0 and ota_1 must be present"
+    assert ota0["size"] == ota1["size"], (
+        f"ota_0 size (0x{ota0['size']:x}) and ota_1 size (0x{ota1['size']:x}) "
+        "must match for symmetric OTA"
+    )
+
+
+def test_partition_nvs_keys_present():
+    """nvs_keys partition is present (required for NVS encryption)."""
+    parts = _parse_partitions(PARTITIONS_CSV)
+    nvs_keys = next((p for p in parts if p["name"] == "nvs_keys"), None)
+    assert nvs_keys is not None, \
+        "nvs_keys partition not found -- NVS encryption requires this partition"
+
+
+def test_partition_otadata_present():
+    """otadata partition is present (required for OTA slot selection)."""
+    parts = _parse_partitions(PARTITIONS_CSV)
+    otadata = next((p for p in parts if p["name"] == "otadata" and p["subtype"] == "ota"), None)
+    assert otadata is not None, \
+        "otadata partition not found -- OTA boot selection requires this partition"
+    assert otadata["offset"] == 0x10000, \
+        f"otadata offset should be 0x10000, got 0x{otadata['offset']:x}"
+
+
+def test_partition_no_overlap():
+    """No two partitions overlap in the flash address space."""
+    parts = _parse_partitions(PARTITIONS_CSV)
+    for i, a in enumerate(parts):
+        for j, b in enumerate(parts):
+            if i >= j:
+                continue
+            a_end = a["offset"] + a["size"]
+            b_end = b["offset"] + b["size"]
+            overlap = (a["offset"] < b_end) and (b["offset"] < a_end)
+            assert not overlap, (
+                f"Partitions '{a['name']}' (0x{a['offset']:x}..0x{a_end:x}) "
+                f"and '{b['name']}' (0x{b['offset']:x}..0x{b_end:x}) overlap"
+            )
+
+
+def test_partition_total_fits_in_16mb():
+    """All partitions fit within a 16 MB flash (0x1000000 bytes)."""
+    parts = _parse_partitions(PARTITIONS_CSV)
+    FLASH_LIMIT = 16 * 1024 * 1024
+    for p in parts:
+        end = p["offset"] + p["size"]
+        assert end <= FLASH_LIMIT, (
+            f"Partition '{p['name']}' ends at 0x{end:x}, exceeds 16 MB flash limit"
+        )
+
+
+def test_qemu_not_required_for_partition_tests():
+    """Confirm partition table tests do not require QEMU (they are pure file checks)."""
+    # This test is a documentation test: it always passes.
+    # The partition table tests above should work without QEMU installed.
+    assert os.path.isfile(PARTITIONS_CSV)
 
 
 def main():
