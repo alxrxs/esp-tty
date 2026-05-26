@@ -153,31 +153,19 @@ void test_compute_hash_comment_ignored(void)
     TEST_ASSERT_EQUAL_MEMORY(h1, h2, 32);
 }
 
-/* --- Buffer overflow guard: 513-byte decoded blob ------------------- */
+/* --- Buffer size tests: internal blob buffer bumped to 1024 bytes ---- */
 
 /*
- * A base64 string that decodes to exactly 513 bytes (one byte over the
- * blob[512] fixed buffer in pubkey_auth.c:pubkey_compute_hash()).
+ * 513 raw bytes of 0x42, base64-encoded (684 chars).
+ * After bumping the internal buffer from 512 to 1024 bytes, a 513-byte
+ * decoded blob fits and must now SUCCEED.
  *
- * Generated with:
- *   python3 -c "import base64; print(base64.b64encode(b'\\x42'*513).decode())"
- *
- * pubkey_compute_hash() calls Base64_Decode() with blob_sz=512. Passing a
- * blob that decodes to 513 bytes must cause Base64_Decode to fail (output
- * buffer too small), and pubkey_compute_hash() must return false.
+ * SHA-256( uint32be(513) || 0x42*513 ) = 35c379aa...
+ * Computed with:
+ *   python3 -c "import base64,struct,hashlib; blob=b'\\x42'*513;
+ *               print(hashlib.sha256(struct.pack('>I',len(blob))+blob).hexdigest())"
  */
-/*
- * 513 raw bytes of 0x42, base64-encoded without line breaks (684 characters).
- * Generated with:
- *   python3 -c "import base64; print(base64.b64encode(b'\\x42'*513).decode())"
- */
-/*
- * 513 raw bytes of 0x42, base64-encoded without line breaks (684 chars).
- * Segments are 76 characters each (9 x 76 = 684).
- * Generated with:
- *   python3 -c "import base64; print(base64.b64encode(b'\\x42'*513).decode())"
- */
-static const char *OVER_512_PUBKEY =
+static const char *OVER_512_PUBKEY =   /* 513 bytes -- still fits in 1024-byte buf */
     "ssh-ed25519 "
     "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC"
     "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC"
@@ -190,24 +178,65 @@ static const char *OVER_512_PUBKEY =
     "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC"
     " overflow@test";
 
-void test_compute_hash_rejects_over_512_byte_blob(void)
+/* SHA-256( uint32be(513) || 0x42*513 ) */
+static const uint8_t EXPECTED_HASH_513[32] = {
+    0x35, 0xc3, 0x79, 0xaa, 0x20, 0xe5, 0x01, 0xdf,
+    0x42, 0xd9, 0xbe, 0x84, 0xa0, 0x66, 0x8f, 0x7a,
+    0x08, 0x8e, 0x5c, 0xa1, 0x8b, 0xe2, 0xac, 0x77,
+    0xcd, 0x52, 0xcf, 0x7a, 0xce, 0xc1, 0xce, 0xb7,
+};
+
+/* 513-byte blob now fits in the 1024-byte buffer and must succeed. */
+void test_compute_hash_accepts_513_byte_blob(void)
 {
     uint8_t hash[32];
-    /* Must fail: decoded blob is 513 bytes, one over the internal 512-byte buffer */
-    TEST_ASSERT_FALSE(pubkey_compute_hash(OVER_512_PUBKEY, hash));
+    TEST_ASSERT_TRUE(pubkey_compute_hash(OVER_512_PUBKEY, hash));
+    TEST_ASSERT_EQUAL_MEMORY(EXPECTED_HASH_513, hash, 32);
 }
 
-/* --- Boundary: exactly 512-byte decoded blob (inclusive upper bound) -- */
+/* 1025-byte blob exceeds the new 1024-byte buffer and must be rejected. */
+/*
+ * 1025 raw bytes of 0x42, base64-encoded (1368 chars).
+ * Generated with:
+ *   python3 -c "import base64; print(base64.b64encode(b'\\x42'*1025).decode())"
+ */
+static const char *OVER_1024_PUBKEY =
+    "ssh-ed25519 "
+    "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC"
+    "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC"
+    "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC"
+    "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC"
+    "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC"
+    "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC"
+    "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC"
+    "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC"
+    "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC"
+    "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC"
+    "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC"
+    "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC"
+    "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC"
+    "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC"
+    "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC"
+    "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC"
+    "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC"
+    "QkJCQkI="
+    " over1024@test";
+
+void test_compute_hash_rejects_over_1024_byte_blob(void)
+{
+    uint8_t hash[32];
+    /* Must fail: decoded blob is 1025 bytes, one over the internal 1024-byte buffer */
+    TEST_ASSERT_FALSE(pubkey_compute_hash(OVER_1024_PUBKEY, hash));
+}
+
+/* --- Boundary: exactly 512-byte decoded blob (still fits in 1024-byte buf) -- */
 
 /*
  * 512 raw bytes of 0x42, base64-encoded without line breaks (684 chars).
- * Segments are 76 characters each (9 x 76 = 684).
  * Generated with:
  *   python3 -c "import base64; print(base64.b64encode(b'\\x42'*512).decode())"
  *
- * This sits exactly at the inclusive upper bound of pubkey_compute_hash()'s
- * internal blob[512] buffer. Base64_Decode() must succeed and the function
- * must return true, producing SHA-256( uint32be(512) || 0x42*512 ).
+ * Fits well within the 1024-byte buffer.
  */
 static const char *EXACT_512_PUBKEY =
     "ssh-ed25519 "
@@ -233,7 +262,7 @@ static const uint8_t EXPECTED_HASH_512[32] = {
 void test_compute_hash_accepts_exactly_512_byte_blob(void)
 {
     uint8_t hash[32];
-    /* Must succeed: decoded blob fits exactly in the internal 512-byte buffer */
+    /* Must succeed: decoded blob fits within the internal 1024-byte buffer */
     TEST_ASSERT_TRUE(pubkey_compute_hash(EXACT_512_PUBKEY, hash));
     TEST_ASSERT_EQUAL_MEMORY(EXPECTED_HASH_512, hash, 32);
 }
@@ -630,7 +659,8 @@ int main(void)
     RUN_TEST(test_compute_hash_different_keys_differ);
     RUN_TEST(test_compute_hash_rejects_malformed);
     RUN_TEST(test_compute_hash_comment_ignored);
-    RUN_TEST(test_compute_hash_rejects_over_512_byte_blob);
+    RUN_TEST(test_compute_hash_accepts_513_byte_blob);
+    RUN_TEST(test_compute_hash_rejects_over_1024_byte_blob);
     RUN_TEST(test_compute_hash_accepts_exactly_512_byte_blob);
     /* pubkey_auth_check() tests */
     RUN_TEST(test_auth_check_ok_for_matching_hash);

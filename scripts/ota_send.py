@@ -212,7 +212,7 @@ def run_ota_protocol(sendall_fn, recv_exact_fn, firmware, *,
         else:
             tail = bytearray()
             try:
-                while True:
+                while len(tail) < 256:
                     b = recv_exact_fn(1)
                     if not b:
                         break

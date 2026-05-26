@@ -33,9 +33,22 @@ ssh_ka_action_t ssh_keepalive_tick(ssh_keepalive_t *ka,
     if (ka->unanswered >= ka->count_max)
         return SSH_KA_DROP;
 
-    /* Time since last inbound activity or last sent probe, whichever is later. */
-    uint32_t ref = (ka->last_send > ka->last_activity)
-                   ? ka->last_send : ka->last_activity;
+    /* Time since whichever reference point is more recent: last inbound
+     * activity or last sent probe.
+     *
+     * A plain uint32_t max() comparison fails across the uint32_t wrap-around
+     * boundary: a stale pre-wrap value (e.g. 0xFFFF_FF00) is numerically
+     * larger than a fresh post-wrap value (e.g. 0x0000_0100) even though the
+     * post-wrap value is more recent.
+     *
+     * Use signed 32-bit subtraction instead: (int32_t)(a - b) < 0 means b is
+     * more recent than a (b happened later in the tick sequence).  This is the
+     * same approach FreeRTOS uses for timeouts (TIME_AFTER macro). */
+    uint32_t ref;
+    if ((int32_t)(ka->last_send - ka->last_activity) > 0)
+        ref = ka->last_send;      /* last_send is more recent */
+    else
+        ref = ka->last_activity;  /* last_activity is more recent (or equal) */
 
     /* Wrapping subtraction handles uint32_t rollover correctly. */
     if ((now_ticks - ref) >= ka->interval_ticks)

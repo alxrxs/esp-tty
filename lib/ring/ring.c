@@ -170,6 +170,15 @@ int ring_send(ring_t *r, const uint8_t *buf, size_t len)
     const uint8_t *p = buf;
 
     pthread_mutex_lock(&r->mu);
+
+    /* Check closed before entering the loop: a zero-length send on a closed
+     * ring must return -1, not 0.  The while (remaining > 0) guard skips the
+     * closed-flag check inside the loop when len==0. */
+    if (r->closed) {
+        pthread_mutex_unlock(&r->mu);
+        return -1;
+    }
+
     while (remaining > 0) {
         while (r->used == r->capacity && !r->closed)
             pthread_cond_wait(&r->not_full, &r->mu);

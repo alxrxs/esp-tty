@@ -617,10 +617,9 @@ void test_ring_send_zero_len_is_noop(void)
     ring_free(r);
 }
 
-/* After close, ring_send with zero len returns 0 or -1 but must not
- * deadlock.  The native implementation checks closed *inside* the
- * while(remaining>0) loop, so remaining==0 means the loop never runs
- * and closed is never checked -- return value is 0.                  */
+/* After close, ring_send with zero len must return -1 (closed) and must
+ * not deadlock.  The closed-flag check now runs before the while loop so
+ * even a zero-length send on a closed ring is correctly refused.         */
 void test_ring_send_zero_len_on_closed_ring_does_not_hang(void)
 {
     ring_t *r = ring_create(64);
@@ -628,8 +627,8 @@ void test_ring_send_zero_len_on_closed_ring_does_not_hang(void)
     ring_close(r);
 
     int rc = ring_send(r, (const uint8_t *)"", 0);
-    /* Must not block; result 0 or -1 are both acceptable */
-    TEST_ASSERT_TRUE(rc == 0 || rc == -1);
+    /* Must not block and must signal closed (-1). */
+    TEST_ASSERT_EQUAL_INT(-1, rc);
 
     ring_free(r);
 }

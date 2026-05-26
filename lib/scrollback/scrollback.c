@@ -103,12 +103,22 @@ uint8_t *scrollback_get_lines(scrollback_t *sb, int max_lines, size_t *out_len)
 {
     if (!sb || !out_len) return NULL;
 
+    /* max_lines == 0 means "no lines" -- return empty immediately. */
+    if (max_lines <= 0) {
+        *out_len = 0;
+        return NULL;
+    }
+
+    /* Hold the lock for the entire scan+copy to prevent concurrent
+     * scrollback_push from producing undefined behaviour via memcpy on a
+     * buffer being concurrently modified.  The lock is a pthread_mutex_t so
+     * this is safe and correct in the native test environment. */
     pthread_mutex_lock(&sb->lock);
     size_t used = sb->used;
     size_t head = sb->head;
-    pthread_mutex_unlock(&sb->lock);
 
     if (used == 0) {
+        pthread_mutex_unlock(&sb->lock);
         *out_len = 0;
         return NULL;
     }
@@ -137,6 +147,7 @@ uint8_t *scrollback_get_lines(scrollback_t *sb, int max_lines, size_t *out_len)
 
     uint8_t *out = malloc(dump_len);
     if (!out) {
+        pthread_mutex_unlock(&sb->lock);
         *out_len = 0;
         return NULL;
     }
@@ -148,6 +159,7 @@ uint8_t *scrollback_get_lines(scrollback_t *sb, int max_lines, size_t *out_len)
         memcpy(out + to_end, sb->buf,              dump_len - to_end);
     }
 
+    pthread_mutex_unlock(&sb->lock);
     *out_len = dump_len;
     return out;
 }
@@ -221,6 +233,12 @@ void scrollback_push(scrollback_t *sb, const uint8_t *data, size_t len)
 uint8_t *scrollback_get_lines(scrollback_t *sb, int max_lines, size_t *out_len)
 {
     if (!sb || !out_len) return NULL;
+
+    /* max_lines == 0 means "no lines" -- return empty immediately. */
+    if (max_lines <= 0) {
+        *out_len = 0;
+        return NULL;
+    }
 
     /* Snapshot the two mutable fields under lock; everything else is
      * lock-free.  scrollback_push holds the lock only for the duration

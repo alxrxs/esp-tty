@@ -398,6 +398,50 @@ void test_ka_wrap_last_activity_reset(void)
         ssh_keepalive_tick(&ka, 0x10u + 100, false));
 }
 
+/* --- Wrap-around: post-wrap last_activity must beat pre-wrap last_send --
+ *
+ * Regression test for the uint32_t max() wrap bug.
+ *
+ * Scenario:
+ *   - init at tick 0xFFFF_FF00 (near UINT32_MAX), interval=500
+ *   - send probe at 0xFFFF_FF10 -> last_send = 0xFFFF_FF10
+ *   - inbound at 0x0000_0050 (after wrap) -> last_activity = 0x0000_0050
+ *   - tick at 0x0000_0250 (no inbound)
+ *
+ * Before the fix:
+ *   ref = max(0xFFFF_FF10, 0x0000_0050) = 0xFFFF_FF10  (numerically larger, but older!)
+ *   elapsed = 0x0000_0250 - 0xFFFF_FF10 = 0x340 = 832 > 500 -> spurious SEND
+ *
+ * After the fix (signed comparison):
+ *   (int32_t)(0xFFFF_FF10 - 0x0000_0050) = (int32_t)0xFFFF_FEC0 = negative
+ *   -> last_activity (0x50) is more recent -> ref = 0x50
+ *   elapsed = 0x0000_0250 - 0x0000_0050 = 0x200 = 512 > 500 -> correctly SEND
+ *
+ * Also verify that at tick 0x0000_0243 (elapsed=499 < 500) -> IDLE,
+ * and at tick 0x0000_0244 (elapsed=500 == interval) -> SEND. */
+void test_ka_wrap_send_not_before_activity_interval(void)
+{
+    ssh_keepalive_t ka;
+    uint32_t near_max = 0xFFFFFF00u;
+    ssh_keepalive_init(&ka, 500, 3, near_max);
+
+    /* Simulate a probe sent before the wrap */
+    ssh_keepalive_sent(&ka, 0xFFFFFF10u);
+    ka.unanswered = 0;  /* don't want to trigger drop path */
+
+    /* Inbound arrives after the wrap: last_activity = 0x50 */
+    ssh_keepalive_tick(&ka, 0x00000050u, true);
+    TEST_ASSERT_EQUAL_UINT32(0x00000050u, ka.last_activity);
+
+    /* Tick at 0x243 (499 ticks after last_activity=0x50): below interval -> IDLE */
+    TEST_ASSERT_EQUAL_INT(SSH_KA_IDLE,
+        ssh_keepalive_tick(&ka, 0x00000243u, false));
+
+    /* Tick at 0x244 (500 ticks after last_activity=0x50): at interval -> SEND */
+    TEST_ASSERT_EQUAL_INT(SSH_KA_SEND,
+        ssh_keepalive_tick(&ka, 0x00000244u, false));
+}
+
 /* ------------------------------------------------------------------ */
 int main(void)
 {
@@ -429,5 +473,6 @@ int main(void)
     RUN_TEST(test_ka_init_sets_last_activity_and_send);
     RUN_TEST(test_ka_disabled_inbound_still_idle);
     RUN_TEST(test_ka_wrap_last_activity_reset);
+    RUN_TEST(test_ka_wrap_send_not_before_activity_interval);
     return UNITY_END();
 }

@@ -43,17 +43,17 @@ os.environ.setdefault("REQUESTS_CA_BUNDLE",
 #   export SCEP_CHALLENGE_PASSWORD='...'
 #   export SCEP_DEVICE_MAC='ac276ecec4e0'
 #   ./scripts/scep_enroll_zero.py
-_DEFAULT_SCEP_URL   = os.environ.get("SCEP_URL", "https://scep.example.com/certsrv/mscep/mscep.dll")
-_DEFAULT_PASSWORD   = os.environ.get("SCEP_CHALLENGE_PASSWORD", "")
-_DEFAULT_ZERO_MAC   = os.environ.get("SCEP_DEVICE_MAC", "000000000000")
-_DEFAULT_OUTPUT_DIR = os.environ.get("SCEP_OUTPUT_DIR", "/root/esp-tty/main/certs")
+
+# Sentinel: defer env-var lookup to call time so callers can set env vars
+# after import and see the updated values.
+_ENV_DEFAULT = object()
 
 
-def do_enroll(scep_url=_DEFAULT_SCEP_URL,
-              password=_DEFAULT_PASSWORD,
+def do_enroll(scep_url=_ENV_DEFAULT,
+              password=_ENV_DEFAULT,
               cn=None,
-              output_dir=_DEFAULT_OUTPUT_DIR,
-              zero_mac=_DEFAULT_ZERO_MAC):
+              output_dir=_ENV_DEFAULT,
+              zero_mac=_ENV_DEFAULT):
     """
     Perform SCEP enrollment against *scep_url* and write the three PEM
     files (ca.pem, client.crt, client.key) into *output_dir*.
@@ -73,6 +73,38 @@ def do_enroll(scep_url=_DEFAULT_SCEP_URL,
     zero_mac : str
         MAC address suffix used to build the default CN when *cn* is None.
     """
+    # Defer env-var lookup to call time (so callers can set env vars after import).
+    # Strip whitespace to avoid silent HTTP failures from trailing spaces/newlines.
+    if scep_url is _ENV_DEFAULT:
+        scep_url = os.environ.get("SCEP_URL",
+                                  "https://scep.example.com/certsrv/mscep/mscep.dll").strip()
+    else:
+        scep_url = scep_url.strip()
+
+    if password is _ENV_DEFAULT:
+        password = os.environ.get("SCEP_CHALLENGE_PASSWORD", "").strip()
+    else:
+        password = password.strip()
+
+    if output_dir is _ENV_DEFAULT:
+        output_dir = os.environ.get("SCEP_OUTPUT_DIR",
+                                    "/root/esp-tty/main/certs").strip()
+    else:
+        output_dir = output_dir.strip()
+
+    if zero_mac is _ENV_DEFAULT:
+        zero_mac = os.environ.get("SCEP_DEVICE_MAC", "000000000000").strip()
+    else:
+        zero_mac = zero_mac.strip()
+
+    # Fail fast if the challenge password is empty -- sending an empty OTP to
+    # NDES would result in a silent rejection rather than a clear error.
+    if not password:
+        raise ValueError(
+            "SCEP challenge password is empty.  "
+            "Set the SCEP_CHALLENGE_PASSWORD environment variable before running."
+        )
+
     if cn is None:
         cn = f"IRIX-TTY-PVE-DELL-{zero_mac}"
 

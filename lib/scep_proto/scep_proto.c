@@ -306,6 +306,14 @@ int scep_build_csr(const scep_subject_t *subject,
     if (!subject->common_name || !subject->common_name[0])
         return -1;
 
+    /* X.520 CN attribute uses UTF8String; X.509 caps PrintableString at 64
+     * chars and UTF8String at 64 chars for CN per RFC 5280 §4.1.2.6.
+     * mbedTLS does not enforce this limit itself -- it will silently encode
+     * whatever length is provided.  Reject oversized CNs early so the
+     * certificate is RFC-compliant and NDES/SCEP servers don't reject it. */
+    if (strlen(subject->common_name) > 64)
+        return SCEP_ERR_CN_TOO_LONG;
+
     int ret = 0;
 
     /* Build Name DER */

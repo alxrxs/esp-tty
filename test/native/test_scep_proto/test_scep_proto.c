@@ -805,13 +805,12 @@ void test_mbedtls_pk_sign_version_path_produces_valid_signature(void)
  * 15. scep_build_csr -- long CN and fully-populated DN
  * ======================================================================= */
 
-/* A CN of exactly 64 chars should work or fail gracefully (not crash). */
+/* A CN of exactly 64 chars is at the RFC 5280 limit and must succeed. */
 void test_csr_long_cn_64_chars_no_crash(void)
 {
     mbedtls_pk_context key;
     gen_keypair_or_fail(&key);
 
-    /* 64-character CN is at the boundary of the name_buf in scep_proto.c */
     char long_cn[65];
     memset(long_cn, 'A', 64);
     long_cn[64] = '\0';
@@ -822,24 +821,22 @@ void test_csr_long_cn_64_chars_no_crash(void)
     int rc = scep_build_csr(&subj, &key, "pw",
                             mbedtls_ctr_drbg_random, &g_ctr_drbg,
                             buf, &len);
-    /* Either succeeds or returns an error -- must not crash or corrupt memory */
-    (void)rc;
-    /* Valgrind / AddressSanitizer will catch any out-of-bounds write here */
+    /* Exactly 64 chars: must succeed (RFC 5280 allows up to 64 chars for CN). */
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, rc, "64-char CN must succeed");
 
     mbedtls_pk_free(&key);
 }
 
-/* A CN longer than 64 chars must either succeed or fail cleanly. */
+/* A CN longer than 64 chars must be rejected with SCEP_ERR_CN_TOO_LONG. */
 void test_csr_very_long_cn_fails_gracefully(void)
 {
     mbedtls_pk_context key;
     gen_keypair_or_fail(&key);
 
-    /* 128-character CN -- larger than the name_buf internal scratch space;
-     * scep_build_csr should detect the overflow and return an error. */
-    char very_long_cn[129];
-    memset(very_long_cn, 'B', 128);
-    very_long_cn[128] = '\0';
+    /* 65-character CN -- one over the RFC 5280 limit of 64. */
+    char very_long_cn[66];
+    memset(very_long_cn, 'B', 65);
+    very_long_cn[65] = '\0';
 
     scep_subject_t subj = { .common_name = very_long_cn };
     uint8_t buf[SCEP_MAX_CSR_DER];
@@ -847,15 +844,9 @@ void test_csr_very_long_cn_fails_gracefully(void)
     int rc = scep_build_csr(&subj, &key, "pw",
                             mbedtls_ctr_drbg_random, &g_ctr_drbg,
                             buf, &len);
-    /* If it fails, that is the expected graceful-failure behaviour.
-     * If it succeeds, the generated CSR must still be parseable. */
-    if (rc == 0) {
-        const unsigned char *p = buf;
-        X509_REQ *req = d2i_X509_REQ(NULL, &p, (long)len);
-        /* Must not crash; may or may not parse depending on truncation */
-        if (req) X509_REQ_free(req);
-    }
-    /* Either path is acceptable -- no crash is the key assertion. */
+    /* Must fail with the distinct SCEP_ERR_CN_TOO_LONG error code so the
+     * caller can log "CN too long" rather than a generic "build failed". */
+    TEST_ASSERT_EQUAL_INT(SCEP_ERR_CN_TOO_LONG, rc);
 
     mbedtls_pk_free(&key);
 }

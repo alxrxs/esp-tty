@@ -47,11 +47,16 @@ bool pubkey_compute_hash(const char *openssh_line,
         return false;
     }
 
-    uint8_t blob[512];
+    /* 1024 bytes accommodates RSA-4096 SSH public key blobs (~800 B decoded).
+     * RSA-2048 is ~400 B, Ed25519/ECDSA are ~100 B.  Keys requiring more than
+     * 1024 B will fail Base64_Decode (buffer-too-small) and return false with
+     * a log message rather than silently succeeding. */
+    uint8_t blob[1024];
     word32  blob_sz = sizeof(blob);
     if (Base64_Decode((const byte *)b64_start, (word32)b64_len,
                       blob, &blob_sz) != 0) {
-        ESP_LOGE(TAG, "pubkey_compute_hash: base64 decode failed");
+        ESP_LOGE(TAG, "pubkey_compute_hash: base64 decode failed "
+                      "(key blob may exceed 1024-byte limit)");
         return false;
     }
 

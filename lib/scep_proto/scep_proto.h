@@ -48,6 +48,9 @@ extern "C" {
 #define SCEP_MAX_CERT_DER            2048 /* max DER bytes for a leaf cert */
 #define SCEP_MAX_CA_BUNDLE_CERT_DER  4096 /* max DER per cert in CA bundle */
 
+/* Error codes returned by scep_build_csr() and related functions. */
+#define SCEP_ERR_CN_TOO_LONG   -100  /* CN exceeds 64-char RFC 5280 limit */
+
 /* -----------------------------------------------------------------------
  * Subject fields for CSR generation (RFC 8894 §2 / X.520)
  * --------------------------------------------------------------------- */
