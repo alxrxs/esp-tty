@@ -18,10 +18,15 @@
 
 #include "ring.h"
 #include "scrollback.h"
+#include "usb_cdc_boot_trigger.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* Called per byte-stream match of the boot-trigger magic.  Receives
+ * the user context passed to usb_cdc_drain_ex().  May be NULL. */
+typedef void (*usb_cdc_drain_on_boot_trigger_fn)(void *ctx);
 
 /*
  * Read function type -- abstracts tinyusb_cdcacm_read for testability.
@@ -52,6 +57,23 @@ typedef int (*usb_cdc_drain_read_fn)(void *ctx, uint8_t *buf, size_t cap,
  */
 int usb_cdc_drain(usb_cdc_drain_read_fn read_fn, void *ctx,
                   ring_t *ring, scrollback_t *scrollback);
+
+/*
+ * Extended drain: same as usb_cdc_drain(), but each byte is also fed to
+ * the supplied boot-trigger matcher.  When the matcher fires (i.e. the
+ * USB CDC RX magic sequence has been received in full), on_match is
+ * invoked with on_match_ctx.  Bytes are NOT consumed -- they still
+ * flow to scrollback and the ring as normal.
+ *
+ * trigger may be NULL (no matching; behaves identical to usb_cdc_drain).
+ * on_match may be NULL (matches detected silently and the count is
+ * still reflected in the bytes-drained return value).
+ */
+int usb_cdc_drain_ex(usb_cdc_drain_read_fn read_fn, void *ctx,
+                     ring_t *ring, scrollback_t *scrollback,
+                     usb_cdc_boot_trigger_t *trigger,
+                     usb_cdc_drain_on_boot_trigger_fn on_match,
+                     void *on_match_ctx);
 
 #ifdef __cplusplus
 }

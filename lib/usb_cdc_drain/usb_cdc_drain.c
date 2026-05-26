@@ -13,6 +13,16 @@
 int usb_cdc_drain(usb_cdc_drain_read_fn read_fn, void *ctx,
                   ring_t *ring, scrollback_t *scrollback)
 {
+    return usb_cdc_drain_ex(read_fn, ctx, ring, scrollback,
+                            NULL, NULL, NULL);
+}
+
+int usb_cdc_drain_ex(usb_cdc_drain_read_fn read_fn, void *ctx,
+                     ring_t *ring, scrollback_t *scrollback,
+                     usb_cdc_boot_trigger_t *trigger,
+                     usb_cdc_drain_on_boot_trigger_fn on_match,
+                     void *on_match_ctx)
+{
     if (!read_fn) return -1;
 
     uint8_t buf[USB_CDC_DRAIN_BUF];
@@ -33,6 +43,18 @@ int usb_cdc_drain(usb_cdc_drain_read_fn read_fn, void *ctx,
         /* Non-blocking ring send; data drops if the ring is full or closed. */
         if (ring) {
             (void)ring_try_send(ring, buf, rxd);
+        }
+
+        /* Boot-trigger detection: byte-by-byte scan after the bulk
+         * pushes so a triggering byte still reaches scrollback/ring
+         * before the reset.  on_match may not return (the production
+         * callback calls esp_restart()), so do this last. */
+        if (trigger) {
+            for (size_t i = 0; i < rxd; i++) {
+                if (usb_cdc_boot_trigger_feed(trigger, buf[i])) {
+                    if (on_match) on_match(on_match_ctx);
+                }
+            }
         }
 
         total += (int)rxd;

@@ -15,6 +15,7 @@
 #include "usb_cdc.h"
 #include "scrollback.h"
 #include "usb_cdc_drain.h"
+#include "usb_cdc_boot_trigger.h"
 #include "config.h"            /* USB_MANUFACTURER_STRING etc. */
 #include "esp_log.h"
 
@@ -28,8 +29,33 @@
 #include "tinyusb.h"
 #include "tinyusb_cdc_acm.h"
 #include "tinyusb_default_config.h"
+#include "esp_system.h"        /* esp_restart */
+#include "soc/rtc_cntl_reg.h"  /* RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT */
 
 static const char *TAG = "usb_cdc";
+
+/* Boot-trigger matcher.  Lives at file scope so its state persists
+ * across cdc_rx_callback invocations (the magic may straddle multiple
+ * RX FIFO chunks). */
+static usb_cdc_boot_trigger_t s_boot_trigger;
+
+/* on-match callback: reboot the chip into the ROM serial bootloader
+ * without needing the BOOT button.  Writes the option1 force-download
+ * bit and resets; the ROM checks that bit on cold/warm reset and stays
+ * in download mode until cleared (esp_restart() preserves RTC scratch
+ * across the reset).
+ *
+ * Intentionally does not return -- esp_restart() never returns.  The
+ * surrounding drain loop is structured so scrollback + ring receive
+ * the triggering bytes BEFORE we get here. */
+static void on_boot_trigger_match(void *ctx)
+{
+    (void)ctx;
+    ESP_LOGW(TAG, "USB CDC boot trigger magic detected -- "
+                  "rebooting into ROM serial bootloader");
+    REG_WRITE(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT);
+    esp_restart();
+}
 
 /* Custom USB device descriptor. Overrides sdkconfig at runtime via
  * tinyusb_config_t.descriptor.device. Class/SubClass/Protocol = EF/02/01
@@ -102,10 +128,13 @@ static void cdc_rx_callback(int itf, cdcacm_event_t *event)
      * not per-chunk ring-full information.  Drop visibility is preserved at
      * the source: the host's USB stack will see NAKs / write stalls when the
      * ring is consistently full. */
-    (void)usb_cdc_drain(tinyusb_read_adapter,
-                        (void *)(intptr_t)itf,
-                        s_usb_to_ssh,
-                        s_scrollback);
+    (void)usb_cdc_drain_ex(tinyusb_read_adapter,
+                           (void *)(intptr_t)itf,
+                           s_usb_to_ssh,
+                           s_scrollback,
+                           &s_boot_trigger,
+                           on_boot_trigger_match,
+                           NULL);
 }
 
 static void cdc_line_state_callback(int itf, cdcacm_event_t *event)
@@ -143,6 +172,8 @@ esp_err_t usb_cdc_init(ring_t *usb_to_ssh, ring_t *ssh_to_usb,
     s_usb_to_ssh = usb_to_ssh;
     s_ssh_to_usb = ssh_to_usb;
     s_scrollback = scrollback;
+
+    usb_cdc_boot_trigger_init(&s_boot_trigger);
 
     tinyusb_config_t tusb_cfg = TINYUSB_DEFAULT_CONFIG();
     tusb_cfg.descriptor.device       = &s_device_descriptor;
