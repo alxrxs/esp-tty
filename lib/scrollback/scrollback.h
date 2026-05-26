@@ -27,6 +27,14 @@ typedef struct scrollback_t scrollback_t;
 scrollback_t *scrollback_create(size_t cap);
 
 /*
+ * Destroy a scrollback buffer created by scrollback_create().
+ * Frees the internal buffer and (on ESP32) deletes the FreeRTOS mutex.
+ * Safe to call with NULL (no-op).
+ * Must not be called while any other thread holds or is waiting on the lock.
+ */
+void scrollback_destroy(scrollback_t *sb);
+
+/*
  * Append data to the scrollback ring, overwriting the oldest bytes once
  * the buffer is full.  Non-blocking; safe to call from TinyUSB callback
  * context.  Silently skips if the lock is momentarily held by a dump.

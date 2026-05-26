@@ -5,11 +5,11 @@
 #include "ssh_keepalive.h"
 
 void ssh_keepalive_init(ssh_keepalive_t *ka,
-                        uint32_t interval_ms,
+                        uint32_t interval_ticks,
                         uint32_t count_max,
                         uint32_t now_ticks)
 {
-    ka->interval_ticks = interval_ms;   /* caller converts ms->ticks; we store as-is */
+    ka->interval_ticks = interval_ticks;
     ka->count_max      = count_max;
     ka->last_activity  = now_ticks;
     ka->last_send      = now_ticks;

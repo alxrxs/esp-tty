@@ -22,12 +22,18 @@ MC_DIR = os.path.join(PROJECT_DIR, "managed_components")
 
 
 def _run(cmd, cwd, check=True):
-    result = subprocess.run(
-        cmd,
-        cwd=cwd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"Command {cmd} timed out after 300 s in {cwd}"
+        )
     if check and result.returncode != 0:
         raise RuntimeError(
             f"Command {cmd} failed in {cwd}:\n"

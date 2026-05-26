@@ -90,9 +90,17 @@ def _generate_asm_for_files(file_list, src_dir, label):
             "-P",
             EMBED_SCRIPT,
         ]
-        ret = subprocess.call(cmd, cwd=BUILD_DIR)
+        import sys
+        try:
+            ret = subprocess.call(cmd, cwd=BUILD_DIR, timeout=300)
+        except subprocess.TimeoutExpired:
+            sys.stderr.write(
+                "ERROR: gen_eap_certs_asm.py: cmake timed out for %s (> 300 s)\n"
+                % asm_name
+            )
+            env.Exit(1)
+            return
         if ret != 0:
-            import sys
             sys.stderr.write(
                 "ERROR: gen_eap_certs_asm.py: cmake failed for %s (exit %d)\n"
                 % (asm_name, ret)

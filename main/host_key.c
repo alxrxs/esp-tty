@@ -71,9 +71,21 @@ static void log_fingerprint(const uint8_t *der, size_t sz)
     Sha256  sha;
     uint8_t digest[PUBKEY_HASH_SIZE];
 
-    wc_InitSha256(&sha);
-    wc_Sha256Update(&sha, der, (word32)sz);
-    wc_Sha256Final(&sha, digest);
+    int ret = wc_InitSha256(&sha);
+    if (ret != 0) {
+        ESP_LOGW(TAG, "fingerprint SHA256 failed: %d", ret);
+        return;
+    }
+    ret = wc_Sha256Update(&sha, der, (word32)sz);
+    if (ret != 0) {
+        ESP_LOGW(TAG, "fingerprint SHA256 failed: %d", ret);
+        return;
+    }
+    ret = wc_Sha256Final(&sha, digest);
+    if (ret != 0) {
+        ESP_LOGW(TAG, "fingerprint SHA256 failed: %d", ret);
+        return;
+    }
 
     /* Print as colon-separated hex, same style as ssh-keygen -l */
     char hex[PUBKEY_HASH_SIZE * 3];

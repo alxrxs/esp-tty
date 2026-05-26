@@ -33,8 +33,28 @@ void test_create_returns_non_null(void)
 {
     scrollback_t *sb = scrollback_create(256);
     TEST_ASSERT_NOT_NULL(sb);
-    free(sb);  /* direct free is not the API; but scrollback has no destroy --
-                  we rely on process exit for tests; just confirm create works */
+    scrollback_destroy(sb);
+}
+
+/* scrollback_destroy(NULL) must not crash. */
+void test_destroy_null_is_safe(void)
+{
+    scrollback_destroy(NULL);
+    TEST_PASS();
+}
+
+/* scrollback_destroy frees resources; use after destroy is not tested
+ * (UB), but double-create/destroy cycles must not crash. */
+void test_destroy_full_cycle(void)
+{
+    scrollback_t *sb = scrollback_create(128);
+    TEST_ASSERT_NOT_NULL(sb);
+    scrollback_push(sb, (const uint8_t *)"hello\n", 6);
+    scrollback_destroy(sb);
+    /* Create a fresh instance to verify the allocator is still sane. */
+    scrollback_t *sb2 = scrollback_create(128);
+    TEST_ASSERT_NOT_NULL(sb2);
+    scrollback_destroy(sb2);
 }
 
 /* -- Empty buffer ---------------------------------------------------------- */
@@ -49,7 +69,7 @@ void test_empty_buffer_get_lines_returns_null(void)
 
     TEST_ASSERT_NULL(out);
     TEST_ASSERT_EQUAL_size_t(0, len);
-    free(sb);
+    scrollback_destroy(sb);
 }
 
 /* -- Push then get_lines --------------------------------------------------- */
@@ -70,7 +90,7 @@ void test_push_then_get_lines_returns_content(void)
     TEST_ASSERT_EQUAL_MEMORY(msg, out, len);
 
     free(out);
-    free(sb);
+    scrollback_destroy(sb);
 }
 
 /* -- Wrap-around: push more than capacity, oldest data overwritten ---------- */
@@ -102,7 +122,7 @@ void test_overflow_wraps_oldest_data(void)
         TEST_ASSERT_EQUAL_UINT8('B', out[i]);
 
     free(out);
-    free(sb);
+    scrollback_destroy(sb);
 }
 
 /* -- get_lines respects max_lines < total lines ----------------------------- */
@@ -134,7 +154,7 @@ void test_get_lines_returns_last_n_lines(void)
     TEST_ASSERT_EQUAL_MEMORY(expected_suffix, out + len - sfx_len, sfx_len);
 
     free(out);
-    free(sb);
+    scrollback_destroy(sb);
 }
 
 /* -- max_lines > total lines returns everything ----------------------------- */
@@ -155,7 +175,7 @@ void test_get_lines_max_exceeds_total_returns_all(void)
     TEST_ASSERT_EQUAL_MEMORY(text, out, len);
 
     free(out);
-    free(sb);
+    scrollback_destroy(sb);
 }
 
 /* -- Data with no newlines: get_lines returns entire buffer ----------------- */
@@ -177,7 +197,7 @@ void test_no_newlines_returns_entire_buffer(void)
     TEST_ASSERT_EQUAL_MEMORY(data, out, len);
 
     free(out);
-    free(sb);
+    scrollback_destroy(sb);
 }
 
 /* -- Exact capacity boundary: push exactly cap bytes ----------------------- */
@@ -200,7 +220,7 @@ void test_exact_capacity_push(void)
     TEST_ASSERT_EQUAL_MEMORY(data, out, len);
 
     free(out);
-    free(sb);
+    scrollback_destroy(sb);
 }
 
 /* -- Wrap-around across circular boundary with line counting ---------------- */
@@ -234,7 +254,7 @@ void test_wrap_and_get_lines_correct(void)
     TEST_ASSERT_EQUAL_MEMORY(tail, out + len - strlen(tail), strlen(tail));
 
     free(out);
-    free(sb);
+    scrollback_destroy(sb);
 }
 
 /* -- get_lines with max_lines == 0 returns nothing (empty frame) ----------- */
@@ -257,7 +277,7 @@ void test_get_lines_zero_max_returns_null_or_empty(void)
     } else {
         TEST_ASSERT_EQUAL_size_t(0, len);
     }
-    free(sb);
+    scrollback_destroy(sb);
 }
 
 /* -- Multiple pushes accumulate correctly ----------------------------------- */
@@ -279,7 +299,7 @@ void test_multiple_pushes_accumulate(void)
     TEST_ASSERT_EQUAL_MEMORY("foo\nbar\nbaz\n", out, 12);
 
     free(out);
-    free(sb);
+    scrollback_destroy(sb);
 }
 
 /* -- scrollback_count_newlines --------------------------------------------- */
@@ -456,7 +476,7 @@ void test_push_zero_len_is_noop(void)
     TEST_ASSERT_NULL(out);
     TEST_ASSERT_EQUAL_size_t(0, len);
 
-    free(sb);
+    scrollback_destroy(sb);
 }
 
 /* scrollback_get_lines with NULL out_len must not crash.                  */
@@ -470,7 +490,7 @@ void test_get_lines_null_out_len_is_safe(void)
     /* Must not crash; result is unspecified (NULL or freed) */
     if (out) free(out);
 
-    free(sb);
+    scrollback_destroy(sb);
 }
 
 /* scrollback_get_lines with NULL sb must not crash.                       */
@@ -506,7 +526,7 @@ void test_push_cap_minus_one_then_one_byte(void)
     TEST_ASSERT_EQUAL_UINT8(0xBB, out[len - 1]);
 
     free(out);
-    free(sb);
+    scrollback_destroy(sb);
 }
 
 /* Overwrite entire capacity with one giant push, then get_lines.
@@ -534,7 +554,7 @@ void test_push_double_capacity_retains_last_cap_bytes(void)
     TEST_ASSERT_EACH_EQUAL_UINT8(0xBB, out, CAP);
 
     free(out);
-    free(sb);
+    scrollback_destroy(sb);
 }
 
 /* get_lines with max_lines=1 returns exactly 1 newline.                  */
@@ -564,7 +584,7 @@ void test_get_lines_exactly_one_line(void)
     TEST_ASSERT_EQUAL_MEMORY(expected, out + len - strlen(expected), strlen(expected));
 
     free(out);
-    free(sb);
+    scrollback_destroy(sb);
 }
 
 /* Binary payload (including NUL bytes) round-trips through push/get.     */
@@ -585,7 +605,7 @@ void test_push_binary_payload_preserved(void)
     TEST_ASSERT_EQUAL_MEMORY(binary, out, 128);
 
     free(out);
-    free(sb);
+    scrollback_destroy(sb);
 }
 
 /* scrollback_format_header: out_sz == 1 (only room for NUL) -> return 0. */
@@ -656,6 +676,10 @@ int main(void)
     RUN_TEST(test_format_header_out_sz_one_returns_zero);
     RUN_TEST(test_count_newlines_exactly_one_byte_newline);
     RUN_TEST(test_count_newlines_exactly_one_byte_not_newline);
+
+    /* scrollback_destroy tests */
+    RUN_TEST(test_destroy_null_is_safe);
+    RUN_TEST(test_destroy_full_cycle);
 
     return UNITY_END();
 }

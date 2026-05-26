@@ -143,7 +143,10 @@ static volatile bool s_installed = false;
 static void udp_lazy_init(void)
 {
     if (!s_init_mutex) return;
-    if (xSemaphoreTake(s_init_mutex, 0) != pdTRUE) return;
+    /* Use a blocking take so that when two threads race to initialise, the
+     * loser waits and then observes the already-set socket rather than
+     * silently skipping init (the previous trylock with timeout=0 behaviour). */
+    if (xSemaphoreTake(s_init_mutex, portMAX_DELAY) != pdTRUE) return;
 
     if (atomic_load(&s_sock) != -1) {
         xSemaphoreGive(s_init_mutex);
@@ -159,10 +162,32 @@ static void udp_lazy_init(void)
     memset(&s_dest, 0, sizeof(s_dest));
     s_dest.sin_family = AF_INET;
     s_dest.sin_port   = htons((uint16_t)(UDP_LOG_PORT));
+
+    /* Try inet_pton first (dotted-decimal IP literal).  If that fails, fall
+     * back to getaddrinfo so that hostnames are also accepted.  On failure
+     * log once, set s_sock to -1 (already -1 here), and disable future
+     * attempts by leaving s_sock = -1. */
     if (inet_pton(AF_INET, UDP_LOG_HOST, &s_dest.sin_addr) != 1) {
-        close(fd);
-        xSemaphoreGive(s_init_mutex);
-        return;
+        struct addrinfo hints;
+        struct addrinfo *res = NULL;
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family   = AF_INET;
+        hints.ai_socktype = SOCK_DGRAM;
+        if (getaddrinfo(UDP_LOG_HOST, NULL, &hints, &res) == 0 && res) {
+            s_dest.sin_addr =
+                ((struct sockaddr_in *)res->ai_addr)->sin_addr;
+            freeaddrinfo(res);
+        } else {
+            if (res) freeaddrinfo(res);
+            ESP_LOGE("udp_log",
+                     "udp_lazy_init: cannot resolve UDP_LOG_HOST=\"%s\"; "
+                     "UDP logging disabled",
+                     UDP_LOG_HOST);
+            close(fd);
+            /* Leave s_sock at -1; stop all future log attempts. */
+            xSemaphoreGive(s_init_mutex);
+            return;
+        }
     }
 
     int flags = fcntl(fd, F_GETFL, 0);
@@ -192,12 +217,15 @@ static void flush_locked(void)
         return;
     }
 
-    /* "#<seq>\n" prefix.  Capped at UDP_LOG_SEQ_HDR_MAX; any sane uint32
-     * decimal fits in 11 digits. */
+    /* "#<seq>\n" prefix.  Capped at UDP_LOG_SEQ_HDR_MAX - 1 so the header
+     * never overstates its length: snprintf writes at most SEQ_HDR_MAX bytes
+     * including the NUL, so the usable payload is at most SEQ_HDR_MAX - 1
+     * bytes.  Clamping to SEQ_HDR_MAX (without -1) would corrupt the wire
+     * format by claiming one extra byte that is actually the NUL terminator. */
     int hdr_n = snprintf(s_wire, UDP_LOG_SEQ_HDR_MAX, "#%u\n",
                          (unsigned)s_seq);
     if (hdr_n < 0) hdr_n = 0;
-    if (hdr_n > UDP_LOG_SEQ_HDR_MAX) hdr_n = UDP_LOG_SEQ_HDR_MAX;
+    if (hdr_n > UDP_LOG_SEQ_HDR_MAX - 1) hdr_n = UDP_LOG_SEQ_HDR_MAX - 1;
 
     memcpy(s_wire + hdr_n, s_acc_buf, s_acc_len);
     size_t total = (size_t)hdr_n + s_acc_len;

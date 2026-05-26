@@ -4,6 +4,7 @@
 
 #include "ring.h"
 
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -59,8 +60,17 @@ void ring_free(ring_t *r)
 
 int ring_send(ring_t *r, const uint8_t *buf, size_t len)
 {
+    /* Guard against len > INT_MAX: (int)len would be negative and be
+     * misinterpreted as an error by callers. */
+    if (len > INT_MAX) return -1;
+
     size_t remaining = len;
     const uint8_t *p = buf;
+
+    /* Check closed BEFORE the while loop so that ring_send(r, buf, 0) on a
+     * closed ring correctly returns -1 instead of 0 (the while body is never
+     * entered when len == 0, so the in-loop closed check would be skipped). */
+    if (r->closed) return -1;
 
     while (remaining > 0) {
         if (r->closed) return -1;
@@ -80,6 +90,11 @@ int ring_send(ring_t *r, const uint8_t *buf, size_t len)
 
 int ring_recv(ring_t *r, uint8_t *buf, size_t cap)
 {
+    /* cap == 0: xStreamBufferReceive returns 0 immediately causing an infinite
+     * loop; return 0 early to match the documented "returns >= 1 or -1" contract
+     * (a zero-byte read is trivially satisfied without blocking). */
+    if (cap == 0) return 0;
+
     while (1) {
         if (r->closed) return -1;
 
@@ -166,6 +181,10 @@ void ring_free(ring_t *r)
 
 int ring_send(ring_t *r, const uint8_t *buf, size_t len)
 {
+    /* Guard against len > INT_MAX: (int)len would be negative and be
+     * misinterpreted as an error by callers. */
+    if (len > INT_MAX) return -1;
+
     size_t remaining = len;
     const uint8_t *p = buf;
 
@@ -213,6 +232,10 @@ int ring_send(ring_t *r, const uint8_t *buf, size_t len)
 
 int ring_recv(ring_t *r, uint8_t *buf, size_t cap)
 {
+    /* cap == 0: a zero-byte read is trivially satisfied; return immediately to
+     * avoid blocking forever on an empty ring. */
+    if (cap == 0) return 0;
+
     pthread_mutex_lock(&r->mu);
     while (r->used == 0 && !r->closed)
         pthread_cond_wait(&r->not_empty, &r->mu);

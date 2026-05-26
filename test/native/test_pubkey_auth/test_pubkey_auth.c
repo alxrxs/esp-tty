@@ -324,6 +324,12 @@ void test_auth_check_rejects_null_key(void)
     TEST_ASSERT_EQUAL_INT(PUBKEY_AUTH_REJECTED, r);
 }
 
+void test_auth_check_rejects_null_expected_hash(void)
+{
+    pubkey_auth_result_t r = pubkey_auth_check(TEST_BLOB, sizeof(TEST_BLOB), NULL);
+    TEST_ASSERT_EQUAL_INT(PUBKEY_AUTH_REJECTED, r);
+}
+
 void test_auth_check_rejects_zero_length_key(void)
 {
     uint8_t hash[32];
@@ -666,6 +672,7 @@ int main(void)
     RUN_TEST(test_auth_check_ok_for_matching_hash);
     RUN_TEST(test_auth_check_rejects_wrong_hash);
     RUN_TEST(test_auth_check_rejects_null_key);
+    RUN_TEST(test_auth_check_rejects_null_expected_hash);
     RUN_TEST(test_auth_check_rejects_zero_length_key);
     RUN_TEST(test_auth_check_differs_for_different_blob);
     RUN_TEST(test_auth_check_single_bit_flip_rejected);

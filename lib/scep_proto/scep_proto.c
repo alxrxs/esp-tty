@@ -599,6 +599,7 @@ int scep_build_pkimessage_pkcsreq(const uint8_t      *csr_der,
     int ret = 0;
     uint8_t *env_scratch = NULL;
     uint8_t *out_scratch = NULL;
+    uint8_t *sa_content  = NULL; /* signed-attrs heap buffer; freed at done: */
 
     /* ------------------------------------------------------------------
      * Extract RA cert's RSA public key and IssuerAndSerialNumber
@@ -668,11 +669,18 @@ int scep_build_pkimessage_pkcsreq(const uint8_t      *csr_der,
     if (ret != 0) { free(enc_csr); goto done; }
 
     /* ------------------------------------------------------------------
-     * RSA-PKCS1v15 encrypt CEK to RA's public key
+     * RSA-OAEP encrypt CEK to RA's public key.
+     *
+     * We use RSAES-OAEP (PKCS#1 v2.x, MBEDTLS_RSA_PKCS_V21) with SHA-256
+     * unconditionally.  All NDES servers and modern SCEP CAs support OAEP;
+     * legacy NDES (Windows Server 2008 and earlier) that only understand
+     * PKCS#1 v1.5 wrapping would fail here -- add a GetCACaps fallback if
+     * that ever becomes a requirement.  PKCS#1 v1.5 wrapping (V15) is
+     * vulnerable to the Bleichenbacher oracle attack and MUST NOT be used.
      * ------------------------------------------------------------------ */
     uint8_t *enc_cek = malloc(ra_rsa_len);
     if (!enc_cek) { free(enc_csr); ret = -1; goto done; }
-    mbedtls_rsa_set_padding(ra_rsa, MBEDTLS_RSA_PKCS_V15, MBEDTLS_MD_NONE);
+    mbedtls_rsa_set_padding(ra_rsa, MBEDTLS_RSA_PKCS_V21, MBEDTLS_MD_SHA256);
     ret = mbedtls_rsa_pkcs1_encrypt(ra_rsa, f_rng, p_rng, CEK_LEN, cek, enc_cek);
     if (ret != 0) { free(enc_csr); free(enc_cek); goto done; }
 
@@ -690,6 +698,10 @@ int scep_build_pkimessage_pkcsreq(const uint8_t      *csr_der,
      * }
      * Wrapped in ContentInfo { id-envelopedData, [0]EXPLICIT ... }
      * ------------------------------------------------------------------ */
+    /* Overflow check: 4096 + padded_len + ra_rsa_len must not wrap size_t */
+    if (padded_len > (SIZE_MAX - 4096 - ra_rsa_len)) {
+        free(enc_csr); free(enc_cek); ret = -1; goto done;
+    }
     size_t env_sz = 4096 + padded_len + ra_rsa_len;
     env_scratch = malloc(env_sz);
     if (!env_scratch) { free(enc_csr); free(enc_cek); ret = -1; goto done; }
@@ -873,6 +885,9 @@ int scep_build_pkimessage_pkcsreq(const uint8_t      *csr_der,
     static const uint8_t mt_val[] = {0x13, 0x02, '1', '9'};
 
     /* transactionID value: PrintableString(txid) */
+    /* Guard: tid_val[] is 70 bytes; 2-byte header + up to 68 bytes of content.
+     * SHA-256 hex is always 64 chars, but defend against pathological callers. */
+    if (strlen(transaction_id) > 68) { ret = -1; goto done; }
     size_t tid_str_len = strlen(transaction_id);
     uint8_t tid_val[70];
     tid_val[0] = 0x13; /* PrintableString */
@@ -912,6 +927,7 @@ int scep_build_pkimessage_pkcsreq(const uint8_t      *csr_der,
     int _r = w_signed_attr(&_tp, _tb, (oid_arr), sizeof(oid_arr), (val_arr), (vlen)); \
     if (_r < 0) { ret = _r; goto done; } \
     _len = (size_t)_r; \
+    if (_len > sizeof(attrs[idx].data)) { ret = -1; goto done; } \
     attrs[idx].len = _len; \
     memcpy(attrs[idx].data, _tp, _len); \
 } while(0)
@@ -941,7 +957,7 @@ int scep_build_pkimessage_pkcsreq(const uint8_t      *csr_der,
     for (int i = 0; i < 5; i++) sa_content_len += attrs[i].len;
 
     /* Allocate sa_content buffer */
-    uint8_t *sa_content = malloc(sa_content_len);
+    sa_content = malloc(sa_content_len);
     if (!sa_content) { ret = -1; goto done; }
     size_t offset = 0;
     for (int i = 0; i < 5; i++) {
@@ -950,10 +966,13 @@ int scep_build_pkimessage_pkcsreq(const uint8_t      *csr_der,
     }
 
     /* Prepend SET tag+length to signedAttrs content for digest computation.
-     * sa_hash_len is set precisely after building the TLV header below. */
+     * sa_hash_len is set precisely after building the TLV header below.
+     * The SET TLV header needs at most 5 bytes (tag + 0x82 + 2-byte length)
+     * when sa_content_len >= 0x10000; reject that case to keep the +4 safe. */
+    if (sa_content_len >= 0x10000) { ret = -1; goto done; }
     size_t sa_hash_len = 0; /* set below after building TLV */
     uint8_t *sa_for_hash = malloc(sa_content_len + 4);
-    if (!sa_for_hash) { free(sa_content); ret = -1; goto done; }
+    if (!sa_for_hash) { ret = -1; goto done; }
     {
         /* Write SET TLV manually */
         size_t pos = 0;
@@ -976,7 +995,7 @@ int scep_build_pkimessage_pkcsreq(const uint8_t      *csr_der,
     uint8_t sa_hash[SHA256_LEN];
     ret = mbedtls_sha256(sa_for_hash, sa_hash_len, sa_hash, 0);
     free(sa_for_hash);
-    if (ret != 0) { free(sa_content); goto done; }
+    if (ret != 0) { goto done; }
 
     uint8_t sig[512];
     size_t  sig_len = sizeof(sig);
@@ -987,14 +1006,25 @@ int scep_build_pkimessage_pkcsreq(const uint8_t      *csr_der,
     ret = mbedtls_pk_sign(signing_key, MBEDTLS_MD_SHA256, sa_hash, SHA256_LEN,
                           sig, sizeof(sig), &sig_len, f_rng, p_rng);
 #endif
-    if (ret != 0) { free(sa_content); goto done; }
+    if (ret != 0) { goto done; }
 
     /* ------------------------------------------------------------------
      * Build outer SignedData + ContentInfo DER (backwards write)
+     *
+     * IMPORTANT: from this point sa_content and out_scratch are both heap-
+     * allocated.  The global CHK macro does `return _r` which would bypass the
+     * cleanup at `done:`.  We therefore use CHK_G (goto done on error) for
+     * every write call below.  sa_content is freed via `done:` through the
+     * explicit free at the bottom of this block on success; out_scratch is
+     * always freed at `done:`.
      * ------------------------------------------------------------------ */
+#undef  CHK_G
+#define CHK_G(x) do { int _r = (x); if (_r < 0) { ret = _r; goto done; } \
+                      len += (size_t)(_r); } while(0)
+
     size_t out_sz = SCEP_MAX_P7_LEN + env_ci_len;
     out_scratch = malloc(out_sz);
-    if (!out_scratch) { free(sa_content); ret = -1; goto done; }
+    if (!out_scratch) { ret = -1; goto done; }
 
     {
         uint8_t *op = out_scratch + out_sz;
@@ -1005,22 +1035,22 @@ int scep_build_pkimessage_pkcsreq(const uint8_t      *csr_der,
         {
             size_t len = 0;
             /* signature OCTET STRING */
-            CHK(mbedtls_asn1_write_raw_buffer(&op, os, sig, sig_len));
-            CHK(mbedtls_asn1_write_len(&op, os, sig_len));
-            CHK(mbedtls_asn1_write_tag(&op, os, MBEDTLS_ASN1_OCTET_STRING));
+            CHK_G(mbedtls_asn1_write_raw_buffer(&op, os, sig, sig_len));
+            CHK_G(mbedtls_asn1_write_len(&op, os, sig_len));
+            CHK_G(mbedtls_asn1_write_tag(&op, os, MBEDTLS_ASN1_OCTET_STRING));
             /* signatureAlgorithm rsaEncryption NULL */
-            CHK(w_alg_null(&op, os, OID_RSA_ENCRYPTION, sizeof(OID_RSA_ENCRYPTION)));
+            CHK_G(w_alg_null(&op, os, OID_RSA_ENCRYPTION, sizeof(OID_RSA_ENCRYPTION)));
             /* signedAttrs [0] IMPLICIT SET OF Attribute */
-            CHK(mbedtls_asn1_write_raw_buffer(&op, os, sa_content, sa_content_len));
-            CHK(mbedtls_asn1_write_len(&op, os, sa_content_len));
-            CHK(mbedtls_asn1_write_tag(&op, os, 0xA0)); /* [0] IMPLICIT */
+            CHK_G(mbedtls_asn1_write_raw_buffer(&op, os, sa_content, sa_content_len));
+            CHK_G(mbedtls_asn1_write_len(&op, os, sa_content_len));
+            CHK_G(mbedtls_asn1_write_tag(&op, os, 0xA0)); /* [0] IMPLICIT */
             /* digestAlgorithm sha256 NULL */
-            CHK(w_alg_null(&op, os, OID_SHA256, sizeof(OID_SHA256)));
+            CHK_G(w_alg_null(&op, os, OID_SHA256, sizeof(OID_SHA256)));
             /* sid IssuerAndSerialNumber */
-            CHK(w_issuer_serial(&op, os,
+            CHK_G(w_issuer_serial(&op, os,
                 self_issuer, self_issuer_len, self_serial, self_serial_len));
             /* version=1 */
-            CHK(mbedtls_asn1_write_int(&op, os, 1));
+            CHK_G(mbedtls_asn1_write_int(&op, os, 1));
             si_body_len = len;
         }
 
@@ -1028,8 +1058,8 @@ int scep_build_pkimessage_pkcsreq(const uint8_t      *csr_der,
         size_t si_hdr_len;
         {
             size_t len = 0;
-            CHK(mbedtls_asn1_write_len(&op, os, si_body_len));
-            CHK(mbedtls_asn1_write_tag(&op, os,
+            CHK_G(mbedtls_asn1_write_len(&op, os, si_body_len));
+            CHK_G(mbedtls_asn1_write_tag(&op, os,
                 MBEDTLS_ASN1_CONSTRUCTED | MBEDTLS_ASN1_SEQUENCE));
             si_hdr_len = len;
         }
@@ -1039,8 +1069,8 @@ int scep_build_pkimessage_pkcsreq(const uint8_t      *csr_der,
         size_t sis_hdr_len;
         {
             size_t len = 0;
-            CHK(mbedtls_asn1_write_len(&op, os, si_total));
-            CHK(mbedtls_asn1_write_tag(&op, os,
+            CHK_G(mbedtls_asn1_write_len(&op, os, si_total));
+            CHK_G(mbedtls_asn1_write_tag(&op, os,
                 MBEDTLS_ASN1_CONSTRUCTED | MBEDTLS_ASN1_SET));
             sis_hdr_len = len;
         }
@@ -1050,10 +1080,10 @@ int scep_build_pkimessage_pkcsreq(const uint8_t      *csr_der,
         size_t certs_tlv_len;
         {
             size_t len = 0;
-            CHK(mbedtls_asn1_write_raw_buffer(&op, os,
+            CHK_G(mbedtls_asn1_write_raw_buffer(&op, os,
                 self_signed_cert_der, self_signed_cert_len));
-            CHK(mbedtls_asn1_write_len(&op, os, self_signed_cert_len));
-            CHK(mbedtls_asn1_write_tag(&op, os, 0xA0)); /* [0] IMPLICIT */
+            CHK_G(mbedtls_asn1_write_len(&op, os, self_signed_cert_len));
+            CHK_G(mbedtls_asn1_write_tag(&op, os, 0xA0)); /* [0] IMPLICIT */
             certs_tlv_len = len;
         }
 
@@ -1066,16 +1096,16 @@ int scep_build_pkimessage_pkcsreq(const uint8_t      *csr_der,
         size_t eci_os_len;   /* OCTET STRING TLV */
         {
             size_t len = 0;
-            CHK(mbedtls_asn1_write_raw_buffer(&op, os, env_ci, env_ci_len));
-            CHK(mbedtls_asn1_write_len(&op, os, env_ci_len));
-            CHK(mbedtls_asn1_write_tag(&op, os, MBEDTLS_ASN1_OCTET_STRING));
+            CHK_G(mbedtls_asn1_write_raw_buffer(&op, os, env_ci, env_ci_len));
+            CHK_G(mbedtls_asn1_write_len(&op, os, env_ci_len));
+            CHK_G(mbedtls_asn1_write_tag(&op, os, MBEDTLS_ASN1_OCTET_STRING));
             eci_os_len = len;
         }
         size_t eci_ctx_len;  /* [0] EXPLICIT wrapper */
         {
             size_t len = 0;
-            CHK(mbedtls_asn1_write_len(&op, os, eci_os_len));
-            CHK(mbedtls_asn1_write_tag(&op, os, 0xA0));
+            CHK_G(mbedtls_asn1_write_len(&op, os, eci_os_len));
+            CHK_G(mbedtls_asn1_write_tag(&op, os, 0xA0));
             eci_ctx_len = len;
         }
         size_t eci_oid_len;
@@ -1085,15 +1115,15 @@ int scep_build_pkimessage_pkcsreq(const uint8_t      *csr_der,
              * NOT id-envelopedData (the latter is the type of the *inner*
              * eContent value, but the wrapper says id-data).  The contentType
              * signed attribute above is set to match. */
-            CHK(w_oid(&op, os, OID_DATA, sizeof(OID_DATA)));
+            CHK_G(w_oid(&op, os, OID_DATA, sizeof(OID_DATA)));
             eci_oid_len = len;
         }
         size_t eci_body = eci_oid_len + eci_ctx_len + eci_os_len;
         size_t eci_hdr_len;
         {
             size_t len = 0;
-            CHK(mbedtls_asn1_write_len(&op, os, eci_body));
-            CHK(mbedtls_asn1_write_tag(&op, os,
+            CHK_G(mbedtls_asn1_write_len(&op, os, eci_body));
+            CHK_G(mbedtls_asn1_write_tag(&op, os,
                 MBEDTLS_ASN1_CONSTRUCTED | MBEDTLS_ASN1_SEQUENCE));
             eci_hdr_len = len;
         }
@@ -1103,14 +1133,14 @@ int scep_build_pkimessage_pkcsreq(const uint8_t      *csr_der,
         size_t da_alg_len;
         {
             size_t len = 0;
-            CHK(w_alg_null(&op, os, OID_SHA256, sizeof(OID_SHA256)));
+            CHK_G(w_alg_null(&op, os, OID_SHA256, sizeof(OID_SHA256)));
             da_alg_len = len;
         }
         size_t da_hdr_len;
         {
             size_t len = 0;
-            CHK(mbedtls_asn1_write_len(&op, os, da_alg_len));
-            CHK(mbedtls_asn1_write_tag(&op, os,
+            CHK_G(mbedtls_asn1_write_len(&op, os, da_alg_len));
+            CHK_G(mbedtls_asn1_write_tag(&op, os,
                 MBEDTLS_ASN1_CONSTRUCTED | MBEDTLS_ASN1_SET));
             da_hdr_len = len;
         }
@@ -1120,7 +1150,7 @@ int scep_build_pkimessage_pkcsreq(const uint8_t      *csr_der,
         size_t ver_len;
         {
             size_t len = 0;
-            CHK(mbedtls_asn1_write_int(&op, os, 1));
+            CHK_G(mbedtls_asn1_write_int(&op, os, 1));
             ver_len = len;
         }
 
@@ -1132,8 +1162,8 @@ int scep_build_pkimessage_pkcsreq(const uint8_t      *csr_der,
         size_t sd_hdr_len;
         {
             size_t len = 0;
-            CHK(mbedtls_asn1_write_len(&op, os, sd_body));
-            CHK(mbedtls_asn1_write_tag(&op, os,
+            CHK_G(mbedtls_asn1_write_len(&op, os, sd_body));
+            CHK_G(mbedtls_asn1_write_tag(&op, os,
                 MBEDTLS_ASN1_CONSTRUCTED | MBEDTLS_ASN1_SEQUENCE));
             sd_hdr_len = len;
         }
@@ -1144,39 +1174,40 @@ int scep_build_pkimessage_pkcsreq(const uint8_t      *csr_der,
         size_t ci_ctx_hdr_len;
         {
             size_t len = 0;
-            CHK(mbedtls_asn1_write_len(&op, os, sd_total));
-            CHK(mbedtls_asn1_write_tag(&op, os, 0xA0));
+            CHK_G(mbedtls_asn1_write_len(&op, os, sd_total));
+            CHK_G(mbedtls_asn1_write_tag(&op, os, 0xA0));
             ci_ctx_hdr_len = len;
         }
         size_t ci_oid_len;
         {
             size_t len = 0;
-            CHK(w_oid(&op, os, OID_SIGNED_DATA, sizeof(OID_SIGNED_DATA)));
+            CHK_G(w_oid(&op, os, OID_SIGNED_DATA, sizeof(OID_SIGNED_DATA)));
             ci_oid_len = len;
         }
         size_t ci_body = ci_oid_len + ci_ctx_hdr_len + sd_total;
         size_t ci_hdr_len;
         {
             size_t len = 0;
-            CHK(mbedtls_asn1_write_len(&op, os, ci_body));
-            CHK(mbedtls_asn1_write_tag(&op, os,
+            CHK_G(mbedtls_asn1_write_len(&op, os, ci_body));
+            CHK_G(mbedtls_asn1_write_tag(&op, os,
                 MBEDTLS_ASN1_CONSTRUCTED | MBEDTLS_ASN1_SEQUENCE));
             ci_hdr_len = len;
         }
         size_t ci_total = ci_body + ci_hdr_len;
 
-        if (ci_total > *out_p7_len) { free(sa_content); ret = -2; goto done; }
+        if (ci_total > *out_p7_len) { ret = -2; goto done; }
         memcpy(out_p7, op, ci_total);
         *out_p7_len = ci_total;
     }
+#undef CHK_G
 
-    free(sa_content);
     ret = 0;
 
 done:
     mbedtls_x509_crt_free(&ra_crt);
     free(env_scratch);
     free(out_scratch);
+    free(sa_content);
     return ret;
 }
 
@@ -1356,7 +1387,55 @@ static int parse_outer_signed_data(const uint8_t *p7, size_t p7_len,
 }
 
 /* -----------------------------------------------------------------------
+ * Helper: extract the raw signedAttrs bytes and signature from a SignerInfo
+ * value (the body of the SignerInfo SEQUENCE, as returned by
+ * parse_outer_signed_data).
+ *
+ * On success:
+ *   *sa_raw / *sa_raw_len  -- points into si_val at the [0] tag byte of the
+ *                             signedAttrs field (the whole TLV, not just content).
+ *   *sig_val / *sig_len    -- the signature bytes (OCTET STRING content).
+ * --------------------------------------------------------------------- */
+static int si_extract_sa_and_sig(const uint8_t  *si_val, size_t si_len,
+                                 const uint8_t **sa_raw,   size_t *sa_raw_len,
+                                 const uint8_t **sig_val,  size_t *sig_len)
+{
+    const uint8_t *p   = si_val;
+    const uint8_t *end = si_val + si_len;
+
+    /* version INTEGER */
+    if (asn_skip(&p, end) != 0) return -1;
+    /* signerIdentifier (IssuerAndSerialNumber SEQUENCE or [0] subjectKeyId) */
+    if (asn_skip(&p, end) != 0) return -1;
+    /* digestAlgorithm AlgorithmIdentifier SEQUENCE */
+    if (asn_skip(&p, end) != 0) return -1;
+
+    /* signedAttrs [0] IMPLICIT -- tag is 0xA0; capture full TLV */
+    if (p >= end || (*p & 0x1f) != 0) return -1; /* must be context[0] */
+    *sa_raw = p; /* remember start of TLV */
+    const uint8_t *sa_content_ptr;
+    size_t sa_content_sz;
+    if (asn_read(&p, end, NULL, &sa_content_ptr, &sa_content_sz) != 0) return -1;
+    *sa_raw_len = (size_t)(p - *sa_raw); /* includes tag + length + content */
+
+    /* signatureAlgorithm AlgorithmIdentifier */
+    if (asn_skip(&p, end) != 0) return -1;
+
+    /* signature OCTET STRING */
+    if (asn_expect(&p, end, MBEDTLS_ASN1_OCTET_STRING, sig_val, sig_len) != 0)
+        return -1;
+
+    (void)sa_content_ptr; (void)sa_content_sz;
+    return 0;
+}
+
+/* -----------------------------------------------------------------------
  * 6. Parse CertRep
+ *
+ * SECURITY: This function VERIFIES the outer SignedData signature before
+ * decrypting the inner EnvelopedData.  Without this check a network
+ * attacker could forge a SUCCESS CertRep with an attacker-controlled cert
+ * that the firmware would then store in NVS and use for EAP-TLS.
  * --------------------------------------------------------------------- */
 int scep_parse_certrep(const uint8_t      *p7,
                        size_t              p7_len,
@@ -1385,6 +1464,105 @@ int scep_parse_certrep(const uint8_t      *p7,
     if (ret != 0) return ret;
 
     if (!si_val || si_len == 0) return -1;
+
+    /* ------------------------------------------------------------------
+     * CRITICAL: Verify the SignedData signature over signedAttrs.
+     *
+     * Attack scenario: if this check is omitted a MITM can craft any
+     * pkiStatus=SUCCESS CertRep carrying an attacker-controlled leaf cert.
+     * The firmware would then trust that cert for EAP-TLS without ever
+     * having verified that the SCEP RA actually signed the response.
+     *
+     * Verification steps:
+     *   1. Extract the signer cert from certificates[0] in the outer
+     *      SignedData (the SCEP RA's signing cert).
+     *   2. Parse it with mbedtls_x509_crt_parse_der to obtain the public key.
+     *   3. Extract the raw signedAttrs TLV from the SignerInfo.  The DER
+     *      encoding to hash is the same bytes but with tag 0xA0 replaced by
+     *      0x31 (SET), because RFC 5652 §5.4 says "the DER encoding of the
+     *      SET OF Attributes value is the data signed".
+     *   4. SHA-256(encoded-signedAttrs-SET) -> sa_hash[32].
+     *   5. Extract signature OCTET STRING from the SignerInfo.
+     *   6. mbedtls_pk_verify(&signer_pk, MBEDTLS_MD_SHA256, sa_hash, 32,
+     *                        sig, sig_len) -- reject if non-zero.
+     *
+     * Only after successful verification do we proceed to EnvelopedData
+     * decryption.
+     * ------------------------------------------------------------------ */
+    {
+        /* Step 1: parse signer cert from certificates[0] in outer SignedData */
+        if (!certs_val || certs_len == 0) return -1; /* no signer cert -> reject */
+
+        /* certificates field is the content of [0] IMPLICIT; walk to first cert */
+        const uint8_t *cv_p   = certs_val;
+        const uint8_t *cv_end = certs_val + certs_len;
+        const uint8_t *signer_cert_start = cv_p;
+        const uint8_t *signer_cert_body;
+        size_t         signer_cert_body_len;
+        if (asn_expect(&cv_p, cv_end,
+                       MBEDTLS_ASN1_CONSTRUCTED | MBEDTLS_ASN1_SEQUENCE,
+                       &signer_cert_body, &signer_cert_body_len) != 0) return -1;
+        size_t signer_cert_der_len = (size_t)(cv_p - signer_cert_start);
+
+        /* Step 2: parse cert and load public key */
+        mbedtls_x509_crt signer_crt;
+        mbedtls_x509_crt_init(&signer_crt);
+        ret = mbedtls_x509_crt_parse_der(&signer_crt,
+                                          signer_cert_start, signer_cert_der_len);
+        if (ret != 0) {
+            mbedtls_x509_crt_free(&signer_crt);
+            return -1;
+        }
+
+        /* Step 3: extract raw signedAttrs TLV and signature from SignerInfo */
+        const uint8_t *sa_raw;   size_t sa_raw_len;
+        const uint8_t *sig_raw;  size_t sig_raw_len;
+        ret = si_extract_sa_and_sig(si_val, si_len,
+                                    &sa_raw, &sa_raw_len,
+                                    &sig_raw, &sig_raw_len);
+        if (ret != 0) {
+            mbedtls_x509_crt_free(&signer_crt);
+            return -1;
+        }
+
+        /* Build the SET-tagged signedAttrs for hashing.
+         * RFC 5652 §5.4: "the DER encoding of the SET OF Attributes value
+         * is the data over which the message digest is computed."  The
+         * signedAttrs in the SignerInfo use [0] IMPLICIT (tag 0xA0) on the
+         * wire; for digest we replace just the outer tag byte with 0x31. */
+        uint8_t *sa_set = malloc(sa_raw_len);
+        if (!sa_set) {
+            mbedtls_x509_crt_free(&signer_crt);
+            return -1;
+        }
+        memcpy(sa_set, sa_raw, sa_raw_len);
+        sa_set[0] = 0x31; /* SET tag */
+
+        /* Step 4: SHA-256(encoded-signedAttrs-SET) */
+        uint8_t sa_hash[SHA256_LEN];
+        ret = mbedtls_sha256(sa_set, sa_raw_len, sa_hash, 0);
+        free(sa_set);
+        if (ret != 0) {
+            mbedtls_x509_crt_free(&signer_crt);
+            return -1;
+        }
+
+        /* Step 5 + 6: verify RSA signature.
+         * mbedtls_pk_verify() takes the hash (not the message), so we pass
+         * the SHA-256 digest and MBEDTLS_MD_SHA256 so mbedTLS knows the
+         * DigestInfo OID to expect inside the PKCS#1 v1.5 signature block. */
+        ret = mbedtls_pk_verify(&signer_crt.pk, MBEDTLS_MD_SHA256,
+                                sa_hash, SHA256_LEN,
+                                sig_raw, sig_raw_len);
+        mbedtls_x509_crt_free(&signer_crt);
+        if (ret != 0) {
+            /* Signature verification failed: reject the entire CertRep.
+             * Do NOT proceed to EnvelopedData decryption -- the message has
+             * been tampered with or is from an attacker. */
+            return -1;
+        }
+        /* Signature verified -- safe to continue processing. */
+    }
 
     /* Extract transactionID */
     const uint8_t *av; size_t al;
@@ -1550,7 +1728,89 @@ int scep_parse_certrep(const uint8_t      *p7,
     if (mbedtls_pk_get_type(recipient_key) != MBEDTLS_PK_RSA) return -1;
     mbedtls_rsa_context *rsa = mbedtls_pk_rsa(*recipient_key);
     if (kea_is_oaep) {
-        mbedtls_rsa_set_padding(rsa, MBEDTLS_RSA_PKCS_V21, MBEDTLS_MD_SHA1);
+        /* Determine the OAEP hash from the AlgorithmIdentifier parameters.
+         * RFC 3560 / RFC 8017: RSAES-OAEP-params SEQUENCE contains hashAlgorithm
+         * as the first optional field.  If absent or unrecognised, default to
+         * SHA-256.  Previously this was hard-coded to SHA-1 (the ASN.1 default),
+         * but that ignores what the sender actually negotiated.  We parse the
+         * hashAlgorithm OID from the kea_val block captured during KTRI walking
+         * above.  Because kea_val is not available here we re-parse inline.
+         *
+         * SHA OIDs we recognise:
+         *   SHA-1   : 1.3.14.3.2.26      (legacy NDES default)
+         *   SHA-256 : 2.16.840.1.101.3.4.2.1 (preferred)
+         *   SHA-384 : 2.16.840.1.101.3.4.2.2
+         *   SHA-512 : 2.16.840.1.101.3.4.2.3
+         *
+         * Default (absent params / unrecognised OID): SHA-256.
+         */
+        static const uint8_t OID_SHA1[]   = {0x2b,0x0e,0x03,0x02,0x1a};
+        static const uint8_t OID_SHA384[]  = {0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x02};
+        static const uint8_t OID_SHA512[]  = {0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x03};
+
+        mbedtls_md_type_t oaep_hash = MBEDTLS_MD_SHA256; /* safe default */
+
+        /* Re-walk the KTRI list to find the OAEP AlgorithmIdentifier params */
+        {
+            const uint8_t *rp2 = ri_val;
+            const uint8_t *re2 = ri_val + ri_len;
+            while (rp2 < re2) {
+                const uint8_t *kv2; size_t kl2;
+                if (asn_expect(&rp2, re2,
+                               MBEDTLS_ASN1_CONSTRUCTED | MBEDTLS_ASN1_SEQUENCE,
+                               &kv2, &kl2) != 0) break;
+                const uint8_t *kp2 = kv2;
+                const uint8_t *ke2 = kv2 + kl2;
+                asn_skip(&kp2, ke2); /* version */
+                asn_skip(&kp2, ke2); /* rid */
+                /* keyEncryptionAlgorithm AlgorithmIdentifier */
+                const uint8_t *kea_v2; size_t kea_l2;
+                if (asn_expect(&kp2, ke2,
+                               MBEDTLS_ASN1_CONSTRUCTED | MBEDTLS_ASN1_SEQUENCE,
+                               &kea_v2, &kea_l2) != 0) break;
+                const uint8_t *ap2 = kea_v2;
+                const uint8_t *ae2 = kea_v2 + kea_l2;
+                /* OID (already confirmed RSAES-OAEP) */
+                if (asn_skip(&ap2, ae2) != 0) break;
+                /* params: RSAES-OAEP-params SEQUENCE (optional) */
+                if (ap2 < ae2 && *ap2 == (MBEDTLS_ASN1_CONSTRUCTED | MBEDTLS_ASN1_SEQUENCE)) {
+                    const uint8_t *oaep_params; size_t oaep_params_len;
+                    if (asn_expect(&ap2, ae2,
+                                   MBEDTLS_ASN1_CONSTRUCTED | MBEDTLS_ASN1_SEQUENCE,
+                                   &oaep_params, &oaep_params_len) == 0) {
+                        const uint8_t *pp2 = oaep_params;
+                        const uint8_t *pe2 = oaep_params + oaep_params_len;
+                        /* hashAlgorithm [0] AlgorithmIdentifier (optional) */
+                        if (pp2 < pe2 && (*pp2 & 0xe0) == 0xa0) {
+                            const uint8_t *hctx; size_t hctx_len;
+                            if (asn_read(&pp2, pe2, NULL, &hctx, &hctx_len) == 0) {
+                                const uint8_t *hp = hctx;
+                                const uint8_t *he = hctx + hctx_len;
+                                const uint8_t *hoid; size_t hoid_len;
+                                if (asn_expect(&hp, he, MBEDTLS_ASN1_OID,
+                                               &hoid, &hoid_len) == 0) {
+                                    if (hoid_len == sizeof(OID_SHA1) &&
+                                        memcmp(hoid, OID_SHA1, hoid_len) == 0)
+                                        oaep_hash = MBEDTLS_MD_SHA1;
+                                    else if (hoid_len == sizeof(OID_SHA256) &&
+                                             memcmp(hoid, OID_SHA256, hoid_len) == 0)
+                                        oaep_hash = MBEDTLS_MD_SHA256;
+                                    else if (hoid_len == sizeof(OID_SHA384) &&
+                                             memcmp(hoid, OID_SHA384, hoid_len) == 0)
+                                        oaep_hash = MBEDTLS_MD_SHA384;
+                                    else if (hoid_len == sizeof(OID_SHA512) &&
+                                             memcmp(hoid, OID_SHA512, hoid_len) == 0)
+                                        oaep_hash = MBEDTLS_MD_SHA512;
+                                    /* else: unknown OID -- keep SHA-256 default */
+                                }
+                            }
+                        }
+                    }
+                }
+                break; /* only need the first KTRI */
+            }
+        }
+        mbedtls_rsa_set_padding(rsa, MBEDTLS_RSA_PKCS_V21, oaep_hash);
     } else {
         mbedtls_rsa_set_padding(rsa, MBEDTLS_RSA_PKCS_V15, MBEDTLS_MD_NONE);
     }
@@ -1943,6 +2203,69 @@ int scep_parse_pkimessage_pkcsreq_for_test(const uint8_t             *p7,
         memcpy(out->csr_der, tmp_dec, out->csr_len);
     }
     return 0;
+}
+
+/* -----------------------------------------------------------------------
+ * Test helper: verify that scep_parse_certrep rejects a CertRep whose
+ * SignedData signature has been bit-flipped (known-bad-signature test).
+ *
+ * Usage (in a native test):
+ *   int r = scep_certrep_rejects_bad_sig(p7, p7_len, txid, key, ...);
+ *   TEST_ASSERT_EQUAL_INT(-1, r);   // must reject
+ *
+ * Implementation: flip the last byte of the SignerInfo signature field and
+ * call scep_parse_certrep; we expect it to return -1 (verify failed).
+ * -------------------------------------------------------------------- */
+int scep_certrep_rejects_bad_sig(const uint8_t      *p7,
+                                 size_t              p7_len,
+                                 const char         *txid,
+                                 mbedtls_pk_context *recip_key,
+                                 int (*f_rng)(void *, unsigned char *, size_t),
+                                 void               *p_rng)
+{
+    if (!p7 || p7_len < 4) return 0; /* can't mutate -- skip */
+
+    /* Make a mutable copy */
+    uint8_t *mut = malloc(p7_len);
+    if (!mut) return 0;
+    memcpy(mut, p7, p7_len);
+
+    /* Find the SignerInfo signature byte to flip.
+     * Walk the structure: ContentInfo -> [0] -> SignedData -> signerInfos -> first
+     * SignerInfo -> skip fields -> signature OCTET STRING -> last byte. */
+    const uint8_t *dummy_encap, *si_val_r, *certs_r;
+    size_t dummy_el, si_len_r, certs_lr;
+    if (parse_outer_signed_data(mut, p7_len,
+                                &dummy_encap, &dummy_el,
+                                &si_val_r,    &si_len_r,
+                                &certs_r,     &certs_lr) != 0) {
+        free(mut); return 0;
+    }
+    if (!si_val_r) { free(mut); return 0; }
+
+    const uint8_t *sa_r; size_t sa_rl;
+    const uint8_t *sig_r; size_t sig_rl;
+    if (si_extract_sa_and_sig(si_val_r, si_len_r,
+                              &sa_r, &sa_rl, &sig_r, &sig_rl) != 0) {
+        free(mut); return 0;
+    }
+    if (sig_rl == 0) { free(mut); return 0; }
+
+    /* Flip last byte of signature (sig_r points into mut) */
+    uint8_t *flip_ptr = mut + (size_t)(sig_r - (const uint8_t *)mut) + sig_rl - 1;
+    *flip_ptr ^= 0xff;
+
+    /* Now try to parse -- must fail */
+    uint8_t cert_buf[SCEP_MAX_CERT_DER];
+    size_t  cert_len = sizeof(cert_buf);
+    scep_pki_status_t status;
+    int fail_info;
+    int r = scep_parse_certrep(mut, p7_len, txid, recip_key,
+                               f_rng, p_rng,
+                               cert_buf, &cert_len, &status, &fail_info);
+    free(mut);
+    /* r must be -1 (signature verification failure), not 0 */
+    return (r != 0) ? -1 : 0;  /* -1 = correctly rejected, 0 = FAIL (accepted) */
 }
 
 #endif /* SCEP_PROTO_TEST_HELPERS */

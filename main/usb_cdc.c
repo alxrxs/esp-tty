@@ -158,8 +158,19 @@ static void usb_tx_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
-        tinyusb_cdcacm_write_queue(TINYUSB_CDC_ACM_0, buf, (size_t)n);
-        tinyusb_cdcacm_write_flush(TINYUSB_CDC_ACM_0, 0);
+        esp_err_t wq_err = tinyusb_cdcacm_write_queue(TINYUSB_CDC_ACM_0, buf, (size_t)n);
+        if (wq_err != ESP_OK) {
+            static uint32_t s_drop_count = 0;
+            s_drop_count++;
+            if ((s_drop_count & 0xFF) == 1) {   /* log every 256th drop */
+                ESP_LOGW(TAG, "write_queue failed (err=0x%x, total drops=%" PRIu32 ")",
+                         wq_err, s_drop_count);
+            }
+        }
+        esp_err_t wf_err = tinyusb_cdcacm_write_flush(TINYUSB_CDC_ACM_0, 0);
+        if (wf_err != ESP_OK) {
+            ESP_LOGD(TAG, "write_flush failed: 0x%x", wf_err);
+        }
     }
 }
 

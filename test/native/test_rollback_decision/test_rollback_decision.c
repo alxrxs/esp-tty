@@ -25,10 +25,11 @@ void test_valid_returns_noop(void)
                           rollback_decide(ESP_OTA_IMG_VALID));
 }
 
-/* NEW image (not yet pending) -> no-op */
-void test_new_returns_noop(void)
+/* NEW image -- bootloader has not yet received mark-valid; treat same as
+ * PENDING_VERIFY to prevent unexpected rollback if the app crashes later. */
+void test_new_returns_mark_valid(void)
 {
-    TEST_ASSERT_EQUAL_INT(ROLLBACK_DECISION_NOOP,
+    TEST_ASSERT_EQUAL_INT(ROLLBACK_DECISION_MARK_VALID,
                           rollback_decide(ESP_OTA_IMG_NEW));
 }
 
@@ -99,18 +100,30 @@ void test_pending_verify_idempotent(void)
                           rollback_decide(ESP_OTA_IMG_PENDING_VERIFY));
 }
 
-/* Every non-PENDING_VERIFY value produces NOOP -- confirm no false positives. */
-void test_all_non_pending_states_are_noop(void)
+/* VALID, INVALID, ABORTED, UNDEFINED produce NOOP.
+ * NEW and PENDING_VERIFY produce MARK_VALID. */
+void test_mark_valid_states(void)
 {
-    esp_ota_img_states_t states[] = {
+    esp_ota_img_states_t mark_valid_states[] = {
         ESP_OTA_IMG_NEW,
+        ESP_OTA_IMG_PENDING_VERIFY,
+    };
+    for (int i = 0; i < (int)(sizeof(mark_valid_states)/sizeof(mark_valid_states[0])); i++) {
+        TEST_ASSERT_EQUAL_INT(ROLLBACK_DECISION_MARK_VALID,
+                              rollback_decide(mark_valid_states[i]));
+    }
+}
+
+void test_noop_states_are_noop(void)
+{
+    esp_ota_img_states_t noop_states[] = {
         ESP_OTA_IMG_VALID,
         ESP_OTA_IMG_INVALID,
         ESP_OTA_IMG_ABORTED,
         ESP_OTA_IMG_UNDEFINED,
     };
-    for (int i = 0; i < (int)(sizeof(states)/sizeof(states[0])); i++) {
-        TEST_ASSERT_EQUAL_INT(ROLLBACK_DECISION_NOOP, rollback_decide(states[i]));
+    for (int i = 0; i < (int)(sizeof(noop_states)/sizeof(noop_states[0])); i++) {
+        TEST_ASSERT_EQUAL_INT(ROLLBACK_DECISION_NOOP, rollback_decide(noop_states[i]));
     }
 }
 
@@ -119,7 +132,7 @@ int main(void)
     UNITY_BEGIN();
     RUN_TEST(test_pending_verify_returns_mark_valid);
     RUN_TEST(test_valid_returns_noop);
-    RUN_TEST(test_new_returns_noop);
+    RUN_TEST(test_new_returns_mark_valid);
     RUN_TEST(test_invalid_returns_noop);
     RUN_TEST(test_aborted_returns_noop);
     RUN_TEST(test_undefined_returns_noop);
@@ -129,6 +142,7 @@ int main(void)
     RUN_TEST(test_enum_values_match_esp_idf_spec);
     RUN_TEST(test_valid_not_equal_pending_verify);
     RUN_TEST(test_pending_verify_idempotent);
-    RUN_TEST(test_all_non_pending_states_are_noop);
+    RUN_TEST(test_mark_valid_states);
+    RUN_TEST(test_noop_states_are_noop);
     return UNITY_END();
 }

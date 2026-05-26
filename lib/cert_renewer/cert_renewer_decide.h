@@ -14,9 +14,12 @@
 #include <stdint.h>
 
 typedef enum {
-    RENEWAL_DECISION_SKIP_NO_CLOCK,  /* time(NULL) < MIN_PLAUSIBLE_EPOCH       */
-    RENEWAL_DECISION_SKIP_VALID,     /* cert valid, far from expiry             */
-    RENEWAL_DECISION_RENEW_NOW,      /* inside window, past expiry, or sentinel */
+    RENEWAL_DECISION_SKIP_NO_CLOCK,   /* time(NULL) < MIN_PLAUSIBLE_EPOCH        */
+    RENEWAL_DECISION_SKIP_VALID,      /* cert valid, far from expiry             */
+    RENEWAL_DECISION_RENEW_NOW,       /* inside window or past expiry            */
+    RENEWAL_DECISION_RENEW_NOW_CORRUPT, /* not_after==0 sentinel: corrupt/missing
+                                         * expiry; same action as RENEW_NOW but
+                                         * callers may apply a longer backoff     */
 } renewal_decision_t;
 
 /*
@@ -25,8 +28,9 @@ typedef enum {
  * Parameters:
  *   now         -- current Unix epoch (from time(NULL))
  *   not_after   -- cert NotAfter epoch (from cred_store_t.not_after).
- *                  0 is a sentinel meaning "could not be parsed" -- treated
- *                  as already expired (RENEW_NOW).
+ *                  0 is a sentinel meaning "could not be parsed" -- returns
+ *                  RENEW_NOW_CORRUPT (same action as RENEW_NOW but
+ *                  distinguishable so callers can apply a longer backoff).
  *   window_days -- renew when fewer than this many days remain before expiry.
  *
  * Returns one of the RENEWAL_DECISION_* values above.

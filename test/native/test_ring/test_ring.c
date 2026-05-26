@@ -816,6 +816,20 @@ void test_ring_try_send_after_close_is_minus_one(void)
     ring_free(r);
 }
 
+/* ring_recv with cap=0 must return 0 immediately (not block). */
+void test_ring_recv_zero_cap_returns_zero(void)
+{
+    ring_t *r = ring_create(64);
+    TEST_ASSERT_NOT_NULL(r);
+
+    /* ring is empty; cap=0 must not block */
+    uint8_t buf[1];
+    int rc = ring_recv(r, buf, 0);
+    TEST_ASSERT_EQUAL_INT(0, rc);
+
+    ring_free(r);
+}
+
 /* ------------------------------------------------------------------ */
 int main(void)
 {
@@ -857,5 +871,6 @@ int main(void)
     RUN_TEST(test_ring_blocking_send_unblocked_by_reader);
     RUN_TEST(test_ring_close_unblocks_blocked_sender);
     RUN_TEST(test_ring_try_send_after_close_is_minus_one);
+    RUN_TEST(test_ring_recv_zero_cap_returns_zero);
     return UNITY_END();
 }

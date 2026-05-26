@@ -693,6 +693,7 @@ class TestEnvVarOverrideMatrix:
     def test_scep_url_set_is_used(self):
         """Test 22: SCEP_URL env var set after import is seen at call time."""
         original = os.environ.get("SCEP_URL")
+        original_pw = os.environ.get("SCEP_CHALLENGE_PASSWORD")
         try:
             os.environ["SCEP_URL"] = "https://custom.example.com/scep"
             os.environ["SCEP_CHALLENGE_PASSWORD"] = "pw"  # avoid empty-pw error
@@ -704,7 +705,10 @@ class TestEnvVarOverrideMatrix:
                 os.environ.pop("SCEP_URL", None)
             else:
                 os.environ["SCEP_URL"] = original
-            os.environ.pop("SCEP_CHALLENGE_PASSWORD", None)
+            if original_pw is None:
+                os.environ.pop("SCEP_CHALLENGE_PASSWORD", None)
+            else:
+                os.environ["SCEP_CHALLENGE_PASSWORD"] = original_pw
 
     def test_scep_url_unset_gives_default(self):
         """Test 23: SCEP_URL unset gives the hardcoded default URL (containing scep.example.com)."""

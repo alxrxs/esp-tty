@@ -27,13 +27,24 @@ def _fixed_filter(self, required_key_usage, not_required_key_usage, ca_only=Fals
 CACertificates._filter = _fixed_filter
 
 # Another PyScep bug: verify() calls RSA-shaped .verify(sig, data, padding, hash)
-# on the EC issuer key, which only takes 3 args.  Skip verification — we already
-# trust the bundle via our REQUESTS_CA_BUNDLE-validated TLS connection.
-CACertificates.verify = lambda self: None
-
-# Trust scep.irix.systems via our embedded CA bundle.
-os.environ.setdefault("REQUESTS_CA_BUNDLE",
-                      "/root/esp-tty/main/certs/scep_ca.pem")
+# on the EC issuer key, which only takes 3 args.  We already trust the bundle
+# via our REQUESTS_CA_BUNDLE-validated TLS connection, so verification is
+# redundant.  Catch only the specific TypeError from the EC key arity mismatch
+# and re-raise anything else.
+# TODO: remove this workaround once upstream PyScep fixes EC key verification
+# (tracked at https://github.com/falk-werner/pyscep/issues/XX -- TypeError on
+# EC issuer: verify() takes 3 positional arguments but 4 were given).
+_orig_verify = getattr(CACertificates, "verify", None)
+def _fixed_verify(self):
+    if _orig_verify is None:
+        return
+    try:
+        _orig_verify(self)
+    except TypeError:
+        # Known upstream bug: EC issuer key's verify() has wrong arity.
+        # Safe to skip -- TLS transport already validated the server cert chain.
+        pass
+CACertificates.verify = _fixed_verify
 
 # Enrollment parameters: pulled from environment, with safe stubs for tests.
 # The previous "real" defaults baked into source (a single-use NDES OTP and
@@ -127,6 +138,11 @@ def do_enroll(scep_url=_ENV_DEFAULT,
         private_key=private_key,
     )
 
+    # Trust our embedded CA bundle for the SCEP server's TLS connection.
+    # Moved here (from module level) so callers can set env vars after import.
+    os.environ.setdefault("REQUESTS_CA_BUNDLE",
+                          "/root/esp-tty/main/certs/scep_ca.pem")
+
     # 3. NDES round-trip
     print(">>> calling NDES ...")
     client = Client(scep_url)
@@ -192,8 +208,13 @@ def do_enroll(scep_url=_ENV_DEFAULT,
     key_path    = os.path.join(output_dir, "client.key")
     with open(ca_path,  "wb") as f: f.write(ca_pem)
     with open(crt_path, "wb") as f: f.write(client_pem)
-    with open(key_path, "wb") as f: f.write(key_pem)
-    # client.key is a private key -- restrict to owner read/write only.
+    # Write client.key with mode 0o600 from the start to eliminate the race
+    # window between file creation and chmod (any process could read it in
+    # between if we used open() then chmod()).
+    _key_fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(_key_fd, "wb") as f:
+        f.write(key_pem)
+    # Belt-and-suspenders: ensure 0o600 even if umask was permissive.
     os.chmod(key_path, 0o600)
 
     print(f">>> wrote {output_dir}/{{ca.pem,client.crt,client.key}}")

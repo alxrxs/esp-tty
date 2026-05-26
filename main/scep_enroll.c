@@ -440,7 +440,10 @@ esp_err_t scep_enroll(const char *scep_url,
     }
 
     if (pki_status == SCEP_PKI_STATUS_PENDING) {
-        ESP_LOGW(TAG, "SCEP enrollment PENDING -- request queued for manual approval");
+        ESP_LOGW(TAG, "SCEP enrollment PENDING -- request queued for manual NDES "
+                      "approval.  Do NOT retry immediately; wait for CA admin to "
+                      "approve the request (use a long backoff, e.g. hours).");
+        result = ESP_ERR_SCEP_PENDING;
         goto done;
     }
 
@@ -489,7 +492,8 @@ esp_err_t scep_enroll(const char *scep_url,
                                                &creds.not_after);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Could not parse NotAfter from issued cert: %s -- "
-                      "storing 0 (expiry check will be skipped)",
+                      "storing 0 (cert_renewer_decide treats not_after=0 as "
+                      "immediately expired and will trigger renewal on next cycle)",
                  esp_err_to_name(err));
         creds.not_after = 0;
     } else {
@@ -511,6 +515,14 @@ esp_err_t scep_enroll(const char *scep_url,
     result = ESP_OK;
 
 done:
+    /* heap_caps_free(NULL) is safe per ESP-IDF docs (mirrors free(NULL) POSIX
+     * contract; implemented in heap/heap_caps.c).  All pointers below are
+     * NULL-initialised at declaration so unconditional calls are safe.
+     * ra_cert_copy, ca_cert_copy, self_cert_der, csr_der, spki_der, p7_req
+     * are guarded below without if() wrappers for that reason.
+     * dev_key_der and issued_cert_der are guarded with if() because they
+     * carry a zeroize step that must not run on a NULL pointer. */
+
     /* mbedtls_pk_free is safe to call even if the key was never set up
      * (mbedtls_pk_init + mbedtls_pk_free with no intervening setup is a no-op).
      * However if the key was set up and freed in step 8, calling free again

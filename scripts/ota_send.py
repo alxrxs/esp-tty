@@ -187,8 +187,8 @@ def run_ota_protocol(sendall_fn, recv_exact_fn, firmware, *,
         if shutdown_write_fn is not None:
             try:
                 shutdown_write_fn()
-            except Exception:
-                pass
+            except Exception as exc:
+                print(f"warn: shutdown_write failed: {exc}", file=sys.stderr)
     else:
         sendall_fn(ciphertext)
 
@@ -232,7 +232,8 @@ def run_ota_protocol(sendall_fn, recv_exact_fn, firmware, *,
 
 def ota_send(host, firmware_path, *,
              port=22, user="ota", identity=None,
-             tamper=False, truncate=None):
+             tamper=False, truncate=None,
+             known_hosts=None, timeout=30):
 
     firmware = Path(firmware_path).read_bytes()
     if not firmware:
@@ -242,10 +243,17 @@ def ota_send(host, firmware_path, *,
           % (firmware_path, user, host, port, len(firmware)))
 
     client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    # Reject unknown host keys by default to prevent MITM attacks.
+    # Load system known_hosts for standard host fingerprints, then load
+    # a caller-supplied file (--known-hosts) for device-specific entries.
+    client.load_system_host_keys()
+    if known_hosts:
+        client.load_host_keys(os.path.expanduser(known_hosts))
+    client.set_missing_host_key_policy(paramiko.RejectPolicy())
 
     connect_kwargs = dict(hostname=host, port=port, username=user,
-                          allow_agent=True, look_for_keys=True)
+                          allow_agent=True, look_for_keys=True,
+                          timeout=timeout)
     if identity:
         connect_kwargs["key_filename"] = os.path.expanduser(identity)
 
@@ -262,11 +270,12 @@ def ota_send(host, firmware_path, *,
         def _tail():
             # Best-effort read of the failure reason line, with a short
             # timeout so we never hang forever waiting for the device to
-            # close the channel.
+            # close the channel.  Capped at 256 bytes total to prevent a
+            # misbehaving server from streaming forever within the window.
             chan.settimeout(2.0)
             tail = bytearray()
             try:
-                while True:
+                while len(tail) < 256:
                     b = chan.recv(64)
                     if not b:
                         break
@@ -303,6 +312,11 @@ def main(argv):
     p.add_argument("--identity", default=None,
                    help="path to SSH private key (optional; agent / "
                         "default key search is used otherwise)")
+    p.add_argument("--known-hosts", default="~/.ssh/known_hosts",
+                   help="path to known_hosts file for host key verification "
+                        "(default: ~/.ssh/known_hosts)")
+    p.add_argument("--timeout", type=int, default=30,
+                   help="SSH connection timeout in seconds (default: 30)")
     p.add_argument("--tamper", action="store_true",
                    help="(test) flip a single ciphertext byte before sending")
     p.add_argument("--truncate", type=int, default=None, metavar="N",
@@ -314,6 +328,7 @@ def main(argv):
             args.host, args.firmware,
             port=args.port, user=args.user, identity=args.identity,
             tamper=args.tamper, truncate=args.truncate,
+            known_hosts=args.known_hosts, timeout=args.timeout,
         )
     except paramiko.AuthenticationException as exc:
         sys.stderr.write("ota_send.py: SSH auth failed: %s\n" % exc)

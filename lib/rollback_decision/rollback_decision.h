@@ -37,8 +37,10 @@ typedef enum {
 /*
  * rollback_decide -- pure decision function.
  *
- * Returns ROLLBACK_DECISION_MARK_VALID only when state is
- * ESP_OTA_IMG_PENDING_VERIFY; returns ROLLBACK_DECISION_NOOP otherwise.
+ * Returns ROLLBACK_DECISION_MARK_VALID when state is ESP_OTA_IMG_PENDING_VERIFY
+ * or ESP_OTA_IMG_NEW (both require the app to call mark_valid to prevent an
+ * unexpected rollback on next reset).  Returns ROLLBACK_DECISION_NOOP for all
+ * other states (VALID, INVALID, ABORTED, UNDEFINED).
  * No side effects -- safe to unit test.
  */
 rollback_decision_t rollback_decide(esp_ota_img_states_t state);

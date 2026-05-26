@@ -16,15 +16,16 @@ renewal_decision_t cert_renewer_decide(time_t   now,
     }
 
     /* not_after == 0 is a sentinel meaning "NotAfter could not be parsed";
-     * treat it as already expired to trigger a fresh enrollment. */
+     * return RENEW_NOW_CORRUPT so the caller can distinguish a corrupt cert
+     * from a legitimately near-expiry cert and apply a longer backoff. */
     if (not_after == 0) {
-        return RENEWAL_DECISION_RENEW_NOW;
+        return RENEWAL_DECISION_RENEW_NOW_CORRUPT;
     }
 
     int64_t remaining_sec = (int64_t)not_after - (int64_t)now;
     int64_t window_sec    = (int64_t)window_days * 86400LL;
 
-    if (remaining_sec <= window_sec) {
+    if (remaining_sec < window_sec) {
         return RENEWAL_DECISION_RENEW_NOW;
     }
 

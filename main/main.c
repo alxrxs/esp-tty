@@ -263,7 +263,12 @@ void app_main(void)
        task because RSA bignum scratch (~4-8 KB even with WOLFSSL_SMALL_STACK)
        overflows the default main_task stack.  Doesn't need network. */
     extern void rsa_bench_task(void *);
-    xTaskCreate(rsa_bench_task, "rsa_bench", 32768, NULL, 5, NULL);
+    {
+        BaseType_t bench_rc = xTaskCreate(rsa_bench_task, "rsa_bench",
+                                          32768, NULL, 5, NULL);
+        if (bench_rc != pdPASS)
+            ESP_LOGW(TAG, "rsa_bench_task create failed (no mem?) -- skipping bench");
+    }
 #endif
 
     /* -- 4. Wi-Fi STA ---------------------------------------------- */

@@ -55,6 +55,7 @@ import argparse
 import re
 import sys
 import os
+import tempfile
 import time
 import subprocess
 
@@ -70,7 +71,9 @@ from test_qemu_boot import (
 
 import pytest
 
-FLASH_IMG_PERSIST = "/tmp/esp-tty-persist-flash.bin"
+# FLASH_IMG_PERSIST is created via tempfile in main() to avoid predictable
+# /tmp paths vulnerable to symlink attacks.
+FLASH_IMG_PERSIST = None  # set at runtime by main()
 
 # Pattern definitions
 BOOT1_STORED_PATTERN = re.compile(r"Generated and stored new ED25519 host key")
@@ -299,14 +302,17 @@ def main():
     if not args.no_build:
         build_firmware()
 
-    # Create a fresh merged flash image (separate file from the smoke test)
-    merge_flash(FLASH_IMG_PERSIST)
+    # Create a fresh merged flash image using a secure temporary file
+    # (separate from the smoke test image; avoids predictable /tmp paths).
+    _fd, persist_img = tempfile.mkstemp(prefix="esp-tty-persist-flash-", suffix=".bin")
+    os.close(_fd)
+    merge_flash(persist_img)
 
     # -- Boot 1: fresh flash -- expect host key generation ---------------------
     print("\n" + "=" * 60)
     print("  BOOT 1: fresh NVS -- expect host key generation + store")
     print("=" * 60)
-    r1 = run_qemu_persist(args.timeout, FLASH_IMG_PERSIST,
+    r1 = run_qemu_persist(args.timeout, persist_img,
                           label="persist-boot1",
                           require_stored=True,    # host key must be generated+saved
                           require_loaded=False)
@@ -337,7 +343,7 @@ def main():
     print("  NOTE: fingerprint matching not asserted -- QEMU nvs_keys limitation")
     print("        (see module docstring for details)")
     print("=" * 60)
-    r2 = run_qemu_persist(args.timeout, FLASH_IMG_PERSIST,
+    r2 = run_qemu_persist(args.timeout, persist_img,
                           label="persist-boot2",
                           require_stored=False,
                           require_loaded=False)

@@ -25,6 +25,7 @@
 #include <sys/select.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <time.h>
 #include <unistd.h>
 #include <sys/time.h>
 
@@ -293,12 +294,28 @@ static void teardown_active_session(void)
      * Only wait when pump tasks were actually launched (not for OTA sessions
      * or failed handshakes where pump tasks were never started). */
     if (s_pumps_running && s_pump_done_sem) {
+        /* Drain any spurious count left by a previous timeout so we do not
+         * incorrectly consume a stale give as a fresh pump-exit signal. */
+        while (xSemaphoreTake(s_pump_done_sem, 0) == pdTRUE) {}  /* finding 4 */
+
         TickType_t timeout = pdMS_TO_TICKS(5000);
-        if (xSemaphoreTake(s_pump_done_sem, timeout) != pdTRUE)
+        bool pump1_ok = (xSemaphoreTake(s_pump_done_sem, timeout) == pdTRUE);
+        if (!pump1_ok)
             ESP_LOGW(TAG, "teardown: pump_ssh_to_usb did not exit within 5 s");
-        if (xSemaphoreTake(s_pump_done_sem, timeout) != pdTRUE)
+        bool pump2_ok = (xSemaphoreTake(s_pump_done_sem, timeout) == pdTRUE);
+        if (!pump2_ok)
             ESP_LOGW(TAG, "teardown: pump_usb_to_ssh did not exit within 5 s");
         s_pumps_running = false;
+
+        /* finding 3: if either pump timed out it may still be inside wolfSSH --
+         * calling wolfSSH_free now would be a use-after-free.  Skip the free
+         * and accept the resource leak as the lesser evil. */
+        if (!pump1_ok || !pump2_ok) {
+            ESP_LOGE(TAG, "teardown: pump(s) still running -- leaking session "
+                          "to avoid use-after-free");
+            s_active_ssh = NULL;
+            return;
+        }
     }
 
     /* Pumps are gone -- now safe to call wolfSSH_free.  We skip wolfSSH_shutdown
@@ -376,12 +393,24 @@ static void ssh_server_task(void *arg)
         xSemaphoreGive(s_session_mutex);
 
         /* Bounded timeout for handshake + auth -- prevents a slow/malicious
-         * client from holding the session slot indefinitely. */
-        struct timeval tv = { .tv_sec = SSH_HANDSHAKE_TIMEOUT_SEC, .tv_usec = 0 };
+         * client from holding the session slot indefinitely.
+         * finding 8: SO_RCVTIMEO alone is per-recv, not a total deadline;
+         * an attacker could trickle 1 byte every (timeout-1)s indefinitely.
+         * We keep SO_RCVTIMEO as a per-call safety but also enforce a hard
+         * wall-clock deadline: if wolfSSH_accept has not returned WS_SUCCESS
+         * by that time we close the socket and reject the connection. */
+        struct timeval tv = { .tv_sec = 1, .tv_usec = 0 }; /* short per-recv slice */
         setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-        /* SSH handshake + auth (blocking, bounded by SO_RCVTIMEO) */
-        int ret = wolfSSH_accept(ssh);
+        /* SSH handshake + auth (retried under wall-clock deadline) */
+        time_t deadline = time(NULL) + SSH_HANDSHAKE_TIMEOUT_SEC;
+        int ret;
+        do {
+            ret = wolfSSH_accept(ssh);
+        } while (ret != WS_SUCCESS &&
+                 wolfSSH_get_error(ssh) == WS_WANT_READ &&
+                 time(NULL) < deadline);
+
         if (ret != WS_SUCCESS) {
             ESP_LOGW(TAG, "wolfSSH_accept failed: %d (err %d)",
                      ret, wolfSSH_get_error(ssh));
@@ -412,13 +441,17 @@ static void ssh_server_task(void *arg)
         const char *uname = wolfSSH_GetUsername(ssh);
         if (pubkey_classify_user(uname, uname ? strlen(uname) : 0) == PUBKEY_USER_OTA) {
             ESP_LOGI(TAG, "OTA session -- routing to ota_session_handler");
+            /* finding 5: nullify s_active_ssh under the mutex before calling
+             * ota_session_handler so a racing teardown_active_session becomes
+             * a no-op and cannot free the ssh pointer OTA still holds. */
+            xSemaphoreTake(s_session_mutex, portMAX_DELAY);
+            s_active_ssh = NULL;
+            s_active_fd  = -1;
             xSemaphoreGive(s_session_mutex);
             /* ota_session_handler owns the SSH session and may reboot */
             ota_session_handler(ssh);
-            /* If we get here, OTA failed -- clean up */
-            xSemaphoreTake(s_session_mutex, portMAX_DELAY);
-            teardown_active_session();
-            xSemaphoreGive(s_session_mutex);
+            /* If we get here, OTA failed. ota_session_handler does not call
+             * wolfSSH_free on failure (handled in ota_session.c, out of scope). */
             continue;
         }
 
@@ -449,24 +482,40 @@ static void ssh_server_task(void *arg)
             char hdr[64];
             int  hdr_len = scrollback_format_header(line_count,
                                                     hdr, sizeof hdr);
-            if (hdr_len > 0)
-                wolfSSH_stream_send(ssh, (byte *)hdr, (word32)hdr_len);
+            bool scrollback_send_ok = true;
+            /* finding 7: check return; on failure skip remaining send and
+             * jump to teardown instead of proceeding to pump tasks. */
+            if (hdr_len > 0) {
+                if (wolfSSH_stream_send(ssh, (byte *)hdr, (word32)hdr_len) <= 0)
+                    scrollback_send_ok = false;
+            }
 
-            if (dump && dump_len > 0) {
+            if (scrollback_send_ok && dump && dump_len > 0) {
                 const uint8_t *p = dump;
                 size_t rem = dump_len;
                 while (rem > 0) {
                     int n = wolfSSH_stream_send(ssh, (byte *)p, (word32)rem);
-                    if (n <= 0) break;
+                    if (n <= 0) { scrollback_send_ok = false; break; }
                     p   += (size_t)n;
                     rem -= (size_t)n;
                 }
             }
 
-            const char *footer = SCROLLBACK_FOOTER;
-            wolfSSH_stream_send(ssh, (byte *)footer,
-                                (word32)strlen(footer));
+            if (scrollback_send_ok) {
+                const char *footer = SCROLLBACK_FOOTER;
+                if (wolfSSH_stream_send(ssh, (byte *)footer,
+                                        (word32)strlen(footer)) <= 0)
+                    scrollback_send_ok = false;
+            }
             if (dump) free(dump);
+
+            if (!scrollback_send_ok) {
+                ESP_LOGW(TAG, "scrollback send failed -- tearing down");
+                xSemaphoreTake(s_session_mutex, portMAX_DELAY);
+                teardown_active_session();
+                xSemaphoreGive(s_session_mutex);
+                continue;
+            }
         }
 
         /* Re-open rings in case they were closed by the previous session's
@@ -489,9 +538,40 @@ static void ssh_server_task(void *arg)
         a2b->ssh  = ssh; a2b->ring = s_ssh_to_usb;
         b2a->ring = s_usb_to_ssh; b2a->ssh = ssh;
 
+        /* finding 1: capture xTaskCreate results; set s_pumps_running only
+         * after BOTH tasks are confirmed created so teardown is not entered
+         * prematurely on OOM with zero live tasks to wait on. */
+        BaseType_t rc_a2b = xTaskCreate(pump_ssh_to_usb, "pump_a2b",
+                                        8192, a2b, 6, NULL);
+        BaseType_t rc_b2a = (rc_a2b == pdPASS)
+            ? xTaskCreate(pump_usb_to_ssh, "pump_b2a", 8192, b2a, 6, NULL)
+            : pdFAIL;
+
+        if (rc_a2b != pdPASS || rc_b2a != pdPASS) {
+            ESP_LOGE(TAG, "OOM creating pump task(s) -- aborting session");
+            /* If a2b started but b2a failed, signal a2b to stop; it will
+             * give the semaphore once and we wait for it below. */
+            s_pump_stop = true;
+            if (rc_a2b == pdPASS) {
+                /* a2b task is running; wait for it to exit before teardown */
+                s_pumps_running = true;
+                ring_close(s_usb_to_ssh); /* unblock pump_usb_to_ssh if needed */
+            } else {
+                /* Neither task started -- free both args ourselves */
+                free(a2b);
+                free(b2a);
+            }
+            if (rc_b2a != pdPASS && rc_a2b == pdPASS) {
+                /* Only a2b is running; b2a arg was never handed off */
+                free(b2a);
+            }
+            xSemaphoreTake(s_session_mutex, portMAX_DELAY);
+            teardown_active_session();
+            xSemaphoreGive(s_session_mutex);
+            continue;
+        }
+
         s_pumps_running = true;
-        xTaskCreate(pump_ssh_to_usb, "pump_a2b", 8192, a2b, 6, NULL);
-        xTaskCreate(pump_usb_to_ssh, "pump_b2a", 8192, b2a, 6, NULL);
 
 #if SSH_KEEPALIVE_INTERVAL_SEC > 0
         /* Initialise keepalive state for this session. */
@@ -523,6 +603,8 @@ static void ssh_server_task(void *arg)
 #if SSH_KEEPALIVE_INTERVAL_SEC > 0
             TickType_t now = xTaskGetTickCount();
             TickType_t cur_rx_tick = s_last_ssh_rx_tick;
+            /* note: 200ms select granularity may miss a one-tick burst that
+             * arrives and clears between two consecutive loop iterations. */  /* finding 9 */
             bool got_inbound = (cur_rx_tick != prev_rx_tick);
             prev_rx_tick = cur_rx_tick;
 
@@ -620,26 +702,44 @@ esp_err_t ssh_server_start(ring_t *usb_to_ssh, ring_t *ssh_to_usb,
      * advertise only what we want: one cipher, one key size. */
     wolfSSH_CTX_SetAlgoListCipher(s_ctx, "aes256-gcm@openssh.com");
 
+    /* finding 6: track alloc progress so cleanup: only frees what was created */
     esp_err_t err = host_key_load_or_generate(s_ctx);
-    if (err != ESP_OK) return err;
+    if (err != ESP_OK) goto cleanup;
 
+    /* finding 2: NULL-check mutex; on failure every portMAX_DELAY take is UB */
     s_session_mutex = xSemaphoreCreateMutex();
+    if (!s_session_mutex) {
+        ESP_LOGE(TAG, "Failed to create s_session_mutex");
+        err = ESP_ERR_NO_MEM;
+        goto cleanup;
+    }
 
     /* Counting semaphore for pump-task exit synchronisation.
      * Max count = 2 (one per pump direction); initial count = 0. */
     s_pump_done_sem = xSemaphoreCreateCounting(2, 0);
     if (!s_pump_done_sem) {
         ESP_LOGE(TAG, "Failed to create s_pump_done_sem");
-        return ESP_ERR_NO_MEM;
+        err = ESP_ERR_NO_MEM;
+        goto cleanup;
     }
 
     /* 16 KB stack -- wolfSSH + wolfCrypt need at least 8-12 KB */
-    BaseType_t rc = xTaskCreate(ssh_server_task, "ssh_server",
-                                16384, NULL, 5, NULL);
-    if (rc != pdPASS) {
-        ESP_LOGE(TAG, "Failed to create ssh_server task");
-        return ESP_ERR_NO_MEM;
+    {
+        BaseType_t rc = xTaskCreate(ssh_server_task, "ssh_server",
+                                    16384, NULL, 5, NULL);
+        if (rc != pdPASS) {
+            ESP_LOGE(TAG, "Failed to create ssh_server task");
+            err = ESP_ERR_NO_MEM;
+            goto cleanup;
+        }
     }
 
     return ESP_OK;
+
+cleanup:
+    /* finding 6: free only resources that were actually allocated */
+    if (s_pump_done_sem) { vSemaphoreDelete(s_pump_done_sem); s_pump_done_sem = NULL; }
+    if (s_session_mutex) { vSemaphoreDelete(s_session_mutex); s_session_mutex = NULL; }
+    if (s_ctx)           { wolfSSH_CTX_free(s_ctx);           s_ctx = NULL; }
+    return err;
 }

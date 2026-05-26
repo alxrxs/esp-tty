@@ -54,15 +54,20 @@ static esp_err_t x509_time_to_epoch(const mbedtls_x509_time *xt,
     unsigned doy = (153U * (unsigned)(m > 2 ? m - 3 : m + 9) + 2U) / 5U
                    + (unsigned)d - 1U;                               /* 0..365 */
     unsigned doe = yoe * 365U + yoe / 4U - yoe / 100U + doy;         /* 0..146096 */
-    long days = (long)era * 146097L + (long)doe - 719468L;           /* days since 1970-01-01 */
-    time_t epoch = (time_t)(days * 86400L
-                          + (long)xt->hour * 3600L
-                          + (long)xt->min  * 60L
-                          + (long)xt->sec);
+    int64_t days = (int64_t)era * 146097LL + (int64_t)doe - 719468LL; /* days since 1970-01-01 */
+    int64_t epoch = days * 86400LL
+                  + (int64_t)xt->hour * 3600LL
+                  + (int64_t)xt->min  * 60LL
+                  + (int64_t)xt->sec;
 
-    if (epoch == (time_t)-1) {
+    /* Reject implausibly small results (pre-2024) to catch conversion errors.
+     * MIN_PLAUSIBLE_EPOCH ~ 1.7e9 (year 2024); use a slightly earlier floor
+     * so certs issued in 2023 are still accepted. */
+#define MIN_PLAUSIBLE_EPOCH_CRED  INT64_C(1700000000)   /* ~Nov 2023 */
+    if (epoch < MIN_PLAUSIBLE_EPOCH_CRED) {
         return ESP_FAIL;
     }
+#undef MIN_PLAUSIBLE_EPOCH_CRED
 
     *out_epoch = (uint64_t)epoch;
     return ESP_OK;

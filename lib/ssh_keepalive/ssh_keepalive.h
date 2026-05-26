@@ -40,11 +40,13 @@ typedef struct {
 } ssh_keepalive_t;
 
 /*
- * Initialise state.  interval_ms=0 disables keepalives entirely.
+ * Initialise state.  interval_ticks=0 disables keepalives entirely.
  * now_ticks is the current tick (sets the baseline activity timestamp).
+ * Pass FreeRTOS ticks directly (e.g. pdMS_TO_TICKS(ms)); the value is
+ * stored as-is into ka->interval_ticks with no conversion.
  */
 void ssh_keepalive_init(ssh_keepalive_t *ka,
-                        uint32_t interval_ms,
+                        uint32_t interval_ticks,
                         uint32_t count_max,
                         uint32_t now_ticks);
 

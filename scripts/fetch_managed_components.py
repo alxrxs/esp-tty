@@ -124,13 +124,22 @@ def fetch_components():
         env_vars["IDF_PATH"] = IDF_PATH
         env_vars.pop("IDF_TOOLS_PATH", None)
 
-        result = subprocess.run(
-            [python, script_path, PROJECT_DIR, lock_path],
-            cwd=PROJECT_DIR,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            env=env_vars,
-        )
+        try:
+            result = subprocess.run(
+                [python, script_path, PROJECT_DIR, lock_path],
+                cwd=PROJECT_DIR,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=env_vars,
+                timeout=600,
+            )
+        except subprocess.TimeoutExpired:
+            print(
+                "[fetch_managed_components] ERROR: component fetch timed out after 600 s",
+                file=sys.stderr,
+            )
+            env.Exit(1)
+            return
 
         output = result.stdout.decode(errors="replace")
         if output.strip():

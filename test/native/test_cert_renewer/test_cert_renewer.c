@@ -23,12 +23,12 @@
  *  2 | == MIN_PLAUSIBLE     | now + 30d           | 7           | SKIP_VALID   (boundary: strict < so equal is synced)
  *  3 | MIN_PLAUSIBLE+1      | now + 30d           | 7           | SKIP_VALID
  *  4 | MIN_PLAUSIBLE+1      | now + 8d            | 7           | SKIP_VALID (8d > 7d)
- *  5 | MIN_PLAUSIBLE+1      | now + 7d            | 7           | RENEW_NOW  (== edge)
+ *  5 | MIN_PLAUSIBLE+1      | now + 7d            | 7           | SKIP_VALID (== edge: remaining_sec==window_sec, < is false)
  *  6 | MIN_PLAUSIBLE+1      | now + 6d            | 7           | RENEW_NOW  (inside)
  *  7 | MIN_PLAUSIBLE+1      | past                | 7           | RENEW_NOW  (expired)
- *  8 | MIN_PLAUSIBLE+1      | 0                   | 7           | RENEW_NOW  (sentinel)
+ *  8 | MIN_PLAUSIBLE+1      | 0                   | 7           | RENEW_NOW_CORRUPT (sentinel)
  *  9 | MIN_PLAUSIBLE+1      | now                 | 7           | RENEW_NOW  (expires now)
- * 10 | MIN_PLAUSIBLE+1      | now + 1d            | 1           | RENEW_NOW  (== edge)
+ * 10 | MIN_PLAUSIBLE+1      | now + 1d            | 1           | SKIP_VALID (== edge: remaining==window, < is false)
  * 11 | MIN_PLAUSIBLE+1      | now + 2d            | 1           | SKIP_VALID (2d > 1d)
  * 12 | MIN_PLAUSIBLE+1      | now + 100d          | 365         | RENEW_NOW  (100d < 365d window)
  */
@@ -96,16 +96,17 @@ void test_cert_8_days_out_window_7_skips(void)
 }
 
 /* --------------------------------------------------------------------------
- * Row 5: cert exactly 7 days out, window 7 days -> RENEW_NOW (== edge)
+ * Row 5: cert exactly 7 days out, window 7 days -> SKIP_VALID
+ * remaining_sec == window_sec; condition is strict <, so equal is NOT renewal.
  * -------------------------------------------------------------------------- */
-void test_cert_7_days_out_window_7_renews(void)
+void test_cert_7_days_out_window_7_skips(void)
 {
     time_t now = MIN_PLAUSIBLE_EPOCH + 1;
     renewal_decision_t d = cert_renewer_decide(
         now,
         (uint64_t)(now) + 7 * DAY_SEC,
         7);
-    TEST_ASSERT_EQUAL_INT(RENEWAL_DECISION_RENEW_NOW, d);
+    TEST_ASSERT_EQUAL_INT(RENEWAL_DECISION_SKIP_VALID, d);
 }
 
 /* --------------------------------------------------------------------------
@@ -135,13 +136,15 @@ void test_expired_cert_renews(void)
 }
 
 /* --------------------------------------------------------------------------
- * Row 8: not_after == 0 sentinel -> RENEW_NOW
+ * Row 8: not_after == 0 sentinel -> RENEW_NOW_CORRUPT
+ * The corrupt-cert path is distinguishable from a legitimately near-expiry
+ * cert so callers can apply a longer backoff.
  * -------------------------------------------------------------------------- */
-void test_not_after_zero_sentinel_renews(void)
+void test_not_after_zero_sentinel_renews_corrupt(void)
 {
     time_t now = MIN_PLAUSIBLE_EPOCH + 1;
     renewal_decision_t d = cert_renewer_decide(now, 0, 7);
-    TEST_ASSERT_EQUAL_INT(RENEWAL_DECISION_RENEW_NOW, d);
+    TEST_ASSERT_EQUAL_INT(RENEWAL_DECISION_RENEW_NOW_CORRUPT, d);
 }
 
 /* --------------------------------------------------------------------------
@@ -155,16 +158,17 @@ void test_cert_expires_now_renews(void)
 }
 
 /* --------------------------------------------------------------------------
- * Row 10: cert 1 day out, window 1 day -> RENEW_NOW (== edge)
+ * Row 10: cert 1 day out, window 1 day -> SKIP_VALID
+ * remaining_sec == window_sec; strict < means equal is NOT a renewal trigger.
  * -------------------------------------------------------------------------- */
-void test_cert_1_day_out_window_1_renews(void)
+void test_cert_1_day_out_window_1_skips(void)
 {
     time_t now = MIN_PLAUSIBLE_EPOCH + 1;
     renewal_decision_t d = cert_renewer_decide(
         now,
         (uint64_t)(now) + 1 * DAY_SEC,
         1);
-    TEST_ASSERT_EQUAL_INT(RENEWAL_DECISION_RENEW_NOW, d);
+    TEST_ASSERT_EQUAL_INT(RENEWAL_DECISION_SKIP_VALID, d);
 }
 
 /* --------------------------------------------------------------------------
@@ -210,16 +214,20 @@ void test_window_zero_cert_still_valid_skips(void)
 
 /* --------------------------------------------------------------------------
  * Row 14: window_days == 0, cert expires exactly now -> remaining == 0 ->
- * renews (remaining_sec <= window_sec == 0).
+ * SKIP_VALID (remaining_sec=0, window_sec=0; 0 < 0 is false).
+ * To trigger renewal with window_days=0 the cert must already be expired
+ * (remaining_sec < 0 < window_sec=0 ... no; actually remaining_sec < 0
+ * and window_sec=0 gives remaining_sec < 0 which is true -> RENEW_NOW).
+ * Exactly-now is the boundary case that is now SKIP.
  * -------------------------------------------------------------------------- */
-void test_window_zero_cert_expires_now_renews(void)
+void test_window_zero_cert_expires_now_skips(void)
 {
     time_t now = MIN_PLAUSIBLE_EPOCH + 1;
     renewal_decision_t d = cert_renewer_decide(
         now,
         (uint64_t)now,
         0);
-    TEST_ASSERT_EQUAL_INT(RENEWAL_DECISION_RENEW_NOW, d);
+    TEST_ASSERT_EQUAL_INT(RENEWAL_DECISION_SKIP_VALID, d);
 }
 
 /* --------------------------------------------------------------------------
@@ -292,16 +300,17 @@ void test_cert_one_second_past_window_skips(void)
 }
 
 /* --------------------------------------------------------------------------
- * Row 20: cert expires in exactly window_days * 86400 seconds -> RENEW_NOW
+ * Row 20: cert expires in exactly window_days * 86400 seconds -> SKIP_VALID
+ * remaining_sec == window_sec; strict < means the equal case does NOT renew.
  * -------------------------------------------------------------------------- */
-void test_cert_exactly_at_window_boundary_renews(void)
+void test_cert_exactly_at_window_boundary_skips(void)
 {
     time_t now = MIN_PLAUSIBLE_EPOCH + 1;
     uint32_t window_days = 14;
-    /* remaining == window_sec -> RENEW_NOW (boundary is <=) */
+    /* remaining == window_sec -> SKIP_VALID (boundary is strict <) */
     uint64_t not_after = (uint64_t)(now) + (uint64_t)window_days * DAY_SEC;
     renewal_decision_t d = cert_renewer_decide(now, not_after, window_days);
-    TEST_ASSERT_EQUAL_INT(RENEWAL_DECISION_RENEW_NOW, d);
+    TEST_ASSERT_EQUAL_INT(RENEWAL_DECISION_SKIP_VALID, d);
 }
 
 /* --------------------------------------------------------------------------
@@ -337,24 +346,24 @@ int main(void)
     RUN_TEST(test_exactly_min_plausible_is_valid_clock);
     RUN_TEST(test_cert_30_days_out_window_7_skips);
     RUN_TEST(test_cert_8_days_out_window_7_skips);
-    RUN_TEST(test_cert_7_days_out_window_7_renews);
+    RUN_TEST(test_cert_7_days_out_window_7_skips);
     RUN_TEST(test_cert_6_days_out_window_7_renews);
     RUN_TEST(test_expired_cert_renews);
-    RUN_TEST(test_not_after_zero_sentinel_renews);
+    RUN_TEST(test_not_after_zero_sentinel_renews_corrupt);
     RUN_TEST(test_cert_expires_now_renews);
-    RUN_TEST(test_cert_1_day_out_window_1_renews);
+    RUN_TEST(test_cert_1_day_out_window_1_skips);
     RUN_TEST(test_cert_2_days_out_window_1_skips);
     RUN_TEST(test_large_window_triggers_renewal);
     /* New edge-case tests */
     RUN_TEST(test_window_zero_cert_still_valid_skips);
-    RUN_TEST(test_window_zero_cert_expires_now_renews);
+    RUN_TEST(test_window_zero_cert_expires_now_skips);
     RUN_TEST(test_one_below_min_plausible_skips);
     RUN_TEST(test_very_large_window_days_safe);
     /* Additional boundary / branch coverage */
     RUN_TEST(test_exactly_min_plausible_plus_one_second);
     RUN_TEST(test_not_after_epoch_one_is_expired);
     RUN_TEST(test_cert_one_second_past_window_skips);
-    RUN_TEST(test_cert_exactly_at_window_boundary_renews);
+    RUN_TEST(test_cert_exactly_at_window_boundary_skips);
     RUN_TEST(test_one_second_before_expiry_in_window);
     RUN_TEST(test_no_clock_overrides_sentinel_not_after);
     return UNITY_END();

@@ -29,8 +29,16 @@
 
 /* When building for native host tests the linker-script symbols for the
  * embedded CA cert are not available.  Provide empty stand-ins so the code
- * compiles; the stub's esp_http_client_init ignores cert_pem anyway. */
-#ifdef SCEP_TRANSPORT_NATIVE_TEST
+ * compiles; the stub's esp_http_client_init ignores cert_pem anyway.
+ *
+ * Guard: the scep_transport.h extern declarations for scep_ca_pem_start /
+ * scep_ca_pem_end are emitted only when SCEP_CA_PEM_EMBEDDED is defined (set
+ * by that header on the first inclusion when neither SCEP_TRANSPORT_NATIVE_TEST
+ * nor SCEP_CA_PEM_EMBEDDED was already defined).  A build that defines neither
+ * flag has no embedded cert and no externs -- the reference sites below are
+ * guarded with #if so that the linker does not see undefined symbol references.
+ */
+#if defined(SCEP_TRANSPORT_NATIVE_TEST)
 static const uint8_t scep_ca_pem_start[] = { 0 };
 static const uint8_t scep_ca_pem_end[]   = { 0 };
 #endif
@@ -92,7 +100,14 @@ static int resp_buf_append(resp_buf_t *rb, const uint8_t *data, size_t n)
     if (rb->len + n > rb->cap) {
         size_t new_cap = rb->cap;
         while (new_cap < rb->len + n) {
-            new_cap *= 2;
+            size_t doubled = new_cap * 2;
+            /* Detect size_t overflow: if doubling wraps, doubled < new_cap */
+            if (doubled < new_cap) {
+                ESP_LOGE(TAG, "SCEP response buffer cap overflow");
+                rb->oom = 1;
+                return -1;
+            }
+            new_cap = doubled;
             if (new_cap > RESP_MAX_BYTES) {
                 ESP_LOGE(TAG, "SCEP response exceeds max size (%u B)", RESP_MAX_BYTES);
                 rb->oom = 1;
@@ -187,9 +202,19 @@ static int _scep_http_request(esp_http_client_method_t  method,
         .buffer_size_tx   = 4096,
         /* TLS trust anchor: scep_ca.pem embedded via EMBED_TXTFILES.
          * cert_pem is a NUL-terminated PEM string; the length includes the
-         * terminator (end - start). */
+         * terminator (end - start).
+         * These references are guarded: scep_ca_pem_start/end are either
+         * provided by the linker (SCEP_CA_PEM_EMBEDDED) or as static stubs
+         * (SCEP_TRANSPORT_NATIVE_TEST).  Without either flag the header does
+         * not emit the extern declarations and these fields are NULL/0 so the
+         * http_client falls back to the system trust store. */
+#if defined(SCEP_CA_PEM_EMBEDDED) || defined(SCEP_TRANSPORT_NATIVE_TEST)
         .cert_pem         = (const char *)scep_ca_pem_start,
         .cert_len         = (int)(scep_ca_pem_end - scep_ca_pem_start),
+#else
+        .cert_pem         = NULL,
+        .cert_len         = 0,
+#endif
         .skip_cert_common_name_check = false,
         .transport_type   = HTTP_TRANSPORT_OVER_SSL,
     };

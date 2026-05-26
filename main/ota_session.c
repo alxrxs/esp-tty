@@ -40,6 +40,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "zeroize.h"
+
 #include "wolfssh/ssh.h"
 #include "wolfssl/wolfcrypt/curve25519.h"
 #include "wolfssl/wolfcrypt/aes.h"
@@ -61,9 +63,11 @@ static const char *TAG = "ota_session";
 #define MAX_OTA_PLAINTEXT   (4u * 1024u * 1024u)
 
 /* Idle / channel-dead detection: WS_WANT_READ retries with a 10 ms delay,
- * capped at MAX_READ_RETRIES (~10 minutes of total idle). */
+ * capped at MAX_READ_RETRIES = 3000 retries * 10 ms = 30 s total idle timeout.
+ * 30 s matches a typical SSH handshake / channel-open timeout; the previous
+ * 60 000 (10 min) value allowed a slow-read DoS. */
 #define READ_POLL_MS        10
-#define MAX_READ_RETRIES    60000u
+#define MAX_READ_RETRIES    3000u
 
 static const byte HKDF_SALT[] = "esp-tty-ota-v2"; /* 14 bytes, no NUL */
 #define HKDF_SALT_LEN  (sizeof(HKDF_SALT) - 1)
@@ -235,12 +239,13 @@ esp_err_t ota_session_handler(WOLFSSH *ssh)
                  HKDF_SALT, HKDF_SALT_LEN,
                  info, sizeof(info),
                  aes_key, sizeof(aes_key));
-    /* shared is no longer needed */
-    memset(shared, 0, sizeof(shared));
+    /* shared is no longer needed; zeroize() is used (not memset) to prevent
+     * dead-store elimination by the compiler. */
+    zeroize(shared, sizeof(shared));
     if (rc != 0) {
         ESP_LOGE(TAG, "wc_HKDF failed: %d", rc);
         send_failure(ssh, "hkdf failed");
-        memset(aes_key, 0, sizeof(aes_key));
+        zeroize(aes_key, sizeof(aes_key));
         goto out;
     }
 
@@ -248,7 +253,7 @@ esp_err_t ota_session_handler(WOLFSSH *ssh)
     uint8_t  len_buf[4];
     if (ssh_read_exact(ssh, len_buf, 4) != 0) {
         ESP_LOGE(TAG, "payload length read failed");
-        memset(aes_key, 0, sizeof(aes_key));
+        zeroize(aes_key, sizeof(aes_key));
         goto out;
     }
     uint32_t plaintext_len = (uint32_t)len_buf[0]
@@ -259,7 +264,7 @@ esp_err_t ota_session_handler(WOLFSSH *ssh)
     if (plaintext_len == 0 || plaintext_len > MAX_OTA_PLAINTEXT) {
         ESP_LOGE(TAG, "bad plaintext_len: %u", (unsigned)plaintext_len);
         send_failure(ssh, "bad plaintext length");
-        memset(aes_key, 0, sizeof(aes_key));
+        zeroize(aes_key, sizeof(aes_key));
         goto out;
     }
 
@@ -268,7 +273,7 @@ esp_err_t ota_session_handler(WOLFSSH *ssh)
     if (ssh_read_exact(ssh, iv,  OTA_IV_LEN)  != 0 ||
         ssh_read_exact(ssh, tag, OTA_TAG_LEN) != 0) {
         ESP_LOGE(TAG, "iv/tag read failed");
-        memset(aes_key, 0, sizeof(aes_key));
+        zeroize(aes_key, sizeof(aes_key));
         goto out;
     }
 
@@ -278,14 +283,14 @@ esp_err_t ota_session_handler(WOLFSSH *ssh)
         ESP_LOGE(TAG, "OOM allocating %u bytes in PSRAM",
                  (unsigned)plaintext_len);
         send_failure(ssh, "oom");
-        memset(aes_key, 0, sizeof(aes_key));
+        zeroize(aes_key, sizeof(aes_key));
         goto out;
     }
 
     if (ssh_read_exact(ssh, ciphertext, plaintext_len) != 0) {
         ESP_LOGE(TAG, "ciphertext read truncated");
         send_failure(ssh, "truncated payload");
-        memset(aes_key, 0, sizeof(aes_key));
+        zeroize(aes_key, sizeof(aes_key));
         goto out;
     }
 
@@ -295,11 +300,11 @@ esp_err_t ota_session_handler(WOLFSSH *ssh)
     if (rc != 0) {
         ESP_LOGE(TAG, "wc_AesInit failed: %d", rc);
         send_failure(ssh, "aes init failed");
-        memset(aes_key, 0, sizeof(aes_key));
+        zeroize(aes_key, sizeof(aes_key));
         goto out;
     }
     rc = wc_AesGcmSetKey(&aes, aes_key, OTA_AES_KEY_LEN);
-    memset(aes_key, 0, sizeof(aes_key));
+    zeroize(aes_key, sizeof(aes_key));
     if (rc != 0) {
         ESP_LOGE(TAG, "wc_AesGcmSetKey failed: %d", rc);
         wc_AesFree(&aes);
@@ -350,7 +355,10 @@ esp_err_t ota_session_handler(WOLFSSH *ssh)
 
     if (esp_ota_end(ota_handle) != ESP_OK) {
         ESP_LOGE(TAG, "esp_ota_end failed");
-        ota_began = false;
+        /* Do NOT clear ota_began here: the out: label will call
+         * esp_ota_abort(ota_handle) to release the OTA partition slot.
+         * Clearing ota_began before goto would skip that cleanup and leak
+         * the slot, preventing subsequent OTA attempts. */
         send_failure(ssh, "ota end failed");
         goto out;
     }
@@ -370,8 +378,9 @@ esp_err_t ota_session_handler(WOLFSSH *ssh)
     wolfSSH_shutdown(ssh);
 
     ESP_LOGI(TAG, "OTA image accepted -- rebooting in 2 seconds");
-    /* Free crypto state before reboot for cleanliness; ciphertext is freed
-     * in the cleanup block but the process is about to vanish anyway. */
+    /* Zero the decrypted plaintext before freeing to prevent it from
+     * lingering in PSRAM after the reboot-induced RAM scrub. */
+    zeroize(ciphertext, plaintext_len);
     heap_caps_free(ciphertext);
     ciphertext = NULL;
     if (cli_key_init) wc_curve25519_free(&cli_key);
@@ -384,7 +393,11 @@ esp_err_t ota_session_handler(WOLFSSH *ssh)
 
 out:
     if (ota_began)    esp_ota_abort(ota_handle);
-    if (ciphertext)   heap_caps_free(ciphertext);
+    if (ciphertext) {
+        /* Zero decrypted firmware plaintext before releasing PSRAM. */
+        zeroize(ciphertext, plaintext_len);
+        heap_caps_free(ciphertext);
+    }
     if (cli_key_init) wc_curve25519_free(&cli_key);
     if (dev_key_init) wc_curve25519_free(&dev_key);
     if (rng_init)     wc_FreeRng(&rng);

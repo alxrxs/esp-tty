@@ -35,9 +35,14 @@ QEMU        = os.path.join(os.path.expanduser("~"),
                            "esp_develop_9.2.2_20250817", "qemu", "bin",
                            "qemu-system-xtensa")
 
+import tempfile
+
 import pytest
 
-FLASH_IMG   = "/tmp/esp-tty-test-flash.bin"
+# FLASH_IMG is now created via tempfile to avoid predictable /tmp paths
+# that are vulnerable to symlink attacks.  The module-level sentinel is kept
+# for backward-compat with the CLI path (main()); pytest tests use tmp_path.
+FLASH_IMG   = None  # set at runtime by merge_flash() / main()
 FLASH_SIZE  = 16 * 1024 * 1024  # 16 MB
 
 SUCCESS_PATTERN = re.compile(r"Listening on TCP port (\d+)")
@@ -68,7 +73,11 @@ def build_firmware():
     print("[test_qemu_boot] Build OK")
 
 
-def merge_flash(flash_img=FLASH_IMG):
+def merge_flash(flash_img=None):
+    if flash_img is None:
+        # Create a secure temporary file; caller is responsible for cleanup.
+        _fd, flash_img = tempfile.mkstemp(prefix="esp-tty-test-flash-", suffix=".bin")
+        os.close(_fd)
     print(f"[test_qemu_boot] Merging flash image -> {flash_img} ...")
     # Offsets must match partitions.csv:
     #   bootloader  0x0000
@@ -99,9 +108,10 @@ def merge_flash(flash_img=FLASH_IMG):
         with open(flash_img, "ab") as f:
             f.write(b"\xff" * (FLASH_SIZE - size))
     print(f"[test_qemu_boot] Flash image: {os.path.getsize(flash_img) // 1024} KB")
+    return flash_img
 
 
-def run_qemu(timeout_secs, flash_img=FLASH_IMG, label="test_qemu_boot"):
+def run_qemu(timeout_secs, flash_img=None, label="test_qemu_boot"):
     """
     Run QEMU with the given flash image for up to timeout_secs.
 
@@ -462,8 +472,8 @@ def main():
     if not args.no_build:
         build_firmware()
 
-    merge_flash()
-    result = run_qemu(args.timeout)
+    flash_img = merge_flash()
+    result = run_qemu(args.timeout, flash_img=flash_img)
 
     if not result["success"]:
         sys.exit(1)

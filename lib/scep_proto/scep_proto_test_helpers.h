@@ -38,6 +38,22 @@ int scep_parse_pkimessage_pkcsreq_for_test(const uint8_t             *p7,
                                            void                      *p_rng,
                                            scep_pkcsreq_unpacked_t   *out);
 
+/**
+ * scep_certrep_rejects_bad_sig() -- verify that scep_parse_certrep rejects
+ * a CertRep whose SignedData signature byte has been flipped.
+ *
+ * Returns -1 if the mutation was correctly rejected (PASS),
+ *          0  if scep_parse_certrep accepted the forged message (FAIL).
+ *
+ * Only available when scep_proto.c is compiled with SCEP_PROTO_TEST_HELPERS.
+ */
+int scep_certrep_rejects_bad_sig(const uint8_t      *p7,
+                                 size_t              p7_len,
+                                 const char         *txid,
+                                 mbedtls_pk_context *recip_key,
+                                 int (*f_rng)(void *, unsigned char *, size_t),
+                                 void               *p_rng);
+
 #ifdef __cplusplus
 }
 #endif

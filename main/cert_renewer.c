@@ -28,6 +28,7 @@
 
 #include <time.h>
 #include <string.h>
+#include <stdatomic.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -63,8 +64,10 @@ static const char *TAG = "cert_renew";
 # define CERT_RENEWAL_RETRY_INTERVAL_SEC   3600
 #endif
 
-/* Guard: track whether the task has already been started. */
-static volatile bool s_task_running = false;
+/* Guard: track whether the task has already been started.
+ * _Atomic + atomic_exchange gives a lock-free test-and-set; avoids TOCTOU
+ * if cert_renewer_start() is ever called from two contexts simultaneously. */
+static _Atomic bool s_task_running = false;
 
 /* --------------------------------------------------------------------------
  * Background task body
@@ -92,7 +95,7 @@ static void cert_renewer_task(void *arg)
         ESP_LOGE(TAG, "failed to allocate cred_store_t -- exiting renewal task");
         heap_caps_free(creds_p);
         heap_caps_free(new_creds_p);
-        s_task_running = false;
+        atomic_store(&s_task_running, false);
         vTaskDelete(NULL);
         return;
     }
@@ -149,6 +152,14 @@ static void cert_renewer_task(void *arg)
 
         case RENEWAL_DECISION_RENEW_NOW:
             break;  /* fall through to renewal logic */
+
+        case RENEWAL_DECISION_RENEW_NOW_CORRUPT:
+            /* not_after=0 sentinel: cert is corrupt or unparseable.
+             * Same action (renew now) as RENEW_NOW, but logged distinctly
+             * so operators can spot a recurring corruption pattern. */
+            ESP_LOGW(TAG, "stored cert has not_after=0 sentinel -- "
+                          "treating as corrupt; attempting re-enrollment");
+            break;
         }
 
         /* -- 3. Renewal needed. */
@@ -164,6 +175,11 @@ static void cert_renewer_task(void *arg)
                      SCEP_URL);
         }
 
+        /* WARNING: SCEP_CHALLENGE_PASSWORD is a compile-time macro baked into
+         * the firmware image.  If the CA rotates its NDES challenge password,
+         * every renewal attempt will fail with badRequest until the firmware
+         * is reflashed with the new password.  There is currently no runtime
+         * mechanism to update the challenge password without a new OTA build. */
         TickType_t t0 = xTaskGetTickCount();
         esp_err_t enroll_err = scep_enroll(SCEP_URL,
                                            SCEP_CHALLENGE_PASSWORD,
@@ -216,9 +232,25 @@ static void cert_renewer_task(void *arg)
          * the persistent wifi_event_handler in wifi.c catches and
          * immediately calls esp_wifi_connect() again.  Because we already
          * updated the EAP supplicant buffers above, the next 802.1X
-         * handshake will use the newly enrolled certificate. */
+         * handshake will use the newly enrolled certificate.
+         *
+         * Guard: only call disconnect when actually connected.  If not
+         * connected, esp_wifi_disconnect() returns ESP_ERR_WIFI_NOT_CONNECT
+         * and still fires WIFI_EVENT_STA_DISCONNECTED with reason=ASSOC_LEAVE;
+         * the event handler skips reconnect on ASSOC_LEAVE, leaving the
+         * device permanently disconnected. */
         ESP_LOGI(TAG, "disconnecting to trigger 802.1X re-auth with new cert");
-        esp_wifi_disconnect();
+        wifi_ap_record_t ap_info;
+        if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+            esp_err_t disc_err = esp_wifi_disconnect();
+            if (disc_err != ESP_OK) {
+                ESP_LOGW(TAG, "esp_wifi_disconnect failed: %s",
+                         esp_err_to_name(disc_err));
+            }
+        } else {
+            ESP_LOGW(TAG, "not currently connected -- skipping disconnect "
+                          "(EAP supplicant will pick up new certs on next connect)");
+        }
 
         ESP_LOGI(TAG, "renewal complete -- next check in %d s",
                  CERT_RENEWAL_CHECK_INTERVAL_SEC);
@@ -229,7 +261,7 @@ static void cert_renewer_task(void *arg)
 task_done:
     heap_caps_free(creds_p);
     heap_caps_free(new_creds_p);
-    s_task_running = false;
+    atomic_store(&s_task_running, false);
     vTaskDelete(NULL);
 }
 
@@ -249,11 +281,14 @@ esp_err_t cert_renewer_start(void)
                   "every-boot renewal handles expiry; background task skipped");
     return ESP_OK;
 #else
-    if (s_task_running) {
+    /* Atomic test-and-set: if already true, another caller got here first. */
+    bool was_running = atomic_exchange(&s_task_running, true);
+    if (was_running) {
         ESP_LOGW(TAG, "cert_renewer_start() called twice -- ignoring");
         return ESP_FAIL;
     }
 
+    /* s_task_running is already true; set it back on xTaskCreate failure. */
     BaseType_t rc = xTaskCreate(
         cert_renewer_task,
         "cert_renew",
@@ -264,10 +299,10 @@ esp_err_t cert_renewer_start(void)
 
     if (rc != pdPASS) {
         ESP_LOGE(TAG, "xTaskCreate failed for cert_renew task");
+        atomic_store(&s_task_running, false);
         return ESP_FAIL;
     }
 
-    s_task_running = true;
     ESP_LOGI(TAG, "cert renewal watchdog task created");
     return ESP_OK;
 #endif /* SCEP_NO_NTP_USE_ISSUANCE_TIME */

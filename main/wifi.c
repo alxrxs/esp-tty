@@ -59,6 +59,7 @@
  * Copy config.h.example -> config.h and fill in your values.
  */
 
+#include <stdatomic.h>
 #include <string.h>
 #include <time.h>
 
@@ -415,7 +416,11 @@ static void apply_static_ipv4_core(const char *addr,
         ESP_LOGW(TAG, "esp_netif_dhcpc_stop: %s", esp_err_to_name(err));
     }
 
-    ESP_ERROR_CHECK(esp_netif_set_ip_info(s_sta_netif, &ip_info));
+    err = esp_netif_set_ip_info(s_sta_netif, &ip_info);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_netif_set_ip_info failed: %s", esp_err_to_name(err));
+        return;
+    }
 
     ESP_LOGI(TAG, "Static IPv4: " IPSTR " / " IPSTR " gw " IPSTR,
              IP2STR(&ip_info.ip),
@@ -685,7 +690,7 @@ static void ipv6_bring_up_bootstrap(void)
 /* Max TZ string length accepted by setenv (caps before writing to env). */
 # define NTP_TZ_MAX_LEN  64
 
-static volatile bool s_ntp_started = false;
+static _Atomic bool s_ntp_started = false;
 
 static void ntp_sync_cb(struct timeval *tv)
 {
@@ -708,6 +713,13 @@ static void ntp_start_task(void *pvParameters)
     /* Log the server list so it's visible in the boot log. */
     for (size_t i = 0; i < n_servers; i++) {
         ESP_LOGI(TAG, "NTP server[%u]: %s", (unsigned)i, servers[i]);
+    }
+    if (n_servers > CONFIG_LWIP_SNTP_MAX_SERVERS) {
+        for (size_t i = CONFIG_LWIP_SNTP_MAX_SERVERS; i < n_servers; i++) {
+            ESP_LOGW(TAG, "NTP server[%u] \"%s\" dropped (exceeds "
+                          "CONFIG_LWIP_SNTP_MAX_SERVERS=%d)",
+                     (unsigned)i, servers[i], CONFIG_LWIP_SNTP_MAX_SERVERS);
+        }
     }
 
     esp_sntp_config_t cfg = {
@@ -734,7 +746,7 @@ static void ntp_start_task(void *pvParameters)
     esp_err_t err = esp_netif_sntp_init(&cfg);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_netif_sntp_init failed: %s", esp_err_to_name(err));
-        s_ntp_started = false;
+        atomic_store(&s_ntp_started, false);
         vTaskDelete(NULL);
         return;
     }
@@ -745,10 +757,13 @@ static void ntp_start_task(void *pvParameters)
     setenv("TZ", tz_buf, 1);
     tzset();
 
+    ESP_LOGW(TAG, "NTP is unauthenticated (no NTS); an on-path attacker can "
+                  "manipulate the clock");
+
     /* Wait up to NTP_SYNC_TIMEOUT_SEC; log progress, then background. */
-    TickType_t deadline = xTaskGetTickCount() +
-                          pdMS_TO_TICKS((uint32_t)NTP_SYNC_TIMEOUT_SEC * 1000u);
-    while (xTaskGetTickCount() < deadline) {
+    TickType_t ntp_start = xTaskGetTickCount();
+    TickType_t ntp_timeout = pdMS_TO_TICKS((uint32_t)NTP_SYNC_TIMEOUT_SEC * 1000u);
+    while ((xTaskGetTickCount() - ntp_start) < ntp_timeout) {
         esp_err_t wret = esp_netif_sntp_sync_wait(pdMS_TO_TICKS(5000));
         if (wret == ESP_OK) {
             /* sync_cb already logged the timestamp */
@@ -765,15 +780,15 @@ static void ntp_start_task(void *pvParameters)
 
 static void ntp_dispatch_start(void)
 {
-    if (s_ntp_started) return;
-    s_ntp_started = true;
+    /* atomic_exchange returns the old value; if it was already true we skip. */
+    if (atomic_exchange(&s_ntp_started, true)) return;
 
     BaseType_t ret = xTaskCreate(ntp_start_task, "ntp_start",
                                  4096, NULL,
                                  tskIDLE_PRIORITY + 1, NULL);
     if (ret != pdPASS) {
         ESP_LOGW(TAG, "xTaskCreate(ntp_start_task) failed -- NTP not started");
-        s_ntp_started = false;
+        atomic_store(&s_ntp_started, false);
     }
 }
 
@@ -1323,9 +1338,26 @@ esp_err_t wifi_init_sta(void)
      *     linker symbols still exist but the size will be wrong; catch that
      *     at boot rather than getting a cryptic EAP negotiation failure.
      */
-    configASSERT((eap_ca_pem_end  - eap_ca_pem_start)     >= EAP_CA_MIN_BYTES);
-    configASSERT((eap_client_crt_end - eap_client_crt_start) >= EAP_CRT_MIN_BYTES);
-    configASSERT((eap_client_key_end - eap_client_key_start) >= EAP_KEY_MIN_BYTES);
+    {
+        size_t ca_len  = (size_t)(eap_ca_pem_end  - eap_ca_pem_start);
+        size_t crt_len = (size_t)(eap_client_crt_end - eap_client_crt_start);
+        size_t key_len = (size_t)(eap_client_key_end - eap_client_key_start);
+        if (ca_len < EAP_CA_MIN_BYTES) {
+            ESP_LOGE(TAG, "EAP cert blob too small: ca.pem got %u need %u",
+                     (unsigned)ca_len, (unsigned)EAP_CA_MIN_BYTES);
+            return ESP_ERR_INVALID_SIZE;
+        }
+        if (crt_len < EAP_CRT_MIN_BYTES) {
+            ESP_LOGE(TAG, "EAP cert blob too small: client.crt got %u need %u",
+                     (unsigned)crt_len, (unsigned)EAP_CRT_MIN_BYTES);
+            return ESP_ERR_INVALID_SIZE;
+        }
+        if (key_len < EAP_KEY_MIN_BYTES) {
+            ESP_LOGE(TAG, "EAP cert blob too small: client.key got %u need %u",
+                     (unsigned)key_len, (unsigned)EAP_KEY_MIN_BYTES);
+            return ESP_ERR_INVALID_SIZE;
+        }
+    }
 
     ESP_LOGI(TAG, "Configuring EAP-TLS (identity: %s)", EAP_IDENTITY);
 
@@ -1587,6 +1619,7 @@ static esp_err_t wifi_mode_psk(const char *ssid,
     esp_err_t result = on_ip ? on_ip() : ESP_OK;
 
     esp_wifi_stop();
+    s_psk_bootstrap_active = false;
     return result;
 }
 
@@ -1630,9 +1663,9 @@ static bool smart_ntp_wait_sync(void)
         return false;
     }
 
-    TickType_t deadline = xTaskGetTickCount() +
-        pdMS_TO_TICKS((uint32_t)BOOTSTRAP_NTP_SYNC_TIMEOUT_SEC * 1000u);
-    while (xTaskGetTickCount() < deadline) {
+    TickType_t sntp_start = xTaskGetTickCount();
+    TickType_t sntp_timeout = pdMS_TO_TICKS((uint32_t)BOOTSTRAP_NTP_SYNC_TIMEOUT_SEC * 1000u);
+    while ((xTaskGetTickCount() - sntp_start) < sntp_timeout) {
         esp_err_t wait_err = esp_netif_sntp_sync_wait(pdMS_TO_TICKS(5000));
         if (wait_err == ESP_OK) {
             break;
@@ -1751,10 +1784,15 @@ static esp_err_t smart_on_ip_full(void)
                     .tv_sec  = (time_t)not_before_epoch,
                     .tv_usec = 0,
                 };
-                settimeofday(&tv, NULL);
-                ESP_LOGI(TAG,
-                         "[smart] no-NTP mode: local time set to cert NotBefore"
-                         " = %llu", (unsigned long long)not_before_epoch);
+                if (settimeofday(&tv, NULL) != 0) {
+                    ESP_LOGE(TAG,
+                             "[smart] no-NTP mode: settimeofday failed -- "
+                             "clock unchanged, treating as unsynced");
+                } else {
+                    ESP_LOGI(TAG,
+                             "[smart] no-NTP mode: local time set to cert NotBefore"
+                             " = %llu", (unsigned long long)not_before_epoch);
+                }
             } else {
                 ESP_LOGW(TAG,
                          "[smart] no-NTP mode: cred_store_parse_not_before "
@@ -1820,8 +1858,15 @@ static esp_err_t smart_configure_eaptls(const cred_store_t *creds)
 {
     ESP_LOGI(TAG, "[smart] configuring EAP-TLS (identity: %s)", EAP_IDENTITY);
 
-    ESP_ERROR_CHECK(esp_eap_client_set_identity(
-        (const unsigned char *)EAP_IDENTITY, strlen(EAP_IDENTITY)));
+    {
+        esp_err_t err = esp_eap_client_set_identity(
+            (const unsigned char *)EAP_IDENTITY, strlen(EAP_IDENTITY));
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "[smart] esp_eap_client_set_identity failed: %s",
+                     esp_err_to_name(err));
+            return ESP_FAIL;
+        }
+    }
 
     if (creds && creds->ca_chain_len > 0 && creds->dev_cert_len > 0 &&
         creds->dev_key_len > 0) {
@@ -1847,15 +1892,27 @@ static esp_err_t smart_configure_eaptls(const cred_store_t *creds)
         extern const uint8_t eap_client_key_start[] asm("_binary_client_key_start");
         extern const uint8_t eap_client_key_end[]   asm("_binary_client_key_end");
 
-        ESP_ERROR_CHECK(esp_eap_client_set_ca_cert(
-            eap_ca_pem_start,
-            eap_ca_pem_end - eap_ca_pem_start));
-        ESP_ERROR_CHECK(esp_eap_client_set_certificate_and_key(
-            eap_client_crt_start,
-            eap_client_crt_end - eap_client_crt_start,
-            eap_client_key_start,
-            eap_client_key_end - eap_client_key_start,
-            NULL, 0));
+        {
+            esp_err_t err = esp_eap_client_set_ca_cert(
+                eap_ca_pem_start,
+                eap_ca_pem_end - eap_ca_pem_start);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "[smart] set_ca_cert (embedded) failed: %s",
+                         esp_err_to_name(err));
+                return ESP_FAIL;
+            }
+            err = esp_eap_client_set_certificate_and_key(
+                eap_client_crt_start,
+                eap_client_crt_end - eap_client_crt_start,
+                eap_client_key_start,
+                eap_client_key_end - eap_client_key_start,
+                NULL, 0);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "[smart] set_certificate_and_key (embedded) failed: %s",
+                         esp_err_to_name(err));
+                return ESP_FAIL;
+            }
+        }
 #else
         ESP_LOGE(TAG, "[smart] no NVS creds and no embedded certs -- "
                       "EAP-TLS will fail");
@@ -1865,7 +1922,14 @@ static esp_err_t smart_configure_eaptls(const cred_store_t *creds)
 
     /* EAP-TLS only: with just cert+key configured the IDF supplicant
      * auto-selects EAP-TLS (no method-restriction API in IDF 5.4.1). */
-    ESP_ERROR_CHECK(esp_wifi_sta_enterprise_enable());
+    {
+        esp_err_t err = esp_wifi_sta_enterprise_enable();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "[smart] esp_wifi_sta_enterprise_enable failed: %s",
+                     esp_err_to_name(err));
+            return ESP_FAIL;
+        }
+    }
     return ESP_OK;
 }
 
@@ -1940,9 +2004,17 @@ static esp_err_t wifi_mode_enterprise(const char         *ssid,
     ESP_ERROR_CHECK(set_cfg_err);
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    TickType_t wait = (timeout_sec == 0)
-        ? portMAX_DELAY
-        : pdMS_TO_TICKS(timeout_sec * 1000u);
+    /* Saturate the ms product at UINT32_MAX before passing to pdMS_TO_TICKS to
+     * prevent overflow for timeout_sec >= 4294968 s (unlikely in practice but
+     * the guard ensures correctness regardless of the configured value). */
+    TickType_t wait;
+    if (timeout_sec == 0) {
+        wait = portMAX_DELAY;
+    } else {
+        uint64_t ms64 = (uint64_t)timeout_sec * 1000u;
+        uint32_t ms32 = (ms64 > UINT32_MAX) ? UINT32_MAX : (uint32_t)ms64;
+        wait = pdMS_TO_TICKS(ms32);
+    }
 
     EventBits_t bits = xEventGroupWaitBits(
         s_wifi_event_group,
@@ -2178,9 +2250,9 @@ esp_err_t wifi_init_smart(void)
                 ESP_LOGE(TAG,
                          "[smart] bootstrap full pass failed (PSK or SCEP) -- "
                          "retrying enterprise anyway");
-                /* Reload creds in case partial enrollment wrote something. */
-                cert_present = (cred_store_load(creds_p) == ESP_OK);
             }
+            /* Reload creds in case partial enrollment wrote something. */
+            cert_present = (cred_store_load(creds_p) == ESP_OK);
             now = time(NULL);
             ntp_synced = (now >= MIN_PLAUSIBLE_EPOCH);
             /* Re-check expiry now that time may be synced. */
@@ -2190,8 +2262,15 @@ esp_err_t wifi_init_smart(void)
             } else {
                 cert_expired = false;
             }
-            /* Reset enterprise attempt counter so the retry budget is fresh. */
-            enterprise_attempts = 0;
+            /* Reset enterprise attempt counter only when enrollment actually
+             * produced fresh credentials (rc == ESP_OK AND creds are now
+             * present).  A permanently misconfigured RADIUS server must not
+             * get its circuit breaker reset on each bootstrap pass that merely
+             * confirms the existing cert is still valid. */
+            bool enrollment_succeeded = (rc == ESP_OK && cert_present);
+            if (enrollment_succeeded) {
+                enterprise_attempts = 0;
+            }
             continue;
         }
     }
@@ -2226,11 +2305,35 @@ esp_err_t wifi_init_enterprise_bootstrap(void)
     /* 5. Embedded certs sanity-check.  Cert is always "present" and treated as
      *    non-expired (we cannot evaluate NotAfter without a synced clock and
      *    without parsing the cert -- NTP bootstrap is the mechanism for that). */
-    configASSERT((eap_ca_pem_end  - eap_ca_pem_start)        >= EAP_CA_MIN_BYTES);
-    configASSERT((eap_client_crt_end - eap_client_crt_start)  >= EAP_CRT_MIN_BYTES);
-    configASSERT((eap_client_key_end - eap_client_key_start)  >= EAP_KEY_MIN_BYTES);
+    {
+        size_t ca_len  = (size_t)(eap_ca_pem_end  - eap_ca_pem_start);
+        size_t crt_len = (size_t)(eap_client_crt_end - eap_client_crt_start);
+        size_t key_len = (size_t)(eap_client_key_end - eap_client_key_start);
+        if (ca_len < EAP_CA_MIN_BYTES) {
+            ESP_LOGE(TAG, "EAP cert blob too small: ca.pem got %u need %u",
+                     (unsigned)ca_len, (unsigned)EAP_CA_MIN_BYTES);
+            return ESP_ERR_INVALID_SIZE;
+        }
+        if (crt_len < EAP_CRT_MIN_BYTES) {
+            ESP_LOGE(TAG, "EAP cert blob too small: client.crt got %u need %u",
+                     (unsigned)crt_len, (unsigned)EAP_CRT_MIN_BYTES);
+            return ESP_ERR_INVALID_SIZE;
+        }
+        if (key_len < EAP_KEY_MIN_BYTES) {
+            ESP_LOGE(TAG, "EAP cert blob too small: client.key got %u need %u",
+                     (unsigned)key_len, (unsigned)EAP_KEY_MIN_BYTES);
+            return ESP_ERR_INVALID_SIZE;
+        }
+    }
 
     const bool cert_present  = true;
+    /* NOTE: cert_expired is hardcoded false here because we cannot evaluate
+     * NotAfter without both a synced clock and mbedTLS cert parsing.  NTP
+     * bootstrap on the PSK network is the runtime mechanism that eventually
+     * gives us a valid clock; at that point wifi_init_enterprise_bootstrap
+     * has already entered the main loop.  See finding #8 in the security
+     * review for what a proper fix would require (mbedtls_x509_crt_parse
+     * after NTP sync, before the first ENTERPRISE attempt). */
     const bool cert_expired  = false;
 
     /* 6. Evaluate clock. */

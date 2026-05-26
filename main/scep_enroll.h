@@ -43,12 +43,22 @@
  *                         the function derives "<DEVICE_HOSTNAME>-<mac>".
  *
  * Returns:
- *   ESP_OK     -- enrollment succeeded; credentials saved to NVS via
- *                 cred_store_save().
- *   ESP_FAIL   -- enrollment failed (FAILURE or PENDING pkiStatus, or HTTP /
- *                 crypto error).  Logs describe the failure.
- *   ESP_ERR_NO_MEM -- PSRAM allocation failed.
+ *   ESP_OK              -- enrollment succeeded; credentials saved to NVS via
+ *                         cred_store_save().
+ *   ESP_ERR_SCEP_PENDING -- CA returned pkiStatus PENDING; the request is
+ *                         queued for manual NDES approval.  The caller should
+ *                         wait for human approval (minutes to hours) before
+ *                         retrying -- do NOT retry immediately or a fresh
+ *                         transactionID will flood the CA.
+ *   ESP_FAIL            -- enrollment failed (FAILURE pkiStatus, or HTTP /
+ *                         crypto error).  Logs describe the failure.
+ *   ESP_ERR_NO_MEM      -- PSRAM allocation failed.
+ *
+ * ESP_ERR_SCEP_PENDING is defined as (ESP_FAIL - 1) so it is a distinct
+ * negative value that callers can test with ==.
  */
+#define ESP_ERR_SCEP_PENDING  ((esp_err_t)(ESP_FAIL - 1))
+
 esp_err_t scep_enroll(const char *scep_url,
                       const char *challenge_password,
                       const char *common_name);

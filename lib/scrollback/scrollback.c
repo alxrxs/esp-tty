@@ -75,7 +75,7 @@ scrollback_t *scrollback_create(size_t cap)
 
 void scrollback_push(scrollback_t *sb, const uint8_t *data, size_t len)
 {
-    if (!sb || len == 0) return;
+    if (!sb || !data || len == 0) return;
 
     pthread_mutex_lock(&sb->lock);
 
@@ -97,6 +97,14 @@ void scrollback_push(scrollback_t *sb, const uint8_t *data, size_t len)
         sb->used = sb->cap;
 
     pthread_mutex_unlock(&sb->lock);
+}
+
+void scrollback_destroy(scrollback_t *sb)
+{
+    if (!sb) return;
+    pthread_mutex_destroy(&sb->lock);
+    free(sb->buf);
+    free(sb);
 }
 
 uint8_t *scrollback_get_lines(scrollback_t *sb, int max_lines, size_t *out_len)
@@ -206,7 +214,7 @@ scrollback_t *scrollback_create(size_t cap)
 
 void scrollback_push(scrollback_t *sb, const uint8_t *data, size_t len)
 {
-    if (!sb || len == 0) return;
+    if (!sb || !data || len == 0) return;
 
     xSemaphoreTake(sb->lock, portMAX_DELAY);
 
@@ -230,6 +238,14 @@ void scrollback_push(scrollback_t *sb, const uint8_t *data, size_t len)
     xSemaphoreGive(sb->lock);
 }
 
+void scrollback_destroy(scrollback_t *sb)
+{
+    if (!sb) return;
+    vSemaphoreDelete(sb->lock);
+    free(sb->buf);
+    free(sb);
+}
+
 uint8_t *scrollback_get_lines(scrollback_t *sb, int max_lines, size_t *out_len)
 {
     if (!sb || !out_len) return NULL;
@@ -240,16 +256,16 @@ uint8_t *scrollback_get_lines(scrollback_t *sb, int max_lines, size_t *out_len)
         return NULL;
     }
 
-    /* Snapshot the two mutable fields under lock; everything else is
-     * lock-free.  scrollback_push holds the lock only for the duration
-     * of its own memcpy (<=64 B from the CDC callback), so contention
-     * here is microseconds at most. */
+    /* Hold the lock for the entire scan + copy to prevent concurrent
+     * scrollback_push from corrupting bytes mid-scan or mid-copy.
+     * scrollback_push holds the lock only for its own brief memcpy, so
+     * contention here is microseconds at most. */
     xSemaphoreTake(sb->lock, portMAX_DELAY);
     size_t used = sb->used;
     size_t head = sb->head;
-    xSemaphoreGive(sb->lock);
 
     if (used == 0) {
+        xSemaphoreGive(sb->lock);
         *out_len = 0;
         return NULL;
     }
@@ -257,9 +273,8 @@ uint8_t *scrollback_get_lines(scrollback_t *sb, int max_lines, size_t *out_len)
     size_t cap    = sb->cap;   /* immutable after create */
     size_t oldest = (head + cap - used) % cap;
 
-    /* Scan backward (lock-free) to find the start of the last max_lines
-     * lines.  Concurrent pushes may overwrite the oldest bytes we scan,
-     * but minor tearing in a debug replay buffer is acceptable. */
+    /* Scan backward under lock to find the start of the last max_lines
+     * lines. */
     size_t dump_start_offset = 0;
     int newlines = 0;
     size_t i = used;
@@ -283,6 +298,7 @@ uint8_t *scrollback_get_lines(scrollback_t *sb, int max_lines, size_t *out_len)
     if (!out)
         out = malloc(dump_len);
     if (!out) {
+        xSemaphoreGive(sb->lock);
         *out_len = 0;
         return NULL;
     }
@@ -294,6 +310,7 @@ uint8_t *scrollback_get_lines(scrollback_t *sb, int max_lines, size_t *out_len)
         memcpy(out + to_end, sb->buf,              dump_len - to_end);
     }
 
+    xSemaphoreGive(sb->lock);
     *out_len = dump_len;
     return out;
 }

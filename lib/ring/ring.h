@@ -40,6 +40,7 @@ int ring_send(ring_t *r, const uint8_t *buf, size_t len);
  * Read up to cap bytes from the ring into buf.
  * Blocks until at least one byte is available.
  * Returns the number of bytes read (>= 1), or -1 if the ring is closed.
+ * Returns 0 immediately (without blocking) when cap == 0.
  */
 int ring_recv(ring_t *r, uint8_t *buf, size_t cap);
 

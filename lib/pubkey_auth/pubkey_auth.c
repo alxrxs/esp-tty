@@ -82,6 +82,8 @@ pubkey_auth_result_t pubkey_auth_check(
 {
     if (!presented_key || presented_key_sz == 0)
         return PUBKEY_AUTH_REJECTED;
+    if (!expected_hash)
+        return PUBKEY_AUTH_REJECTED;
 
     /* Compute SHA-256( uint32be(presented_key_sz) || presented_key ) */
     Sha256  sha;
