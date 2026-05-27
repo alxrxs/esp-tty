@@ -17,6 +17,7 @@
 #include "term_resize.h"
 #include "ota_session.h"
 #include "ssh_keepalive.h"
+#include "log_sanitize.h"
 #include "config.h"   /* SSH_PORT, AUTHORIZED_PUBKEYS, OTA_AUTHORIZED_PUBKEY */
 
 #include <stdio.h>
@@ -147,8 +148,12 @@ static int user_auth_callback(byte authType, WS_UserAuthData *authData,
         (const char *)authData->username, authData->usernameSz);
 
     if (uclass == PUBKEY_USER_REJECTED) {
-        ESP_LOGW(TAG, "Auth rejected: unknown username '%.*s'",
-                 (int)authData->usernameSz, (const char *)authData->username);
+        /* authData->username is attacker-controlled; sanitize before logging
+         * to prevent log-injection via embedded newlines / ANSI escapes. */
+        char safe_user[96];
+        log_sanitize(safe_user, sizeof(safe_user),
+                     authData->username, authData->usernameSz);
+        ESP_LOGW(TAG, "Auth rejected: unknown username '%s'", safe_user);
         return WOLFSSH_USERAUTH_FAILURE;
     }
 
@@ -172,8 +177,12 @@ static int user_auth_callback(byte authType, WS_UserAuthData *authData,
                               s_authkey_hashes[i]) == PUBKEY_AUTH_OK)
             return WOLFSSH_USERAUTH_SUCCESS;
     }
-    ESP_LOGW(TAG, "Auth rejected: unknown public key (user=%.*s)",
-             (int)authData->usernameSz, (const char *)authData->username);
+    {
+        char safe_user[96];
+        log_sanitize(safe_user, sizeof(safe_user),
+                     authData->username, authData->usernameSz);
+        ESP_LOGW(TAG, "Auth rejected: unknown public key (user=%s)", safe_user);
+    }
     return WOLFSSH_USERAUTH_INVALID_PUBLICKEY;
 }
 

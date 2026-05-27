@@ -692,6 +692,23 @@ static void ipv6_bring_up_bootstrap(void)
 
 static _Atomic bool s_ntp_started = false;
 
+/* Set by cert_renewer just before it calls esp_wifi_disconnect() to trigger
+ * 802.1X re-auth with freshly enrolled credentials.  When the resulting
+ * WIFI_EVENT_STA_DISCONNECTED arrives with reason=ASSOC_LEAVE, the event
+ * handler normally treats it as a planned teardown and skips reconnect.
+ * With this flag set, we instead clear it and call esp_wifi_connect() so
+ * the supplicant picks up the new EAP creds and re-associates.
+ *
+ * Only used in Mode C builds (WIFI_ENTERPRISE_SSID && !WIFI_USE_ENTERPRISE)
+ * where the cert_renewer task runs, but the flag itself is defined
+ * unconditionally to keep the event handler simple. */
+static _Atomic bool s_eap_creds_just_rotated = false;
+
+void wifi_signal_eap_creds_rotated(void)
+{
+    atomic_store(&s_eap_creds_just_rotated, true);
+}
+
 static void ntp_sync_cb(struct timeval *tv)
 {
     (void)tv;
@@ -1013,6 +1030,22 @@ static void wifi_event_handler(void *arg,
              * bootstrap and enterprise.  The next wifi_mode_* call will
              * start a fresh session; auto-reconnect here would race it. */
             if (ev->reason == WIFI_REASON_ASSOC_LEAVE) {
+                /* If cert_renewer just rotated creds and called
+                 * esp_wifi_disconnect() to force 802.1X re-auth, treat the
+                 * resulting ASSOC_LEAVE as a reconnect trigger, NOT a
+                 * planned teardown.  smart_eap_apply_creds() has already
+                 * pushed the new certificates into the supplicant, so the
+                 * next esp_wifi_connect() will use them. */
+                bool rotated_expected = atomic_exchange(
+                    &s_eap_creds_just_rotated, false);
+                if (rotated_expected) {
+                    ESP_LOGI(TAG, "disconnected (reason %d -- post-renewal: "
+                                  "reconnecting with new EAP creds)",
+                             ev->reason);
+                    s_retry_num = 0;
+                    esp_wifi_connect();
+                    goto disc_done;
+                }
                 ESP_LOGI(TAG, "disconnected (reason %d -- planned teardown)",
                          ev->reason);
                 /* fall through past the retry block */

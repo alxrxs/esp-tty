@@ -228,24 +228,34 @@ def test_assoc_leave_branch_uses_info_log():
 
 
 def test_assoc_leave_skips_reconnect():
-    """The ASSOC_LEAVE branch skips the auto-reconnect block (goto or early return)."""
+    """The ASSOC_LEAVE branch must bypass the WIFI_MAX_RETRY-based reconnect block.
+
+    The branch is allowed to call esp_wifi_connect() directly (for the
+    cert-renewal reconnect path), but it must `goto disc_done` so it
+    does NOT fall through into the retry-count logic, which would
+    double-call esp_wifi_connect() and risk a race with the next
+    wifi_mode_* transition.
+    """
     src = _read_wifi_c()
-    # The canonical pattern is `goto disc_done` after the ASSOC_LEAVE check.
-    # Accept either goto or return as a valid skip mechanism.
+    # The ASSOC_LEAVE branch ends at the outer closing brace right before
+    # `disc_done`.  Match everything from WIFI_REASON_ASSOC_LEAVE to the
+    # WIFI_MAX_RETRY block header (which marks the start of the generic
+    # retry handling for non-ASSOC_LEAVE reasons).
     m_block = re.search(
-        r"WIFI_REASON_ASSOC_LEAVE(.*?)(?=WIFI_MAX_RETRY|s_retry_num)",
+        r"WIFI_REASON_ASSOC_LEAVE(.*?)const\s+bool\s+infinite\s*=",
         src, re.DOTALL,
     )
     assert m_block, (
-        "Could not find the code between WIFI_REASON_ASSOC_LEAVE and the retry "
-        "block -- please verify the handler structure."
+        "Could not find the code between WIFI_REASON_ASSOC_LEAVE and the "
+        "generic WIFI_MAX_RETRY retry block."
     )
     between = m_block.group(1)
-    has_skip = "goto" in between or "return" in between
-    assert has_skip, (
-        "No 'goto' or 'return' found between the WIFI_REASON_ASSOC_LEAVE check "
-        "and the reconnect block. The handler must skip auto-reconnect for "
-        "planned teardowns to avoid racing the next wifi_mode_* call."
+    # Must skip the generic retry block with a goto / return.
+    assert "goto disc_done" in between or "return" in between, (
+        "ASSOC_LEAVE branch must `goto disc_done` (or return) to skip the "
+        "generic WIFI_MAX_RETRY retry block; otherwise we would either "
+        "double-call esp_wifi_connect() or fall into the retry counter "
+        "logic intended for unsolicited disconnects."
     )
 
 
@@ -479,19 +489,34 @@ def test_assoc_leave_does_not_set_fail_bit():
     )
 
 
-def test_assoc_leave_does_not_call_esp_wifi_connect():
-    """ASSOC_LEAVE branch does NOT call esp_wifi_connect (prevents race with next wifi_mode_*)."""
+def test_assoc_leave_planned_teardown_does_not_call_esp_wifi_connect():
+    """The planned-teardown sub-branch of ASSOC_LEAVE must NOT call esp_wifi_connect.
+
+    Since the cert-renewer-driven reconnect path is now also handled in
+    the same ASSOC_LEAVE branch (guarded by s_eap_creds_just_rotated),
+    the rule has been narrowed: the *planned-teardown* sub-branch (the
+    one that falls through to `goto disc_done` without seeing the
+    rotated flag set) must still not call esp_wifi_connect(), otherwise
+    PSK->enterprise transitions race the next wifi_mode_enterprise()
+    call.
+    """
     src = _read_wifi_c()
+    # Strip C comments so we operate on code only.
+    code = re.sub(r"/\*.*?\*/", "", src, flags=re.DOTALL)
+    code = re.sub(r"//[^\n]*", "", code)
+    # Extract from the "planned teardown" ESP_LOGI line to its `goto disc_done`.
+    # The ESP_LOGI may span multiple lines, so match across newlines.
     m = re.search(
-        r"WIFI_REASON_ASSOC_LEAVE(.*?)goto\s+disc_done",
-        src, re.DOTALL,
+        r'planned teardown.*?ev->reason\s*\)\s*;(.*?)goto\s+disc_done',
+        code, re.DOTALL,
     )
-    assert m, "ASSOC_LEAVE branch not found"
+    assert m, ("Could not locate the planned-teardown sub-branch.  Look "
+               "for the ESP_LOGI line containing 'planned teardown'.")
     branch = m.group(1)
     assert "esp_wifi_connect" not in branch, (
-        "esp_wifi_connect() called inside the ASSOC_LEAVE branch. "
-        "This would race the subsequent wifi_mode_enterprise() call that "
-        "re-configures the STA interface for the enterprise SSID."
+        "esp_wifi_connect() called inside the planned-teardown sub-branch "
+        "of ASSOC_LEAVE.  That would race the subsequent "
+        "wifi_mode_enterprise() call that re-configures the STA interface."
     )
 
 

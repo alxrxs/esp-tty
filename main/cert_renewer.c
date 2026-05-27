@@ -242,6 +242,12 @@ static void cert_renewer_task(void *arg)
         ESP_LOGI(TAG, "disconnecting to trigger 802.1X re-auth with new cert");
         wifi_ap_record_t ap_info;
         if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+            /* Signal to the wifi event handler that the upcoming
+             * ASSOC_LEAVE disconnect is renewal-driven and should be
+             * followed by an automatic reconnect using the new EAP creds.
+             * MUST be set BEFORE esp_wifi_disconnect() (the event can be
+             * delivered synchronously by the IDF tick on some builds). */
+            wifi_signal_eap_creds_rotated();
             esp_err_t disc_err = esp_wifi_disconnect();
             if (disc_err != ESP_OK) {
                 ESP_LOGW(TAG, "esp_wifi_disconnect failed: %s",

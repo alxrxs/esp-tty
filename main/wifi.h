@@ -79,6 +79,16 @@ esp_err_t wifi_init_enterprise_bootstrap(void);
 #if defined(WIFI_ENTERPRISE_SSID) && !defined(WIFI_USE_ENTERPRISE)
 #include "cred_store.h"
 esp_err_t smart_eap_apply_creds(const cred_store_t *creds);
+
+/* wifi_signal_eap_creds_rotated -- mark that the next ASSOC_LEAVE-disconnect
+ * is the result of a cert-renewer-driven `esp_wifi_disconnect()` and should
+ * be followed by an automatic reconnect (so the supplicant re-handshakes
+ * with the freshly applied EAP-TLS credentials).
+ *
+ * MUST be called *before* esp_wifi_disconnect() to avoid a race where the
+ * disconnect event arrives before the flag is set.  The flag is atomically
+ * consumed by the WIFI_EVENT_STA_DISCONNECTED handler. */
+void wifi_signal_eap_creds_rotated(void);
 #endif
 
 #ifdef __cplusplus
