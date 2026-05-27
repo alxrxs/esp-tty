@@ -214,17 +214,50 @@ typedef struct {
     ring_t  *ring;
 } pump_arg_t;
 
-/* SSH stream -> ring (ssh_to_usb direction) */
+/* SSH stream -> ring (ssh_to_usb direction)
+ *
+ * Contract: returns >0 with bytes read, or <0 on error/EOF.  Must NEVER
+ * return 0 unless the peer has actually closed the connection -- the
+ * bridge_pump caller treats 0 as POSIX-style EOF and tears the session
+ * down, so a stray 0 (e.g. from WS_WANT_READ during a brief idle gap)
+ * would cause spurious teardowns on every idle period.
+ *
+ * On WS_WANT_READ we block via select() up to a bounded interval so the
+ * pump effectively waits for either the next packet or a session-stop
+ * signal; the loop here is bounded so teardown can preempt within ~200 ms.
+ */
 static int ssh_read_cb(void *ctx, uint8_t *buf, size_t cap)
 {
     WOLFSSH *ssh = (WOLFSSH *)ctx;
-    int n = wolfSSH_stream_read(ssh, buf, (word32)cap);
-    if (n == WS_WANT_READ) return 0;  /* no data yet, retry */
-    if (n <= 0) return -1;
+    for (;;) {
+        if (s_pump_stop) return -1;
+        int n = wolfSSH_stream_read(ssh, buf, (word32)cap);
+        if (n > 0) {
 #if SSH_KEEPALIVE_INTERVAL_SEC > 0
-    s_last_ssh_rx_tick = xTaskGetTickCount();
+            s_last_ssh_rx_tick = xTaskGetTickCount();
 #endif
-    return n;
+            return n;
+        }
+        if (n != WS_WANT_READ) {
+            /* Real error or EOF (peer closed).  Map to -1 so bridge_pump
+             * tears the session down. */
+            return -1;
+        }
+        /* WS_WANT_READ: nothing buffered.  Wait briefly for inbound data
+         * on the socket before retrying.  Without this we'd return 0 and
+         * bridge_pump would treat it as EOF. */
+        int fd = wolfSSH_get_fd(ssh);
+        if (fd < 0) return -1;
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(fd, &rfds);
+        struct timeval tv = { .tv_sec = 0, .tv_usec = 200000 };
+        int sel = select(fd + 1, &rfds, NULL, NULL, &tv);
+        if (sel < 0) return -1;
+        /* sel == 0: timeout, no data yet -- loop back, check s_pump_stop
+         * and retry wolfSSH_stream_read (it may have residual buffered
+         * data even without socket readiness). */
+    }
 }
 
 static int ring_write_cb(void *ctx, const uint8_t *buf, size_t len)
@@ -375,11 +408,45 @@ static void ssh_server_task(void *arg)
         int client_fd = accept(listen_fd,
                                (struct sockaddr *)&client_addr, &client_sz);
         if (client_fd < 0) {
+            /* Rate-limit accept-failure warnings: under a sustained probe
+             * storm the kernel may return EMFILE/ECONNABORTED repeatedly,
+             * and an unbounded LOGW would flood UART and udp_log. */
+            static uint32_t accept_fail_ct = 0;
+            static TickType_t accept_fail_window_start = 0;
+            TickType_t now = xTaskGetTickCount();
+            if (accept_fail_window_start == 0 ||
+                (now - accept_fail_window_start) > pdMS_TO_TICKS(1000)) {
+                accept_fail_window_start = now;
+                accept_fail_ct = 0;
+            }
+            accept_fail_ct++;
+            /* Emit at most ~1 line/sec for the first 10 within a window,
+             * then 1-of-100 thereafter. */
+            if (accept_fail_ct <= 1 || (accept_fail_ct % 100) == 0) {
+                ESP_LOGW(TAG, "accept() failed (%u in last burst)",
+                         (unsigned)accept_fail_ct);
+            }
             vTaskDelay(pdMS_TO_TICKS(100));
             continue;
         }
 
-        ESP_LOGI(TAG, "New TCP connection");
+        /* Rate-limit "New TCP connection" INFO log -- under port-scanner
+         * activity this can fire many times per second. */
+        {
+            static uint32_t accept_ok_ct = 0;
+            static TickType_t accept_ok_window_start = 0;
+            TickType_t now = xTaskGetTickCount();
+            if (accept_ok_window_start == 0 ||
+                (now - accept_ok_window_start) > pdMS_TO_TICKS(1000)) {
+                accept_ok_window_start = now;
+                accept_ok_ct = 0;
+            }
+            accept_ok_ct++;
+            if (accept_ok_ct <= 5 || (accept_ok_ct % 100) == 0) {
+                ESP_LOGI(TAG, "New TCP connection (%u in last 1s window)",
+                         (unsigned)accept_ok_ct);
+            }
+        }
 
         xSemaphoreTake(s_session_mutex, portMAX_DELAY);
 
@@ -411,13 +478,24 @@ static void ssh_server_task(void *arg)
         struct timeval tv = { .tv_sec = 1, .tv_usec = 0 }; /* short per-recv slice */
         setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-        /* SSH handshake + auth (retried under wall-clock deadline) */
+        /* SSH handshake + auth (retried under wall-clock deadline).
+         *
+         * wolfSSH_accept may return either WS_WANT_READ (need more inbound
+         * data from peer) or WS_WANT_WRITE (outbound buffer full, e.g.
+         * the kernel's TCP send buffer is congested on a slow link).  Both
+         * are recoverable; the per-call wait is provided by SO_RCVTIMEO
+         * (read side) and the SO_SNDTIMEO default (write side) on the
+         * client_fd, so this loop does not busy-spin -- each iteration
+         * blocks inside wolfSSL's read/write up to ~1 s.  The wall-clock
+         * deadline bounds total handshake time regardless. */
         time_t deadline = time(NULL) + SSH_HANDSHAKE_TIMEOUT_SEC;
         int ret;
+        int werr;
         do {
             ret = wolfSSH_accept(ssh);
+            werr = wolfSSH_get_error(ssh);
         } while (ret != WS_SUCCESS &&
-                 wolfSSH_get_error(ssh) == WS_WANT_READ &&
+                 (werr == WS_WANT_READ || werr == WS_WANT_WRITE) &&
                  time(NULL) < deadline);
 
         if (ret != WS_SUCCESS) {

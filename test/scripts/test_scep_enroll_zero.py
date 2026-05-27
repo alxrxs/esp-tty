@@ -349,13 +349,12 @@ class TestFixedFilterPatch:
 # ── Test group 3: verify() skip ───────────────────────────────────────────────
 
 class TestVerifySkip:
-    """Test 10: CACertificates.verify is patched to a no-op."""
+    """Test 10: CACertificates.verify patch swallows the specific EC TypeError."""
 
-    def test_verify_is_noop(self):
-        """Test 10: the patched verify() does not raise, even on a broken bundle."""
-        # Create a minimal CACertificates with one cert that would normally
-        # fail verify() (EC key — wrong args for PyScep's RSA-shaped check).
-        key  = ec.generate_private_key(ec.SECP256R1())
+    @staticmethod
+    def _make_broken_ca_certs():
+        """Build a CACertificates whose _signer.public_key().verify raises TypeError."""
+        key = ec.generate_private_key(ec.SECP256R1())
         crypto_cert = _make_crypto_cert("EC-CA", key, is_ca=True)
         pys_cert = _pyscep_cert(crypto_cert)
 
@@ -364,9 +363,49 @@ class TestVerifySkip:
         ca_certs._recipient = pys_cert
         ca_certs._signer    = pys_cert
         ca_certs._issuer    = pys_cert
+        return ca_certs
 
-        # Should not raise
-        ca_certs.verify()
+    def test_verify_is_noop(self):
+        """Test 10: patch swallows the EC-key TypeError but re-raises other errors.
+
+        Steps:
+        1. Temporarily replace _m._orig_verify with a stub that raises TypeError.
+        2. Assert the ORIGINAL (stubbed) _orig_verify DOES raise TypeError.
+        3. Assert the PATCHED _fixed_verify does NOT raise TypeError (swallows it).
+        4. Assert the patch re-raises non-TypeError exceptions (e.g. ValueError).
+        5. Restore _m._orig_verify to the real original.
+        """
+        from unittest.mock import MagicMock
+        import pytest as _pytest
+
+        fixed_verify = _m._fixed_verify   # the patched replacement in the module
+        real_orig    = _m._orig_verify     # the real original (may be None)
+
+        ca_certs = self._make_broken_ca_certs()
+
+        # ── 1 & 2. Stub _orig_verify to raise TypeError; confirm it raises ──
+        type_error_stub = MagicMock(
+            side_effect=TypeError(
+                "verify() takes 3 positional arguments but 4 were given"
+            )
+        )
+        _m._orig_verify = type_error_stub
+        try:
+            with _pytest.raises(TypeError):
+                type_error_stub(ca_certs)   # direct call -- confirms stub fires
+
+            # ── 3. _fixed_verify swallows TypeError from _orig_verify ──
+            fixed_verify(ca_certs)  # must NOT raise
+
+            # ── 4. _fixed_verify re-raises non-TypeError exceptions ──
+            _m._orig_verify = MagicMock(
+                side_effect=ValueError("some other verification error")
+            )
+            with _pytest.raises(ValueError, match="some other verification error"):
+                fixed_verify(ca_certs)
+        finally:
+            # ── 5. Restore the real _orig_verify ──
+            _m._orig_verify = real_orig
 
 
 # ── Test group 4: E2E with mock Client ────────────────────────────────────────
@@ -691,15 +730,34 @@ class TestEnvVarOverrideMatrix:
         return captured
 
     def test_scep_url_set_is_used(self):
-        """Test 22: SCEP_URL env var set after import is seen at call time."""
-        original = os.environ.get("SCEP_URL")
+        """Test 22: SCEP_URL env var is forwarded to Client(url) at call time.
+
+        Patches scep_enroll_zero.Client so the constructor records the url
+        argument, then asserts the recorded url matches SCEP_URL.
+        """
+        from unittest.mock import MagicMock, patch as mock_patch
+
+        captured_url = []
+
+        def fake_client(url):
+            captured_url.append(url)
+            raise RuntimeError("stop-after-url-capture")
+
+        original    = os.environ.get("SCEP_URL")
         original_pw = os.environ.get("SCEP_CHALLENGE_PASSWORD")
         try:
             os.environ["SCEP_URL"] = "https://custom.example.com/scep"
-            os.environ["SCEP_CHALLENGE_PASSWORD"] = "pw"  # avoid empty-pw error
-            # Calling do_enroll uses the env var set NOW, not at import time.
-            with pytest.raises(Exception):  # will fail at NDES call (no network)
-                _m.do_enroll()
+            os.environ["SCEP_CHALLENGE_PASSWORD"] = "pw"
+
+            with mock_patch.object(_m, "Client", side_effect=fake_client):
+                with pytest.raises(RuntimeError, match="stop-after-url-capture"):
+                    _m.do_enroll()
+
+            # The URL actually passed to Client must match SCEP_URL.
+            assert len(captured_url) == 1, "Client was not called"
+            assert captured_url[0] == "https://custom.example.com/scep", (
+                f"Expected custom URL but got: {captured_url[0]!r}"
+            )
         finally:
             if original is None:
                 os.environ.pop("SCEP_URL", None)

@@ -20,6 +20,59 @@ void setUp(void)    {}
 void tearDown(void) {}
 /* ------------------------------------------------------------------ */
 
+/*
+ * Rendezvous helper -- eliminates the fragile usleep(20000) races on the
+ * three "close unblocks a blocked thread" tests.
+ *
+ * Usage pattern:
+ *   Main thread:  rendezvous_init(&rv);
+ *   Worker thread: rendezvous_signal(&rv);  // BEFORE calling the blocking op
+ *                  <call blocking ring op>
+ *   Main thread:  rendezvous_wait(&rv);     // waits until worker is just about
+ *                                           // to block; then acts on the ring
+ *
+ * A 1 ms sleep after rendezvous_wait() gives the OS time to actually schedule
+ * the worker into the blocking syscall, shrinking the race window to ~1 ms
+ * (vs. 20 ms with the original plain usleep).
+ */
+typedef struct {
+    pthread_mutex_t mu;
+    pthread_cond_t  cv;
+    int             fired;
+} rendezvous_t;
+
+static void rendezvous_init(rendezvous_t *rv)
+{
+    pthread_mutex_init(&rv->mu, NULL);
+    pthread_cond_init(&rv->cv, NULL);
+    rv->fired = 0;
+}
+
+static void rendezvous_signal(rendezvous_t *rv)
+{
+    pthread_mutex_lock(&rv->mu);
+    rv->fired = 1;
+    pthread_cond_signal(&rv->cv);
+    pthread_mutex_unlock(&rv->mu);
+}
+
+static void rendezvous_wait(rendezvous_t *rv)
+{
+    pthread_mutex_lock(&rv->mu);
+    while (!rv->fired)
+        pthread_cond_wait(&rv->cv, &rv->mu);
+    pthread_mutex_unlock(&rv->mu);
+    /* Yield briefly so the OS actually schedules the worker into the blocking
+     * call before we act on the ring. */
+    usleep(1000);
+}
+
+static void rendezvous_destroy(rendezvous_t *rv)
+{
+    pthread_cond_destroy(&rv->cv);
+    pthread_mutex_destroy(&rv->mu);
+}
+
 /* --- ring_create edge cases --------------------------------------- */
 
 void test_ring_create_min_capacity(void)
@@ -106,12 +159,14 @@ void test_ring_wrap(void)
 
 /* --- Close unblocks a blocked receiver ----------------------------- */
 
-typedef struct { ring_t *r; int result; } recv_arg_t;
+typedef struct { ring_t *r; int result; rendezvous_t *rv; } recv_arg_t;
 
 static void *blocked_recv_thread(void *arg)
 {
     recv_arg_t *a = arg;
     uint8_t buf[4];
+    /* Signal the main thread that we are about to block, then block. */
+    rendezvous_signal(a->rv);
     a->result = ring_recv(a->r, buf, sizeof(buf));
     return NULL;
 }
@@ -121,14 +176,18 @@ void test_ring_close_unblocks_recv(void)
     ring_t *r = ring_create(16);
     TEST_ASSERT_NOT_NULL(r);
 
-    recv_arg_t arg = {.r = r, .result = 0};
+    rendezvous_t rv;
+    rendezvous_init(&rv);
+
+    recv_arg_t arg = {.r = r, .result = 0, .rv = &rv};
     pthread_t thr;
     pthread_create(&thr, NULL, blocked_recv_thread, &arg);
 
-    usleep(20000); /* let thread block */
+    rendezvous_wait(&rv); /* wait until worker is about to block, then proceed */
     ring_close(r);
 
     pthread_join(thr, NULL);
+    rendezvous_destroy(&rv);
     TEST_ASSERT_EQUAL_INT(-1, arg.result);
     ring_free(r);
 }
@@ -404,16 +463,20 @@ void test_ring_reopen_then_recv_blocks_for_new_data(void)
     ring_close(r);
     ring_reopen(r);
 
-    recv_arg_t arg = {.r = r, .result = 0};
+    rendezvous_t rv;
+    rendezvous_init(&rv);
+
+    recv_arg_t arg = {.r = r, .result = 0, .rv = &rv};
     pthread_t thr;
     pthread_create(&thr, NULL, blocked_recv_thread, &arg);
 
-    usleep(20000); /* let the recv thread block on an empty (open) ring */
+    rendezvous_wait(&rv); /* wait until thread is about to block */
 
     uint8_t tx[] = {'x', 'y', 'z'};
     TEST_ASSERT_EQUAL_INT(3, ring_send(r, tx, sizeof(tx)));
 
     pthread_join(thr, NULL);
+    rendezvous_destroy(&rv);
     TEST_ASSERT_EQUAL_INT(3, arg.result);
 
     ring_free(r);
@@ -763,14 +826,16 @@ void test_ring_blocking_send_unblocked_by_reader(void)
 /* Closing a ring that is full while a sender is blocked must unblock
  * the sender and return -1.                                          */
 typedef struct {
-    ring_t  *r;
-    int      result;
+    ring_t       *r;
+    int           result;
+    rendezvous_t *rv;
 } send_blocked_arg_t;
 
 static void *send_into_full_ring(void *arg)
 {
     send_blocked_arg_t *a = arg;
-    /* ring is already full when this thread starts */
+    /* Signal the main thread that we are about to block on the full ring. */
+    rendezvous_signal(a->rv);
     uint8_t extra = 0xFF;
     a->result = ring_send(a->r, &extra, 1);  /* should block, then return -1 */
     return NULL;
@@ -787,15 +852,19 @@ void test_ring_close_unblocks_blocked_sender(void)
     memset(fill, 0xAA, sizeof(fill));
     TEST_ASSERT_EQUAL_INT(8, ring_send(r, fill, 8));
 
+    rendezvous_t rv;
+    rendezvous_init(&rv);
+
     /* Launch a thread that will block trying to write one more byte */
-    send_blocked_arg_t sa = {.r = r, .result = 99};
+    send_blocked_arg_t sa = {.r = r, .result = 99, .rv = &rv};
     pthread_t thr;
     pthread_create(&thr, NULL, send_into_full_ring, &sa);
 
-    usleep(20000); /* let thread block on full ring */
+    rendezvous_wait(&rv); /* wait until sender is about to block, then close */
     ring_close(r);
 
     pthread_join(thr, NULL);
+    rendezvous_destroy(&rv);
     TEST_ASSERT_EQUAL_INT(-1, sa.result);
 
     ring_free(r);

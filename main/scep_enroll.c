@@ -176,7 +176,11 @@ esp_err_t scep_enroll(const char *scep_url,
         common_name = cn_buf;
 #endif
     }
-    ESP_LOGI(TAG, "SCEP enrollment starting: URL=%s CN=%s", scep_url, common_name);
+    /* Do NOT log full CN at INFO -- it contains the device MAC address and
+     * flows over the cleartext udp_log, enabling device tracking.  URL is a
+     * shared infrastructure value (not per-device) so it stays at INFO. */
+    ESP_LOGI(TAG, "SCEP enrollment starting: URL=%s", scep_url);
+    ESP_LOGD(TAG, "SCEP enrollment CN=%s", common_name);
 
     /* Heap-allocate working buffers in internal RAM.  Credential material
      * (dev_key_der, issued_cert) needs internal RAM; the cert snapshot
@@ -278,7 +282,9 @@ esp_err_t scep_enroll(const char *scep_url,
     size_t dev_key_der_len = (size_t)dev_key_der_len_i;
     memmove(dev_key_der, dev_key_der + CRED_DEV_KEY_MAX - dev_key_der_len,
             dev_key_der_len);
-    ESP_LOGI(TAG, "Private key DER: %zu B", dev_key_der_len);
+    /* Private-key size annotates key-lifecycle timing for an off-device
+     * observer; drop to LOGD. */
+    ESP_LOGD(TAG, "Private key DER: %zu B", dev_key_der_len);
 
     /* ------------------------------------------------------------------ */
     /* Step 4: Build self-signed transient cert (signer-info cert)         */
@@ -340,7 +346,10 @@ esp_err_t scep_enroll(const char *scep_url,
         ESP_LOGE(TAG, "scep_transaction_id failed: %d", ret);
         goto done;
     }
-    ESP_LOGI(TAG, "transactionID: %.16s...", txid);
+    /* transactionID is SHA-256(SPKI) -- a stable per-device identifier that
+     * an attacker observing the cleartext udp_log could correlate across
+     * boots.  Keep diagnostic visibility at LOGD only. */
+    ESP_LOGD(TAG, "transactionID: %.16s...", txid);
 
     /* ------------------------------------------------------------------ */
     /* Step 7: Build PKCSReq pkiMessage                                    */
@@ -478,14 +487,71 @@ esp_err_t scep_enroll(const char *scep_url,
     memcpy(creds.dev_cert, issued_cert_der, issued_cert_len);
     creds.dev_cert_len = issued_cert_len;
 
-    /* CA chain */
-    if (cab.ca_cert_len > CRED_CA_CHAIN_MAX) {
-        ESP_LOGW(TAG, "CA chain too large for store (%zu > %u) -- truncating",
-                 cab.ca_cert_len, CRED_CA_CHAIN_MAX);
-        cab.ca_cert_len = CRED_CA_CHAIN_MAX;
+    /* CA chain -- concatenate every distinct cert the bundle exposed so the
+     * RADIUS supplicant has the full path it needs.  In a 2-tier deployment
+     * the bundle's three pointers (ca, ra_sign, ra_encrypt) may alias; we
+     * dedup by DER content so the chain contains each unique cert exactly
+     * once.  Layout in ca_chain:  cert_1_der || cert_2_der || ...  (raw
+     * concatenation; consumers walk the buffer with mbedtls_x509_crt_parse
+     * which auto-detects DER boundaries via the outer SEQUENCE length).
+     *
+     * NOTE: in a 3-tier root->intermediate->issuing CA hierarchy the
+     * scep_parse_getcacert parser (lib/scep_proto -- out of this scope)
+     * returns only one CA pointer + the RA certs; additional intermediates
+     * present in the underlying PKCS#7 are NOT exposed by the bundle and
+     * therefore cannot be included here.  Fixing that requires extending
+     * the parser API.  Flagged. */
+    struct { const uint8_t *der; size_t len; } chain_certs[3] = {
+        { cab.ca_cert_der,         cab.ca_cert_len },
+        { cab.ra_sign_cert_der,    cab.ra_sign_cert_len },
+        { cab.ra_encrypt_cert_der, cab.ra_encrypt_cert_len },
+    };
+    size_t chain_off = 0;
+    for (size_t i = 0; i < sizeof(chain_certs)/sizeof(chain_certs[0]); i++) {
+        const uint8_t *cder = chain_certs[i].der;
+        size_t         clen = chain_certs[i].len;
+        if (!cder || clen == 0) continue;
+        /* Dedup against already-appended certs (pointer alias OR byte-equal). */
+        int already = 0;
+        size_t scan = 0;
+        while (scan < chain_off) {
+            /* DER cert begins with 0x30 (SEQUENCE) + length encoding.  We
+             * recompute the next cert's length by reading the ASN.1 length
+             * field rather than guessing.  Constant-time not required;
+             * this is non-secret CA material. */
+            if (scan + 1 > chain_off) break;
+            size_t hdr = 0, body = 0;
+            uint8_t b1 = creds.ca_chain[scan + 1];
+            if (b1 < 0x80) { hdr = 2; body = b1; }
+            else {
+                size_t n = b1 & 0x7F;
+                if (n == 0 || n > 4 || scan + 2 + n > chain_off) break;
+                hdr = 2 + n;
+                body = 0;
+                for (size_t k = 0; k < n; k++)
+                    body = (body << 8) | creds.ca_chain[scan + 2 + k];
+            }
+            size_t whole = hdr + body;
+            if (scan + whole > chain_off) break;
+            if (whole == clen && memcmp(&creds.ca_chain[scan], cder, clen) == 0) {
+                already = 1;
+                break;
+            }
+            scan += whole;
+        }
+        if (already) continue;
+        if (chain_off + clen > CRED_CA_CHAIN_MAX) {
+            ESP_LOGW(TAG, "CA chain too large for store (%zu + %zu > %u) -- "
+                          "truncating before cert %zu", chain_off, clen,
+                          CRED_CA_CHAIN_MAX, i);
+            break;
+        }
+        memcpy(creds.ca_chain + chain_off, cder, clen);
+        chain_off += clen;
     }
-    memcpy(creds.ca_chain, cab.ca_cert_der, cab.ca_cert_len);
-    creds.ca_chain_len = cab.ca_cert_len;
+    creds.ca_chain_len = chain_off;
+    ESP_LOGI(TAG, "CA chain assembled: %zu B (deduped from %d bundle slots)",
+             creds.ca_chain_len, 3);
 
     /* NotAfter */
     esp_err_t err = cred_store_parse_not_after(issued_cert_der, issued_cert_len,

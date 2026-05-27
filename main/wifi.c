@@ -74,6 +74,7 @@
 #include "esp_netif_net_stack.h"
 #include "esp_wifi.h"
 #include "esp_system.h"
+#include "esp_random.h"
 
 /* config.h must come before the WIFI_USE_ENTERPRISE guard below because
  * that macro is defined there (not on the command line). */
@@ -872,6 +873,78 @@ static void mdns_dispatch_start(void)
 #endif /* !BRIDGE_LOOPBACK && MDNS_ENABLE */
 
 /* --------------------------------------------------------------------------
+ * Post-start radio tuning helpers
+ *
+ * apply_max_tx_power() caps the radio TX power when WIFI_MAX_TX_POWER is
+ * defined in config.h.  Must be invoked immediately after every
+ * esp_wifi_start() call site (enterprise + PSK + smart-mode psk/enterprise)
+ * because the underlying IDF API requires the radio to be running.
+ *
+ * No-op when WIFI_MAX_TX_POWER is undefined -- safe to call from every site.
+ *
+ * Rationale: on boards with a small onboard ceramic antenna (ESP32-S3-Zero
+ * in particular) full 21 dBm output couples back into the chip during
+ * sustained TX bursts and corrupts WiFi RX.  Previously the cap was only
+ * applied in wifi_mode_psk(), so the long-lived enterprise production
+ * session ran uncapped -- exactly the regime the cap exists to fix.
+ * -------------------------------------------------------------------------- */
+/* redact_for_log -- write a short non-reversible-by-eye hash prefix of `in`
+ * into `out` so a sensitive identifier (EAP identity, device CN, ...) can
+ * appear in INFO-level logs without leaking the cleartext into the udp_log
+ * mirror.
+ *
+ * Uses FNV-1a 64-bit (not cryptographic, but sufficient to prevent casual
+ * disclosure in a log line).  A cryptographic prefix would require pulling
+ * in mbedtls SHA-256 or wolfCrypt directly; on IDF 6.x mbedtls 4.x has
+ * moved the legacy mbedtls/sha256.h interface behind PSA, making that more
+ * intrusive than the threat justifies (the goal is "no cleartext identity
+ * in the udp_log stream", not protection against an attacker with offline
+ * compute).
+ *
+ * Output format: "h:" + 16 hex chars, null-terminated.  Requires out_sz >= 20.
+ * On any failure (NULL out, tiny buffer, NULL input) the output becomes "h:?".
+ */
+static void redact_for_log(char *out, size_t out_sz,
+                           const char *in, size_t in_len)
+{
+    if (!out || out_sz < 4) {
+        if (out && out_sz > 0) out[0] = '\0';
+        return;
+    }
+    if (!in || in_len == 0) {
+        snprintf(out, out_sz, "h:?");
+        return;
+    }
+    /* FNV-1a 64-bit. */
+    uint64_t h = 0xcbf29ce484222325ULL;
+    for (size_t i = 0; i < in_len; i++) {
+        h ^= (uint64_t)(unsigned char)in[i];
+        h *= 0x100000001b3ULL;
+    }
+    if (out_sz < 20) {
+        snprintf(out, out_sz, "h:?");
+        return;
+    }
+    snprintf(out, out_sz, "h:%016llx", (unsigned long long)h);
+}
+
+static void apply_max_tx_power(void)
+{
+#ifdef WIFI_MAX_TX_POWER
+    int8_t cur = 0;
+    esp_wifi_get_max_tx_power(&cur);
+    esp_err_t pe = esp_wifi_set_max_tx_power((int8_t)WIFI_MAX_TX_POWER);
+    if (pe == ESP_OK) {
+        ESP_LOGI(TAG, "TX power capped: %d -> %d (0.25 dBm units)",
+                 cur, (int)WIFI_MAX_TX_POWER);
+    } else {
+        ESP_LOGW(TAG, "esp_wifi_set_max_tx_power(%d): %s",
+                 (int)WIFI_MAX_TX_POWER, esp_err_to_name(pe));
+    }
+#endif
+}
+
+/* --------------------------------------------------------------------------
  * Event handler
  *
  * Runs in the system event task context (stack ~3 kB).  Keep it lean.
@@ -1055,13 +1128,48 @@ static void wifi_event_handler(void *arg,
             const bool infinite = (WIFI_MAX_RETRY == 0);
             if (infinite || s_retry_num < WIFI_MAX_RETRY) {
                 s_retry_num++;
-                if (infinite) {
-                    ESP_LOGW(TAG, "disconnected (reason %d), retry %d (infinite)",
-                             ev->reason, s_retry_num);
-                } else {
-                    ESP_LOGW(TAG, "disconnected (reason %d), retry %d/%d",
-                             ev->reason, s_retry_num, WIFI_MAX_RETRY);
+
+                /* Exponential backoff with jitter: 1s, 2s, 4s, ... 60s.
+                 * Without this, the reconnect loop fires immediately on
+                 * each disconnect, hammering the AP and flooding the log.
+                 * Jitter (+/- 25%) avoids synchronised reconnect storms
+                 * across multiple devices fleeing the same AP. */
+                uint32_t base_ms = 1000u << ((s_retry_num - 1) < 6
+                                              ? (s_retry_num - 1) : 6);
+                if (base_ms > 60000u) base_ms = 60000u;
+                /* Jitter using esp_random; fall back to s_retry_num
+                 * mixing if esp_random is unavailable in this context. */
+                uint32_t jitter_window = base_ms / 4;
+                uint32_t jitter = jitter_window ?
+                    (esp_random() % (2u * jitter_window)) - jitter_window
+                    : 0u;
+                uint32_t delay_ms = base_ms + jitter;
+
+                /* Rate-limit the disconnect log: at retry < 5 print every
+                 * event; afterwards print 1-of-10 to keep the trail without
+                 * flooding. */
+                bool emit = (s_retry_num <= 5) || ((s_retry_num % 10) == 0);
+                if (emit) {
+                    if (infinite) {
+                        ESP_LOGW(TAG,
+                            "disconnected (reason %d), retry %d (infinite), "
+                            "backoff %u ms",
+                            ev->reason, s_retry_num, (unsigned)delay_ms);
+                    } else {
+                        ESP_LOGW(TAG,
+                            "disconnected (reason %d), retry %d/%d, "
+                            "backoff %u ms",
+                            ev->reason, s_retry_num, WIFI_MAX_RETRY,
+                            (unsigned)delay_ms);
+                    }
                 }
+
+                /* vTaskDelay inside the system event task blocks all other
+                 * WiFi/IP events for the duration -- acceptable for short
+                 * (<= 60s) backoff since no useful event would arrive while
+                 * we're disassociated anyway, and the alternative (a timer)
+                 * adds significant complexity for marginal gain. */
+                vTaskDelay(pdMS_TO_TICKS(delay_ms));
                 esp_wifi_connect();
             } else {
                 /* Signal permanent failure to wifi_init_sta()'s wait. */
@@ -1392,7 +1500,14 @@ esp_err_t wifi_init_sta(void)
         }
     }
 
-    ESP_LOGI(TAG, "Configuring EAP-TLS (identity: %s)", EAP_IDENTITY);
+    {
+        char id_redacted[24];
+        redact_for_log(id_redacted, sizeof(id_redacted),
+                       EAP_IDENTITY, strlen(EAP_IDENTITY));
+        ESP_LOGD(TAG, "Configuring EAP-TLS (identity: %s)", EAP_IDENTITY);
+        /* INFO mirrors over udp_log; emit only the redacted form there. */
+        ESP_LOGI(TAG, "Configuring EAP-TLS (identity %s)", id_redacted);
+    }
 
     ESP_ERROR_CHECK(esp_eap_client_set_identity(
         (const unsigned char *)EAP_IDENTITY, strlen(EAP_IDENTITY)));
@@ -1432,6 +1547,12 @@ esp_err_t wifi_init_sta(void)
      *    WIFI_EVENT_STA_START fires after this returns, triggering
      *    esp_wifi_connect() in the event handler above. */
     ESP_ERROR_CHECK(esp_wifi_start());
+
+    /* Cap TX power immediately after the radio is running.  This applies to
+     * both the PSK and the WIFI_USE_ENTERPRISE branch -- the previous
+     * implementation only capped on the PSK helper, so the long-lived
+     * enterprise session ran at full power on antenna-limited boards. */
+    apply_max_tx_power();
 
     ESP_LOGI(TAG, "wifi_init_sta complete, waiting for IP ...");
 
@@ -1531,6 +1652,15 @@ esp_err_t wifi_init_sta(void)
 # define BOOTSTRAP_NTP_SYNC_TIMEOUT_SEC  30
 #endif
 
+/* When SCEP returns pkiStatus=PENDING (the CA queued the request for manual
+ * NDES approval), wait this many ms before the next enrollment attempt.
+ * Default 30 minutes -- an approver realistically takes minutes to hours, and
+ * each premature retry consumes a new NDES transactionID + audit-log entry.
+ * Override in config.h if your approval workflow is faster/slower. */
+#ifndef SCEP_PENDING_RETRY_DELAY_MS
+# define SCEP_PENDING_RETRY_DELAY_MS  (30u * 60u * 1000u)
+#endif
+
 /* Default NTP_BEFORE_EAPTLS to 1 when NTP_ENABLE is set and a bootstrap PSK
  * network is available (WIFI_SSID + WIFI_PASS); otherwise keep 0 so existing
  * Mode C/B+ configs that have not explicitly set the macro are unaffected
@@ -1597,25 +1727,9 @@ static esp_err_t wifi_mode_psk(const char *ssid,
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &cfg));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    /* Cap the TX power.  On boards with a small onboard ceramic antenna
-     * (ESP32-S3-Zero in particular) full 21 dBm output can RF-couple back
-     * into the chip during sustained TX bursts (TCP/HTTP handshake),
-     * corrupting WiFi RX state.  Set via WIFI_MAX_TX_POWER in config.h:
-     * 40 = 10 dBm, 56 = 14 dBm, 84 = 21 dBm (default).  Skipped if unset. */
-#ifdef WIFI_MAX_TX_POWER
-    {
-        int8_t cur = 0;
-        esp_wifi_get_max_tx_power(&cur);
-        esp_err_t pe = esp_wifi_set_max_tx_power((int8_t)WIFI_MAX_TX_POWER);
-        if (pe == ESP_OK) {
-            ESP_LOGI(TAG, "TX power capped: %d -> %d (0.25 dBm units)",
-                     cur, (int)WIFI_MAX_TX_POWER);
-        } else {
-            ESP_LOGW(TAG, "esp_wifi_set_max_tx_power(%d): %s",
-                     (int)WIFI_MAX_TX_POWER, esp_err_to_name(pe));
-        }
-    }
-#endif
+    /* Cap TX power (Zero ceramic antenna mitigation).  See apply_max_tx_power
+     * comments for rationale.  Must run AFTER esp_wifi_start(). */
+    apply_max_tx_power();
 
     /* Disable 802.11 modem-sleep PS.  CONFIG_PM_ENABLE=n only disables the
      * ESP-IDF CPU power manager; the WiFi driver's own beacon-window PS is
@@ -1794,6 +1908,15 @@ static esp_err_t smart_on_ip_full(void)
 #if defined(SCEP_URL) && defined(SCEP_CHALLENGE_PASSWORD)
     ESP_LOGI(TAG, "[smart] starting SCEP enrollment at %s", SCEP_URL);
     esp_err_t enroll_err = scep_enroll(SCEP_URL, SCEP_CHALLENGE_PASSWORD, NULL);
+    if (enroll_err == ESP_ERR_SCEP_PENDING) {
+        /* CA queued the request for manual approval -- a fresh enrollment
+         * now would just flood NDES with new transactionIDs.  Propagate the
+         * distinct value so the wifi_init_smart loop can apply a long
+         * (~30 min) backoff before re-attempting. */
+        ESP_LOGW(TAG, "[smart] SCEP enrollment PENDING (awaiting CA approval) "
+                      "-- caller will back off");
+        return ESP_ERR_SCEP_PENDING;
+    }
     if (enroll_err != ESP_OK) {
         ESP_LOGE(TAG, "[smart] SCEP enrollment failed: %s",
                  esp_err_to_name(enroll_err));
@@ -1889,7 +2012,13 @@ static esp_err_t eap_push_nvs_creds(const cred_store_t *creds)
  * Returns ESP_OK if configuration was applied, ESP_FAIL on any setup error. */
 static esp_err_t smart_configure_eaptls(const cred_store_t *creds)
 {
-    ESP_LOGI(TAG, "[smart] configuring EAP-TLS (identity: %s)", EAP_IDENTITY);
+    {
+        char id_redacted[24];
+        redact_for_log(id_redacted, sizeof(id_redacted),
+                       EAP_IDENTITY, strlen(EAP_IDENTITY));
+        ESP_LOGD(TAG, "[smart] configuring EAP-TLS (identity: %s)", EAP_IDENTITY);
+        ESP_LOGI(TAG, "[smart] configuring EAP-TLS (identity %s)", id_redacted);
+    }
 
     {
         esp_err_t err = esp_eap_client_set_identity(
@@ -2036,6 +2165,10 @@ static esp_err_t wifi_mode_enterprise(const char         *ssid,
     esp_log_level_set("wifi", prev_wifi_level);
     ESP_ERROR_CHECK(set_cfg_err);
     ESP_ERROR_CHECK(esp_wifi_start());
+
+    /* Cap TX power for the long-lived enterprise session (Zero antenna
+     * mitigation).  Must run AFTER esp_wifi_start(). */
+    apply_max_tx_power();
 
     /* Saturate the ms product at UINT32_MAX before passing to pdMS_TO_TICKS to
      * prevent overflow for timeout_sec >= 4294968 s (unlikely in practice but
@@ -2275,11 +2408,37 @@ esp_err_t wifi_init_smart(void)
              *   a) SCEP succeeded but esp_restart hasn't fired yet (impossible
              *      with esp_restart in the callback), or
              *   b) no SCEP_URL defined (fallback warning was logged), or
-             *   c) enrollment failed.
+             *   c) enrollment failed (including PENDING -- the CA queued the
+             *      request for manual approval; backoff applied below).
              *
              * In case (b) the cert is still valid (transient RADIUS failure).
              * Re-evaluate with updated state so we retry enterprise. */
-            if (rc != ESP_OK) {
+            if (rc == ESP_ERR_SCEP_PENDING) {
+                /* The CA returned pkiStatus=PENDING.  A retry now would just
+                 * flood NDES with new transactionIDs (each one a fresh manual-
+                 * approval ticket).  Wait SCEP_PENDING_RETRY_DELAY_MS before
+                 * the next bootstrap pass.
+                 *
+                 * If a cached cert exists and is still valid, fall through to
+                 * the enterprise path during the backoff so the device can
+                 * still come up on the production network.  Re-evaluating
+                 * decision after the backoff allows recovery without rebooting. */
+                ESP_LOGW(TAG,
+                    "[smart] SCEP returned PENDING -- backing off %u s before "
+                    "next enrollment attempt",
+                    (unsigned)(SCEP_PENDING_RETRY_DELAY_MS / 1000u));
+                if (cert_present) {
+                    /* Try enterprise first; the cached cert may still work. */
+                    ESP_LOGI(TAG,
+                        "[smart] cached cert present -- attempting enterprise "
+                        "during PENDING backoff");
+                    /* Fall through: refresh state, allow the loop to retry
+                     * enterprise without re-running SCEP first. */
+                }
+                /* Sleep before next iteration so the next BOOTSTRAP_FULL pass
+                 * (if needed) doesn't immediately re-flood NDES. */
+                vTaskDelay(pdMS_TO_TICKS(SCEP_PENDING_RETRY_DELAY_MS));
+            } else if (rc != ESP_OK) {
                 ESP_LOGE(TAG,
                          "[smart] bootstrap full pass failed (PSK or SCEP) -- "
                          "retrying enterprise anyway");

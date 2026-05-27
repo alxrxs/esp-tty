@@ -58,9 +58,11 @@ static const char *TAG = "ota_session";
 #define OTA_TAG_LEN         16
 #define OTA_AES_KEY_LEN     32
 
-/* Hard cap on plaintext firmware size.  ota_0 / ota_1 are ~4 MiB; we cap
- * below the 8 MiB PSRAM ceiling so the ciphertext buffer fits. */
-#define MAX_OTA_PLAINTEXT   (4u * 1024u * 1024u)
+/* Plaintext size is validated against the ACTUAL target OTA slot at runtime
+ * (see lookup of `next` below).  The Zero board ships a 1.94 MiB ota slot;
+ * the DevKitC-1 ships ~4 MiB.  Validating against the partition size avoids
+ * accepting a size that would exhaust PSRAM (DoS) or overflow flash on
+ * smaller boards. */
 
 /* Idle / channel-dead detection: WS_WANT_READ retries with a 10 ms delay,
  * capped at MAX_READ_RETRIES = 3000 retries * 10 ms = 30 s total idle timeout.
@@ -149,6 +151,18 @@ esp_err_t ota_session_handler(WOLFSSH *ssh)
     uint8_t      *ciphertext = NULL;
     esp_ota_handle_t ota_handle = 0;
     bool          ota_began = false;
+
+    /* Resolve the target OTA slot up front so plaintext_len can be bounded
+     * against the actual flash region before any PSRAM allocation.  Without
+     * this guard a malicious client could pass a multi-MiB plaintext_len and
+     * either OOM the device or pin all PSRAM for the ~30 s read window. */
+    const esp_partition_t *next = esp_ota_get_next_update_partition(NULL);
+    if (!next) {
+        ESP_LOGE(TAG, "no next OTA partition");
+        send_failure(ssh, "no ota partition");
+        return ESP_FAIL;
+    }
+    const uint32_t max_plaintext = (uint32_t)next->size;
 
     /* ---- 1. Generate ephemeral device keypair ---------------------- */
     rc = wc_InitRng(&rng);
@@ -261,9 +275,11 @@ esp_err_t ota_session_handler(WOLFSSH *ssh)
                            | ((uint32_t)len_buf[2] << 16)
                            | ((uint32_t)len_buf[3] << 24);
 
-    if (plaintext_len == 0 || plaintext_len > MAX_OTA_PLAINTEXT) {
-        ESP_LOGE(TAG, "bad plaintext_len: %u", (unsigned)plaintext_len);
-        send_failure(ssh, "bad plaintext length");
+    if (plaintext_len == 0 || plaintext_len > max_plaintext) {
+        ESP_LOGE(TAG, "bad plaintext_len: %u (max=%u for target slot %s)",
+                 (unsigned)plaintext_len, (unsigned)max_plaintext,
+                 next->label);
+        send_failure(ssh, "image too large");
         zeroize(aes_key, sizeof(aes_key));
         goto out;
     }
@@ -328,13 +344,8 @@ esp_err_t ota_session_handler(WOLFSSH *ssh)
              (unsigned)plaintext_len);
 
     /* ---- 8. Stream plaintext to inactive OTA slot ------------------ */
-    const esp_partition_t *next = esp_ota_get_next_update_partition(NULL);
-    if (!next) {
-        ESP_LOGE(TAG, "no next OTA partition");
-        send_failure(ssh, "no ota partition");
-        goto out;
-    }
-
+    /* `next` was resolved at session start so plaintext_len could be
+     * bounded against the actual slot size before any allocation. */
     if (esp_ota_begin(next, plaintext_len, &ota_handle) != ESP_OK) {
         ESP_LOGE(TAG, "esp_ota_begin failed");
         send_failure(ssh, "ota begin failed");

@@ -85,9 +85,14 @@ esp_err_t cred_store_load(cred_store_t *out);
 /*
  * cred_store_save -- write all four credential items to NVS atomically.
  *
- * Writes each blob then calls nvs_commit once at the end.  Callers should
- * treat any non-ESP_OK return as a partial-write failure and call
- * cred_store_clear() before retrying.
+ * Atomicity is provided by a "valid marker" key written LAST plus a schema
+ * version byte.  See the implementation comment in cred_store.c for the
+ * full write/commit sequence.  Effective guarantee: a power loss at any
+ * point during save() leaves the next cred_store_load() returning
+ * ESP_ERR_NVS_NOT_FOUND (never a partial credential set).
+ *
+ * Callers should treat any non-ESP_OK return as a partial-write failure
+ * and call cred_store_clear() before retrying.
  */
 esp_err_t cred_store_save(const cred_store_t *in);
 

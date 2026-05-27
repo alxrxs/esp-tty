@@ -148,6 +148,13 @@ esp_err_t cred_store_parse_not_before(const uint8_t *cert_der,
 #define CRED_KEY_DEV_CERT    "dev_cert"
 #define CRED_KEY_CA_CHAIN    "ca_chain"
 #define CRED_KEY_NOT_AFTER   "not_after"
+/* Schema-version + valid-marker keys.  See cred_store_save() for the write
+ * order and atomicity guarantee.  Bump CRED_SCHEMA_VERSION when the on-disk
+ * layout of any of the above blobs changes; cred_store_load() rejects any
+ * mismatched value to force a fresh re-enrollment. */
+#define CRED_KEY_VALID       "valid_v1"   /* uint8 == 1 iff save completed */
+#define CRED_KEY_SCHEMA      "schema_ver" /* uint8 schema version */
+#define CRED_SCHEMA_VERSION  1u
 
 esp_err_t cred_store_load(cred_store_t *out)
 {
@@ -160,6 +167,32 @@ esp_err_t cred_store_load(cred_store_t *out)
         /* Namespace doesn't exist yet -> not yet enrolled. */
         ESP_LOGD(TAG, "nvs_open(\"%s\") failed: %s -- not enrolled",
                  CRED_NVS_NS, esp_err_to_name(err));
+        return ESP_ERR_NVS_NOT_FOUND;
+    }
+
+    /* Step 1: read the valid marker FIRST.  cred_store_save() writes this
+     * key LAST (after all blobs are committed) and cred_store_clear() erases
+     * it FIRST.  If a power-fail interrupted a save mid-blob the marker is
+     * absent => treat the entire store as not-enrolled. */
+    uint8_t valid = 0;
+    err = nvs_get_u8(h, CRED_KEY_VALID, &valid);
+    if (err != ESP_OK || valid != 1) {
+        ESP_LOGD(TAG, "valid marker absent/invalid (%s, v=%u) -- not enrolled",
+                 esp_err_to_name(err), (unsigned)valid);
+        nvs_close(h);
+        return ESP_ERR_NVS_NOT_FOUND;
+    }
+
+    /* Step 2: schema version must match.  A mismatch indicates rollback to
+     * an older firmware that wrote a different blob layout; refuse and force
+     * re-enrollment instead of mis-parsing. */
+    uint8_t schema = 0;
+    err = nvs_get_u8(h, CRED_KEY_SCHEMA, &schema);
+    if (err != ESP_OK || schema != CRED_SCHEMA_VERSION) {
+        ESP_LOGW(TAG, "schema version mismatch (got %u, expected %u): %s -- "
+                       "forcing re-enrollment", (unsigned)schema,
+                 (unsigned)CRED_SCHEMA_VERSION, esp_err_to_name(err));
+        nvs_close(h);
         return ESP_ERR_NVS_NOT_FOUND;
     }
 
@@ -213,11 +246,45 @@ esp_err_t cred_store_save(const cred_store_t *in)
         return err;
     }
 
+    /* Atomicity scheme (REAL, not assumed):
+     *
+     * ESP-IDF NVS does NOT batch multiple nvs_set_blob calls into one atomic
+     * page write -- each nvs_set_blob marks its own entry as written before
+     * nvs_commit() flushes the page header.  A power loss between two
+     * nvs_set_blob calls therefore leaves a partial credential set.
+     *
+     * To make save() atomic from the reader's point of view we:
+     *   1. ERASE the valid marker first  -- if the writer crashes hereafter,
+     *      load() will see no marker and return NOT_FOUND.  Old credential
+     *      blobs may still be on flash but are unreachable through load().
+     *   2. Commit that erase before writing any new blobs.  This is the key
+     *      step: it pins "creds are invalid" durably before we start mutating
+     *      them.  A power loss now leaves a recoverable not-enrolled state.
+     *   3. Write all four blobs + schema version.
+     *   4. Commit them together (NVS batches up to the next commit).
+     *   5. Write the valid marker LAST and commit.  A power loss between
+     *      step 4 and step 5 still leaves the marker absent -> NOT_FOUND.
+     *      Only a power loss strictly after step 5's commit reveals the new
+     *      credentials, atomically. */
+
+    /* Step 1+2: invalidate first, commit. */
+    err = nvs_erase_key(h, CRED_KEY_VALID);
+    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGE(TAG, "nvs_erase_key(valid): %s", esp_err_to_name(err));
+        goto save_fail;
+    }
+    err = nvs_commit(h);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_commit(invalidate): %s", esp_err_to_name(err));
+        goto save_fail;
+    }
+
 #define SET_BLOB(key, ptr, len) do { \
     err = nvs_set_blob(h, (key), (ptr), (len)); \
     if (err != ESP_OK) { ESP_LOGE(TAG, "nvs_set_blob(%s): %s", (key), esp_err_to_name(err)); goto save_fail; } \
 } while(0)
 
+    /* Step 3: write blobs + schema. */
     SET_BLOB(CRED_KEY_DEV_KEY,  in->dev_key,  in->dev_key_len);
     SET_BLOB(CRED_KEY_DEV_CERT, in->dev_cert, in->dev_cert_len);
     SET_BLOB(CRED_KEY_CA_CHAIN, in->ca_chain, in->ca_chain_len);
@@ -227,17 +294,28 @@ esp_err_t cred_store_save(const cred_store_t *in)
         ESP_LOGE(TAG, "nvs_set_u64(not_after): %s", esp_err_to_name(err));
         goto save_fail;
     }
+    err = nvs_set_u8(h, CRED_KEY_SCHEMA, (uint8_t)CRED_SCHEMA_VERSION);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_set_u8(schema): %s", esp_err_to_name(err));
+        goto save_fail;
+    }
 
-    /* nvs_commit() is atomic at the flash-page level: all four keys above are
-     * in the NVS write cache and become durable together in a single page
-     * write.  A power loss before nvs_commit() leaves the flash unchanged
-     * (prior credentials, if any, remain intact).  A power loss *after*
-     * nvs_commit() completes atomically persists all four keys or none.
-     * There is no window where the device can boot with a partially-written
-     * credential set from this call. */
+    /* Step 4: commit blobs (marker still absent at this point). */
     err = nvs_commit(h);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "nvs_commit failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "nvs_commit(blobs): %s", esp_err_to_name(err));
+        goto save_fail;
+    }
+
+    /* Step 5: write + commit the valid marker last. */
+    err = nvs_set_u8(h, CRED_KEY_VALID, 1);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_set_u8(valid): %s", esp_err_to_name(err));
+        goto save_fail;
+    }
+    err = nvs_commit(h);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_commit(valid): %s", esp_err_to_name(err));
         goto save_fail;
     }
 
@@ -264,6 +342,23 @@ esp_err_t cred_store_clear(void)
         return err;
     }
 
+    /* Erase the valid marker first (and commit) so that even if the
+     * subsequent erase_all is interrupted by a power loss, load() returns
+     * NOT_FOUND on the next boot. */
+    esp_err_t erase_err = nvs_erase_key(h, CRED_KEY_VALID);
+    if (erase_err != ESP_OK && erase_err != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGE(TAG, "nvs_erase_key(valid): %s", esp_err_to_name(erase_err));
+        nvs_close(h);
+        return erase_err;
+    }
+    err = nvs_commit(h);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_commit(invalidate during clear): %s",
+                 esp_err_to_name(err));
+        nvs_close(h);
+        return err;
+    }
+
     err = nvs_erase_all(h);
     if (err == ESP_OK) err = nvs_commit(h);
     nvs_close(h);
@@ -285,12 +380,15 @@ esp_err_t cred_store_clear(void)
  * ========================================================================== */
 
 static cred_store_t s_mem_store;
-static int          s_mem_present = 0;
+static uint8_t      s_mem_valid     = 0;  /* mirrors CRED_KEY_VALID */
+static uint8_t      s_mem_schema    = 0;  /* mirrors CRED_KEY_SCHEMA */
+#define CRED_SCHEMA_VERSION  1u
 
 esp_err_t cred_store_load(cred_store_t *out)
 {
     if (!out) return ESP_ERR_INVALID_ARG;
-    if (!s_mem_present) return ESP_ERR_NVS_NOT_FOUND;
+    if (s_mem_valid != 1) return ESP_ERR_NVS_NOT_FOUND;
+    if (s_mem_schema != (uint8_t)CRED_SCHEMA_VERSION) return ESP_ERR_NVS_NOT_FOUND;
     memcpy(out, &s_mem_store, sizeof(*out));
     return ESP_OK;
 }
@@ -298,16 +396,43 @@ esp_err_t cred_store_load(cred_store_t *out)
 esp_err_t cred_store_save(const cred_store_t *in)
 {
     if (!in) return ESP_ERR_INVALID_ARG;
+    /* Mirror the device write ordering: invalidate marker, then blobs, then
+     * marker.  The native backend is single-threaded so the ordering only
+     * matters for test fault-injection (see _testhook_*). */
+    s_mem_valid = 0;
     memcpy(&s_mem_store, in, sizeof(s_mem_store));
-    s_mem_present = 1;
+    s_mem_schema = (uint8_t)CRED_SCHEMA_VERSION;
+    s_mem_valid  = 1;
     return ESP_OK;
 }
 
 esp_err_t cred_store_clear(void)
 {
+    s_mem_valid  = 0;       /* marker first */
+    s_mem_schema = 0;
     zeroize(&s_mem_store, sizeof(s_mem_store));
-    s_mem_present = 0;
     return ESP_OK;
+}
+
+/* Test-only fault injectors -- simulate a power-fail in the middle of
+ * cred_store_save() and a schema-version-only rollback.  Not declared in
+ * cred_store.h to keep the public API clean; tests forward-declare. */
+void cred_store_testhook_partial_write(const cred_store_t *in)
+{
+    /* Blobs written + committed (step 4) but valid marker NEVER set (step 5
+     * power-fail).  load() must return NOT_FOUND. */
+    if (!in) return;
+    s_mem_valid = 0;
+    memcpy(&s_mem_store, in, sizeof(s_mem_store));
+    s_mem_schema = (uint8_t)CRED_SCHEMA_VERSION;
+    /* deliberately DO NOT set s_mem_valid */
+}
+
+void cred_store_testhook_force_schema(uint8_t schema)
+{
+    /* Pretend a previous firmware wrote a different schema version.  load()
+     * must return NOT_FOUND to force re-enrollment. */
+    s_mem_schema = schema;
 }
 
 #endif /* CRED_STORE_NATIVE_TEST */

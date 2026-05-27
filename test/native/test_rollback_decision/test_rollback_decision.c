@@ -73,15 +73,32 @@ void test_pending_verify_is_distinct_from_zero(void)
     TEST_ASSERT_NOT_EQUAL(0, (int)ESP_OTA_IMG_PENDING_VERIFY);
 }
 
-/* Only PENDING_VERIFY is MARK_VALID -- enum constants have the right values. */
-void test_enum_values_match_esp_idf_spec(void)
+/*
+ * Verify that the test-stub enum values match the REAL ESP-IDF constants from
+ * components/app_update/include/esp_ota_ops.h (ESP-IDF 5.x/6.x).
+ *
+ * Expected values are HARDCODED integer literals here.  If the stub enum in
+ * rollback_decision.h drifts from these literals the test fails.  This breaks
+ * the circularity: previously the test asserted the stub against itself.
+ *
+ * ESP-IDF source reference (esp_ota_ops.h):
+ *   ESP_OTA_IMG_NEW            = 0x0
+ *   ESP_OTA_IMG_PENDING_VERIFY = 0x1
+ *   ESP_OTA_IMG_VALID          = 0x2
+ *   ESP_OTA_IMG_INVALID        = 0x3
+ *   ESP_OTA_IMG_ABORTED        = 0x4
+ *   ESP_OTA_IMG_UNDEFINED      = 0xFFFFFFFF
+ */
+void test_stub_enum_values_match_idf_5x_header(void)
 {
-    TEST_ASSERT_EQUAL_INT(0x0,        (int)ESP_OTA_IMG_NEW);
-    TEST_ASSERT_EQUAL_INT(0x1,        (int)ESP_OTA_IMG_PENDING_VERIFY);
-    TEST_ASSERT_EQUAL_INT(0x2,        (int)ESP_OTA_IMG_VALID);
-    TEST_ASSERT_EQUAL_INT(0x3,        (int)ESP_OTA_IMG_INVALID);
-    TEST_ASSERT_EQUAL_INT(0x4,        (int)ESP_OTA_IMG_ABORTED);
-    TEST_ASSERT_EQUAL_INT((int)0xFFFFFFFF, (int)ESP_OTA_IMG_UNDEFINED);
+    /* Each comparison is: (literal from IDF header) == (stub enum value).
+     * If either drifts, the test fails. */
+    TEST_ASSERT_EQUAL_INT(0,          (int)ESP_OTA_IMG_NEW);
+    TEST_ASSERT_EQUAL_INT(1,          (int)ESP_OTA_IMG_PENDING_VERIFY);
+    TEST_ASSERT_EQUAL_INT(2,          (int)ESP_OTA_IMG_VALID);
+    TEST_ASSERT_EQUAL_INT(3,          (int)ESP_OTA_IMG_INVALID);
+    TEST_ASSERT_EQUAL_INT(4,          (int)ESP_OTA_IMG_ABORTED);
+    TEST_ASSERT_EQUAL_INT(-1,         (int)ESP_OTA_IMG_UNDEFINED); /* 0xFFFFFFFF as int */
 }
 
 /* VALID does NOT accidentally equal PENDING_VERIFY. */
@@ -139,7 +156,7 @@ int main(void)
     RUN_TEST(test_out_of_range_int_returns_noop);
     RUN_TEST(test_pending_verify_is_distinct_from_zero);
     /* Additional boundary / regression cases */
-    RUN_TEST(test_enum_values_match_esp_idf_spec);
+    RUN_TEST(test_stub_enum_values_match_idf_5x_header);
     RUN_TEST(test_valid_not_equal_pending_verify);
     RUN_TEST(test_pending_verify_idempotent);
     RUN_TEST(test_mark_valid_states);

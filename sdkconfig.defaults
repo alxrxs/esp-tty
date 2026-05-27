@@ -156,6 +156,17 @@ CONFIG_MBEDTLS_HARDWARE_MPI=y
 # NOTE: Do NOT enable MBEDTLS_HARDWARE_GCM -- S3 has no dedicated GCM engine.
 # NOTE: Do NOT enable MBEDTLS_HARDWARE_ECC -- not present on S3.
 
+# -- Partition table -------------------------------------------------------
+# This project uses an OTA partition layout (partitions.csv ships ota_0 +
+# ota_1).  Pin the Kconfig keys here so the generated sdkconfig.<env> does
+# not silently regress to the IDF default of SINGLE_APP -- any future IDF
+# version that gates rollback / OTA logic on CONFIG_PARTITION_TABLE_SINGLE_APP
+# would otherwise break.  The Zero overlay redirects the filename to
+# partitions_zero.csv; the OTA structure is the same.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
 # -- OTA / bootloader ------------------------------------------------------
 # Rollback enable: new OTA image boots in PENDING_VERIFY state.
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y

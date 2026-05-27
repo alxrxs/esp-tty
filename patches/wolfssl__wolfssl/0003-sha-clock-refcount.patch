@@ -1,0 +1,79 @@
+Refcount the SHA peripheral-clock enable/disable so the lockDepth-driven
+unroll in esp_sha_try_hw_lock() cannot disable the SHA clock while another
+live SHA context (e.g. a concurrent OTA HMAC alongside the SSH session
+SHA-512) still depends on it.
+
+IDF 5.x's periph_module_enable/disable was internally refcounted via
+periph_ctrl.c's ref_counts[periph] table.  IDF 6.x's
+esp_crypto_sha_enable_periph_clk() is NOT refcounted -- each call
+unconditionally gates the clock.  Restore the refcounted semantics with
+an _Atomic int wrapper local to esp32_sha.c.
+
+The wrapper does NOT replace the existing sha_mutex (which serialises
+HW use to one ctx at a time during update/final).  It only protects the
+clock-gate window so a stray disable cannot land while a separate ctx
+still has the clock turned on.
+--- a/wolfcrypt/src/port/Espressif/esp32_sha.c
++++ b/wolfcrypt/src/port/Espressif/esp32_sha.c
+@@ -61,6 +61,34 @@
+  * hal/clk_gate_ll.h is no longer in the public include path for SHA. */
+ #include "esp_crypto_periph_clk.h" /* IDF 6: sha enable/disable */
+ 
++/* IDF 6 dropped the internal refcount that periph_module_enable/disable
++ * provided in IDF 5.x.  esp_crypto_sha_enable_periph_clk(false) now gates
++ * the SHA clock unconditionally on every call, so the lockDepth-driven
++ * unroll loop in esp_sha_try_hw_lock() can disable the peripheral that
++ * another live SHA context (e.g. an OTA HMAC alongside the SSH session's
++ * SHA-512) still depends on.  Restore refcounted semantics with a thin
++ * atomic wrapper.  Used in place of bare esp_crypto_sha_enable_periph_clk
++ * everywhere in this file. */
++#include <stdatomic.h>
++static _Atomic int s_esp_tty_sha_clk_refcount = 0;
++static inline void esp_tty_sha_clk_set(bool enable)
++{
++    if (enable) {
++        int prev = atomic_fetch_add(&s_esp_tty_sha_clk_refcount, 1);
++        if (prev == 0) {
++            esp_crypto_sha_enable_periph_clk(true);
++        }
++    } else {
++        int prev = atomic_fetch_sub(&s_esp_tty_sha_clk_refcount, 1);
++        if (prev == 1) {
++            esp_crypto_sha_enable_periph_clk(false);
++        } else if (prev <= 0) {
++            /* extra disable -- pin counter back to zero; do not touch clock */
++            atomic_store(&s_esp_tty_sha_clk_refcount, 0);
++        }
++    }
++}
++
+ /* wolfSSL */
+ #include <wolfssl/wolfcrypt/logging.h>
+ #include <wolfssl/wolfcrypt/sha.h>
+@@ -938,7 +966,7 @@
+     asm volatile("memw");
+     while ((this_sha_mask & *(uint32_t*)DPORT_PERI_CLK_EN_REG) != 0) {
+ #endif /* CONFIG_IDF_TARGET_ESP32S3 */
+-        esp_crypto_sha_enable_periph_clk(false); /* IDF 6: was periph_module_disable(PERIPH_SHA_MODULE) */
++        esp_tty_sha_clk_set(false); /* refcounted (project patch 0003) */
+         asm volatile("memw");
+         actual_unroll_count++;
+         ESP_LOGW(TAG, "unroll not yet successful. try #%d",
+@@ -1519,7 +1547,7 @@
+         }
+         #else
+             ESP_LOGV(TAG, "ets_sha_enable for Xtensa");
+-            esp_crypto_sha_enable_periph_clk(true); /* IDF 6: was periph_module_enable(PERIPH_SHA_MODULE) */
++            esp_tty_sha_clk_set(true); /* refcounted (project patch 0003) */
+         #endif
+     }
+     else {
+@@ -1574,7 +1602,7 @@
+         ets_sha_disable(); /* disable also resets active, ongoing hash */
+         ESP_LOGV(TAG, "ets_sha_disable in esp_sha_hw_unlock()");
+     #else
+-        esp_crypto_sha_enable_periph_clk(false); /* IDF 6: was periph_module_disable(PERIPH_SHA_MODULE) */
++        esp_tty_sha_clk_set(false); /* refcounted (project patch 0003) */
+     #endif
+         ctx->lockDepth--;
+     }

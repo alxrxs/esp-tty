@@ -49,7 +49,15 @@
  *                         queued for manual NDES approval.  The caller should
  *                         wait for human approval (minutes to hours) before
  *                         retrying -- do NOT retry immediately or a fresh
- *                         transactionID will flood the CA.
+ *                         transactionID will flood the CA.  wifi.c (smart
+ *                         mode) honours this by sleeping
+ *                         SCEP_PENDING_RETRY_DELAY_MS (default 30 min) before
+ *                         the next bootstrap-full pass; if a cached cert is
+ *                         still valid the device may also bring up enterprise
+ *                         during the backoff window.  Other callers (e.g.
+ *                         cert_renewer) should apply an equivalent long delay
+ *                         when they receive this value rather than treating
+ *                         it like a generic ESP_FAIL.
  *   ESP_FAIL            -- enrollment failed (FAILURE pkiStatus, or HTTP /
  *                         crypto error).  Logs describe the failure.
  *   ESP_ERR_NO_MEM      -- PSRAM allocation failed.

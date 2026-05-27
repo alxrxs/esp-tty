@@ -561,6 +561,85 @@ static void test_not_after_uint64_max_preserved(void)
 }
 
 /* --------------------------------------------------------------------------
+ * Atomicity / schema version tests (B3)
+ *
+ * The native backend mirrors the device's "valid marker written last,
+ * schema version checked on load" scheme.  The test-only fault-injection
+ * hooks below simulate a power-fail between blob writes and the final
+ * marker commit; load() must return NOT_FOUND.
+ * -------------------------------------------------------------------------- */
+extern void cred_store_testhook_partial_write(const cred_store_t *in);
+extern void cred_store_testhook_force_schema(uint8_t schema);
+
+static void test_atomicity_partial_write_returns_not_found(void)
+{
+    cred_store_t in;
+    memset(&in, 0, sizeof(in));
+    in.dev_key_len = 1; in.dev_key[0] = 0xA1;
+    in.dev_cert_len = 1; in.dev_cert[0] = 0xA2;
+    in.ca_chain_len = 1; in.ca_chain[0] = 0xA3;
+    in.not_after = 1700000000;
+
+    /* Simulate: blobs written + committed but valid marker never landed. */
+    cred_store_testhook_partial_write(&in);
+
+    cred_store_t out;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_NVS_NOT_FOUND, cred_store_load(&out));
+}
+
+static void test_atomicity_full_save_loads_ok(void)
+{
+    /* Sanity: a full save() does set the marker and load() succeeds. */
+    cred_store_t in;
+    memset(&in, 0, sizeof(in));
+    in.dev_key_len = 1; in.dev_key[0] = 0xB1;
+    in.dev_cert_len = 1; in.dev_cert[0] = 0xB2;
+    in.ca_chain_len = 1; in.ca_chain[0] = 0xB3;
+    in.not_after = 1800000000;
+
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cred_store_save(&in));
+
+    cred_store_t out;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cred_store_load(&out));
+    TEST_ASSERT_EQUAL_UINT64(1800000000, out.not_after);
+}
+
+static void test_schema_version_mismatch_returns_not_found(void)
+{
+    cred_store_t in;
+    memset(&in, 0, sizeof(in));
+    in.dev_key_len = 1; in.dev_key[0] = 0xC1;
+    in.dev_cert_len = 1; in.dev_cert[0] = 0xC2;
+    in.ca_chain_len = 1; in.ca_chain[0] = 0xC3;
+    in.not_after = 1900000000;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cred_store_save(&in));
+
+    /* Verify base case loads. */
+    cred_store_t out;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cred_store_load(&out));
+
+    /* Force a different schema version (simulating older-firmware rollback). */
+    cred_store_testhook_force_schema(99);
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_NVS_NOT_FOUND, cred_store_load(&out));
+}
+
+static void test_schema_version_zero_returns_not_found(void)
+{
+    /* schema==0 must not be accepted (it is the post-clear value). */
+    cred_store_t in;
+    memset(&in, 0, sizeof(in));
+    in.dev_key_len = 1; in.dev_key[0] = 0x01;
+    in.dev_cert_len = 1; in.dev_cert[0] = 0x02;
+    in.ca_chain_len = 1; in.ca_chain[0] = 0x03;
+    in.not_after = 42;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cred_store_save(&in));
+
+    cred_store_testhook_force_schema(0);
+    cred_store_t out;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_NVS_NOT_FOUND, cred_store_load(&out));
+}
+
+/* --------------------------------------------------------------------------
  * main
  * -------------------------------------------------------------------------- */
 int main(void)
@@ -596,5 +675,10 @@ int main(void)
     RUN_TEST(test_parse_not_after_garbage_returns_fail);
     RUN_TEST(test_multiple_clears_all_idempotent);
     RUN_TEST(test_not_after_uint64_max_preserved);
+    /* B3 atomicity + schema version */
+    RUN_TEST(test_atomicity_partial_write_returns_not_found);
+    RUN_TEST(test_atomicity_full_save_loads_ok);
+    RUN_TEST(test_schema_version_mismatch_returns_not_found);
+    RUN_TEST(test_schema_version_zero_returns_not_found);
     return UNITY_END();
 }

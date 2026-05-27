@@ -191,9 +191,17 @@ void app_main(void)
 
     nvs_sec_cfg_t nvs_sec_cfg;
     esp_err_t err = nvs_flash_read_security_cfg(keys_part, &nvs_sec_cfg);
-    if (err == ESP_ERR_NVS_KEYS_NOT_INITIALIZED ||
-        err == ESP_ERR_NVS_CORRUPT_KEY_PART) {
-        ESP_LOGI(TAG, "NVS keys not found -- generating new AES-XTS-256 key");
+    if (err == ESP_ERR_NVS_KEYS_NOT_INITIALIZED) {
+        /* Genuine first boot: nvs_keys partition is blank (0xFF). */
+        ESP_LOGI(TAG, "NVS keys not initialised -- generating new AES-XTS-256 key (first boot)");
+        ESP_ERROR_CHECK(nvs_flash_generate_keys(keys_part, &nvs_sec_cfg));
+    } else if (err == ESP_ERR_NVS_CORRUPT_KEY_PART) {
+        /* Likely tamper / partial flash overwrite.  Regenerating keys will
+         * cause every existing NVS page to fail HMAC and the subsequent
+         * secure_init will erase the whole partition. */
+        ESP_LOGE(TAG, "NVS keys are CORRUPTED (possible tamper); all stored "
+                       "credentials WILL be permanently destroyed and "
+                       "re-enrollment will be required");
         ESP_ERROR_CHECK(nvs_flash_generate_keys(keys_part, &nvs_sec_cfg));
     } else {
         ESP_ERROR_CHECK(err);
@@ -202,9 +210,20 @@ void app_main(void)
     err = nvs_flash_secure_init_partition("nvs", &nvs_sec_cfg);
     if (err == ESP_ERR_NVS_NO_FREE_PAGES ||
         err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(TAG, "NVS needs erase -- erasing and re-init with encryption");
+        /* NO_FREE_PAGES triggered by every-page-HMAC-fail after key
+         * regeneration above, or by genuinely full / version-mismatched NVS.
+         * Either way the entire partition is about to be erased -- stored
+         * credentials (SCEP cert+key, SSH host key, etc.) will be lost. */
+        ESP_LOGE(TAG, "NVS partition is being erased -- all stored credentials "
+                       "(SCEP cert+key, SSH host key) WILL be permanently lost; "
+                       "re-enrollment will be required (cause: %s)",
+                 esp_err_to_name(err));
         const esp_partition_t *nvs_part = esp_partition_find_first(
             ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_NVS, NULL);
+        if (!nvs_part) {
+            ESP_LOGE(TAG, "nvs partition not found -- check partitions.csv");
+            abort();
+        }
         ESP_ERROR_CHECK(esp_partition_erase_range(nvs_part, 0, nvs_part->size));
         err = nvs_flash_secure_init_partition("nvs", &nvs_sec_cfg);
     }

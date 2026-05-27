@@ -23,7 +23,11 @@
 #include "ring.h"
 #include "scrollback.h"
 
-void setUp(void)    {}
+/* File-static counter used by ctx_check_read; reset in setUp() so each test
+ * run starts clean even if Unity ever re-invokes tests. */
+static int s_ctx_check_calls = 0;
+
+void setUp(void)    { s_ctx_check_calls = 0; }
 void tearDown(void) {}
 
 /* -- Scripted read_fn stub ------------------------------------------------- */
@@ -669,36 +673,42 @@ void test_drain_ex_boot_trigger_split_across_chunks(void)
     TEST_ASSERT_EQUAL_INT(1, g_match_fires);
 }
 
-/* drain_ex: two full magic sequences in one stream -> two callbacks.  */
+/* drain_ex: two full magic sequences delivered as two consecutive read calls
+ * each returning exactly one magic -> trigger callback fires exactly twice.
+ *
+ * By feeding each magic as a separate read call we avoid any constraint on
+ * the drain's internal buffer size: the trigger state machine resets after
+ * each full match so the second sequence is processed independently.       */
 void test_drain_ex_two_magic_sequences_fire_twice(void)
 {
     const uint8_t *magic = usb_cdc_boot_trigger_magic();
     size_t         mlen  = usb_cdc_boot_trigger_magic_len();
 
-    /* Build a buffer with two concatenated magics */
-    uint8_t *two = malloc(2 * mlen);
-    TEST_ASSERT_NOT_NULL(two);
-    memcpy(two,       magic, mlen);
-    memcpy(two + mlen, magic, mlen);
+    typedef struct {
+        const uint8_t *chunks[4];
+        size_t         sizes[4];
+        int            n_chunks;
+        int            call;
+    } two_seq_ctx_t;
 
-    typedef struct { uint8_t *data; size_t len; int call; } blob_ctx_t;
-    static blob_ctx_t s_blob;
-    s_blob.data = two;
-    s_blob.len  = 2 * mlen;
-    s_blob.call = 0;
+    static two_seq_ctx_t s_two;
+    /* Read 0: first magic sequence */
+    s_two.chunks[0] = magic;
+    s_two.sizes[0]  = mlen;
+    /* Read 1: second magic sequence */
+    s_two.chunks[1] = magic;
+    s_two.sizes[1]  = mlen;
+    s_two.n_chunks  = 2;
+    s_two.call      = 0;
 
-    int blob_read(void *c, uint8_t *buf, size_t cap, size_t *rxd) {
+    int two_seq_read(void *c, uint8_t *buf, size_t cap, size_t *rxd) {
         (void)c;
-        if (s_blob.call == 0) {
-            size_t n = s_blob.len < cap ? s_blob.len : cap;
-            memcpy(buf, s_blob.data, n);
+        if (s_two.call < s_two.n_chunks) {
+            size_t n = s_two.sizes[s_two.call];
+            if (n > cap) n = cap;
+            memcpy(buf, s_two.chunks[s_two.call], n);
             *rxd = n;
-            /* For the remainder after cap, use a second call */
-            if (s_blob.len > cap) {
-                /* Re-use a simplistic approach: feed all in one shot
-                 * (magic < 64 bytes so fits in drain's internal 64-byte buf) */
-            }
-            s_blob.call++;
+            s_two.call++;
             return 0;
         }
         *rxd = 0;
@@ -709,21 +719,13 @@ void test_drain_ex_two_magic_sequences_fire_twice(void)
     usb_cdc_boot_trigger_init(&trigger);
     g_match_fires = 0;
 
-    /* Only works if 2*mlen <= 64 (the drain internal buffer).
-     * If mlen > 32, split into two reads. */
-    int rc;
-    if (2 * mlen <= 64) {
-        rc = usb_cdc_drain_ex(blob_read, NULL, NULL, NULL,
+    int rc = usb_cdc_drain_ex(two_seq_read, NULL, NULL, NULL,
                               &trigger, on_match_cb, NULL);
-        TEST_ASSERT_EQUAL_INT((int)(2 * mlen), rc);
-        TEST_ASSERT_EQUAL_INT(2, g_match_fires);
-    } else {
-        /* Too long for single chunk; skip the assertion but keep the
-         * test alive so it doesn't become a failing placeholder.    */
-        TEST_PASS();
-    }
 
-    free(two);
+    /* Total bytes consumed must equal two full magic sequences. */
+    TEST_ASSERT_EQUAL_INT((int)(2 * mlen), rc);
+    /* The trigger must have fired exactly twice -- once per sequence. */
+    TEST_ASSERT_EQUAL_INT(2, g_match_fires);
 }
 
 /* drain_ex: on_match may be NULL; trigger still advances internally.  */
@@ -851,10 +853,9 @@ static int ctx_check_read(void *ctx, uint8_t *buf, size_t cap, size_t *rxd)
     (void)cap;
     buf[0] = 0x99;
     *rxd   = 1;
-    /* Signal done on second call */
-    static int calls = 0;
-    calls++;
-    if (calls > 1) { calls = 0; *rxd = 0; }
+    /* Signal done on second call; uses file-static counter reset in setUp(). */
+    s_ctx_check_calls++;
+    if (s_ctx_check_calls > 1) { *rxd = 0; }
     return 0;
 }
 
