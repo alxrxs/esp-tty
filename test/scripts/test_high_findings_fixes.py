@@ -174,17 +174,24 @@ def test_a7_eap_identity_not_logged_in_cleartext_at_info():
         "wifi.c must define a redact_for_log helper to keep sensitive "
         "identifiers out of INFO-level log lines."
     )
-    # Both EAP-TLS identity INFO sites must use the redacted variable.
-    # Match a complete ESP_LOGI(...) invocation that mentions "identity"
-    # (case-insensitive).  re.DOTALL allows the call to span newlines.
+    # Only flag ESP_LOGI calls that BOTH mention "identity" AND actually
+    # interpolate a value (printf-style %s / %.*s).  A bare mention in a
+    # message string with no format specifier (e.g. "EAP outer NAI
+    # configured") isn't leaking anything and shouldn't trigger the rule.
+    fmt_specifier = r'%(?:\.\*)?s'
     info_lines = re.findall(
         r'ESP_LOGI\s*\([^;]*?identity[^;]*?\)\s*;',
         src, re.IGNORECASE | re.DOTALL)
-    assert info_lines, "Expected at least one ESP_LOGI line mentioning identity"
-    for line in info_lines:
+    flagged = [line for line in info_lines if re.search(fmt_specifier, line)]
+    assert flagged, (
+        "Expected at least one ESP_LOGI line that interpolates an identity "
+        "value with %s; the redaction rule needs at least one site to anchor on."
+    )
+    for line in flagged:
         assert "EAP_IDENTITY" not in line, (
             f"INFO-level log line still prints EAP_IDENTITY directly: {line!r}"
         )
         assert "id_redacted" in line, (
-            f"INFO-level identity log line is not using id_redacted: {line!r}"
+            f"INFO-level identity log line interpolates a value but is not "
+            f"using id_redacted: {line!r}"
         )
