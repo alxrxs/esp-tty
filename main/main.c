@@ -155,18 +155,44 @@ bench_done:
 #define OTA_ROLLBACK_DELAY_MS 30000
 #endif
 
+/* Tracks whether the rollback timer fired but found SSH not yet
+ * listening.  Allows one retry; second failure refuses mark-valid. */
+static bool s_rollback_retried = false;
+
 static void rollback_timer_cb(TimerHandle_t xTimer)
 {
-    (void)xTimer;
     esp_ota_img_states_t state;
     const esp_partition_t *running = esp_ota_get_running_partition();
     if (esp_ota_get_state_partition(running, &state) != ESP_OK)
         return;
-    if (rollback_decide(state) == ROLLBACK_DECISION_MARK_VALID) {
-        ESP_LOGI("main", "Marking OTA image valid (rollback cancelled)");
-        esp_ota_mark_app_valid_cancel_rollback();
+    if (rollback_decide(state) != ROLLBACK_DECISION_MARK_VALID) {
+        /* Not PENDING_VERIFY (factory or already valid): no-op. */
+        return;
     }
-    /* If not PENDING_VERIFY (factory or already valid), this is a no-op */
+
+    /* Liveness gate: only mark the image valid if ssh_server_task has
+     * actually bind()+listen()ed.  Otherwise we'd be papering over a
+     * silent server failure and locking ourselves into a broken slot. */
+    if (!ssh_server_is_listening()) {
+        if (!s_rollback_retried) {
+            ESP_LOGW("main", "Rollback timer fired but SSH not listening -- "
+                             "rescheduling once for %d ms",
+                     OTA_ROLLBACK_DELAY_MS);
+            s_rollback_retried = true;
+            if (xTimer != NULL) {
+                xTimerChangePeriod(xTimer,
+                                   pdMS_TO_TICKS(OTA_ROLLBACK_DELAY_MS), 0);
+                xTimerStart(xTimer, 0);
+            }
+            return;
+        }
+        ESP_LOGE("main", "SSH still not listening after retry -- "
+                         "refusing to mark image valid; bootloader will roll back");
+        return;
+    }
+
+    ESP_LOGI("main", "Marking OTA image valid (rollback cancelled)");
+    esp_ota_mark_app_valid_cancel_rollback();
 }
 
 void app_main(void)
@@ -318,6 +344,17 @@ void app_main(void)
     }
 #endif
 
+    /* -- 5. SSH server --------------------------------------------- */
+    /* host_key_load_or_generate needs Wi-Fi up for hardware RNG entropy.
+       The assignment above ensures Wi-Fi start() has been called even
+       if IP acquisition failed.
+       Order: start the SSH server BEFORE cert_renewer.  cert_renewer's
+       task can immediately enter scep_enroll, which allocates several KB
+       of RSA scratch and competes for the crypto HW with the host_key
+       generation done inside ssh_server_start().  Letting SSH come up
+       first gives the host key a clean head start. */
+    ESP_ERROR_CHECK(ssh_server_start(usb_to_ssh, ssh_to_usb, scrollback));
+
 #if defined(WIFI_ENTERPRISE_SSID) && defined(SCEP_URL) && !defined(WIFI_USE_ENTERPRISE)
     /* Certificate renewal watchdog (Mode C only -- Mode B+ uses embedded
      * certs that cannot be renewed via SCEP).  Guard MUST match
@@ -331,12 +368,6 @@ void app_main(void)
         }
     }
 #endif
-
-    /* -- 5. SSH server --------------------------------------------- */
-    /* host_key_load_or_generate needs Wi-Fi up for hardware RNG entropy.
-       The assignment above ensures Wi-Fi start() has been called even
-       if IP acquisition failed. */
-    ESP_ERROR_CHECK(ssh_server_start(usb_to_ssh, ssh_to_usb, scrollback));
 
     /* -- 6. Rollback self-test timer -------------------------------------- */
     /* One-shot 30-second timer: if the SSH server is still running by then,

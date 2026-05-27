@@ -42,6 +42,14 @@
 #define NO_OLD_TLS
 #define WOLFSSL_SMALL_STACK
 
+/* Strip the wolfSSL TLS 1.2/1.3 record layer and handshake state machine
+ * entirely.  We only use wolfSSL as wolfSSH's crypto provider (AES-GCM,
+ * ED25519, SHA-512, HKDF) -- the TLS code paths are dead weight and
+ * extra attack surface.  All HTTPS/EAP-TLS in this firmware goes through
+ * mbedTLS, not wolfSSL.  See M5. */
+#define NO_TLS
+#define WOLFCRYPT_ONLY
+
 /* -- wolfSSH cipher hardening ------------------------------------ */
 /* AES-GCM is the only cipher we want (AEAD, no padding oracle surface).
  * Explicitly enable it -- our minimal config doesn't auto-define HAVE_AESGCM. */

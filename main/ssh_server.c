@@ -63,6 +63,10 @@ static int           s_active_fd   = -1;
 static volatile bool s_pump_stop   = false;
 static bool          s_pumps_running = false;  /* true only while both pump tasks are live */
 
+/* Set true by ssh_server_task once bind+listen succeed; used by the OTA
+ * rollback timer in main.c to decide whether to mark the image valid. */
+static volatile bool s_ssh_listening = false;
+
 #if SSH_KEEPALIVE_INTERVAL_SEC > 0
 /* Last tick at which pump_ssh_to_usb received inbound data from the client.
  * Written by pump_ssh_to_usb; read by the main session loop for keepalive. */
@@ -164,8 +168,13 @@ static int user_auth_callback(byte authType, WS_UserAuthData *authData,
         }
         if (pubkey_auth_check(authData->sf.publicKey.publicKey,
                               authData->sf.publicKey.publicKeySz,
-                              s_ota_authkey_hash) == PUBKEY_AUTH_OK)
+                              s_ota_authkey_hash) == PUBKEY_AUTH_OK) {
+            char safe_user[96];
+            log_sanitize(safe_user, sizeof(safe_user),
+                         authData->username, authData->usernameSz);
+            ESP_LOGI(TAG, "Auth accepted: user=%s (ota)", safe_user);
             return WOLFSSH_USERAUTH_SUCCESS;
+        }
         ESP_LOGW(TAG, "Auth rejected: unknown public key (user=ota)");
         return WOLFSSH_USERAUTH_INVALID_PUBLICKEY;
     }
@@ -174,8 +183,13 @@ static int user_auth_callback(byte authType, WS_UserAuthData *authData,
     for (int i = 0; i < s_authkey_count; i++) {
         if (pubkey_auth_check(authData->sf.publicKey.publicKey,
                               authData->sf.publicKey.publicKeySz,
-                              s_authkey_hashes[i]) == PUBKEY_AUTH_OK)
+                              s_authkey_hashes[i]) == PUBKEY_AUTH_OK) {
+            char safe_user[96];
+            log_sanitize(safe_user, sizeof(safe_user),
+                         authData->username, authData->usernameSz);
+            ESP_LOGI(TAG, "Auth accepted: user=%s (tty key #%d)", safe_user, i);
             return WOLFSSH_USERAUTH_SUCCESS;
+        }
     }
     {
         char safe_user[96];
@@ -399,6 +413,7 @@ static void ssh_server_task(void *arg)
         return;
     }
 
+    s_ssh_listening = true;
     ESP_LOGI(TAG, "Listening on TCP port %d", SSH_PORT);
 
     while (1) {
@@ -462,6 +477,13 @@ static void ssh_server_task(void *arg)
         }
 
         wolfSSH_set_fd(ssh, client_fd);
+        /* Register the terminal-resize callback here (under s_session_mutex,
+         * before any teardown path is reachable) so a concurrent teardown
+         * can't free `ssh` between SetCb and SetCtx.  term_resize_cb itself
+         * NULL-checks the context, so it's safe even if the session is torn
+         * down before the callback fires. */
+        wolfSSH_SetTerminalResizeCb(ssh, term_resize_cb);
+        wolfSSH_SetTerminalResizeCtx(ssh, s_ssh_to_usb);
         s_active_ssh = ssh;
         s_active_fd  = client_fd;
         s_pump_stop   = false;
@@ -542,10 +564,9 @@ static void ssh_server_task(void *arg)
             continue;
         }
 
-        /* Register terminal resize callback -- forwards window-change events
-         * from the SSH client as CSI sequences into the USB-bound ring. */
-        wolfSSH_SetTerminalResizeCb(ssh, term_resize_cb);
-        wolfSSH_SetTerminalResizeCtx(ssh, s_ssh_to_usb);
+        /* Terminal resize callback was registered earlier (under the
+         * session mutex, before any teardown path was reachable) to
+         * avoid a race between SetCb and SetCtx. */
 
         /* Replay scrollback before going live -------------------------
          * Send the last SCROLLBACK_REPLAY_LINES lines of USB device
@@ -730,6 +751,11 @@ static void ssh_server_task(void *arg)
 /* ------------------------------------------------------------------ */
 /* Public API                                                          */
 /* ------------------------------------------------------------------ */
+
+bool ssh_server_is_listening(void)
+{
+    return s_ssh_listening;
+}
 
 esp_err_t ssh_server_start(ring_t *usb_to_ssh, ring_t *ssh_to_usb,
                            scrollback_t *scrollback)

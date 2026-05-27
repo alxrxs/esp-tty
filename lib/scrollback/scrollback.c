@@ -91,7 +91,8 @@ void scrollback_push(scrollback_t *sb, const uint8_t *data, size_t len)
         rem -= take;
     }
 
-    if (sb->used + len < sb->cap)
+    /* Bound check arranged so size_t never overflows even for absurd len. */
+    if (len < sb->cap - sb->used)
         sb->used += len;
     else
         sb->used = sb->cap;
@@ -230,7 +231,8 @@ void scrollback_push(scrollback_t *sb, const uint8_t *data, size_t len)
         rem -= take;
     }
 
-    if (sb->used + len < sb->cap)
+    /* Bound check arranged so size_t never overflows even for absurd len. */
+    if (len < sb->cap - sb->used)
         sb->used += len;
     else
         sb->used = sb->cap;

@@ -75,8 +75,15 @@
  * network name. WIFI_PASS is unused in EAP-TLS mode but kept defined for
  * API symmetry.
  *
- * EAP_IDENTITY is the outer/anonymous identity sent before the TLS tunnel
- * is up. Many RADIUS servers want anonymous@<realm>; max 127 bytes.
+ * EAP_IDENTITY is the inner identity used after the TLS tunnel is up
+ * (in EAP-TLS this is the cert-subject identity).  Max 127 bytes.
+ *
+ * EAP_ANONYMOUS_IDENTITY (optional, RECOMMENDED for production):
+ * Outer identity sent in cleartext during EAP phase 1.  When defined,
+ * the device calls esp_eap_client_set_anonymous_identity() so the real
+ * EAP_IDENTITY is only exposed inside the TLS tunnel.  Use e.g.
+ * "anonymous@your-realm" -- NAI-realm routing on the RADIUS side works
+ * off this field.  Without it, EAP_IDENTITY leaks during phase 1.
  *
  * EAP_DISABLE_TIME_CHECK: set to 1 ONLY if the device has no clock and
  * cert-expiry validation is failing at boot. Removes a security check;
@@ -88,7 +95,9 @@
 #undef  WIFI_PASS
 #define WIFI_SSID               "your-enterprise-ssid"
 #define WIFI_PASS               ""
-#define EAP_IDENTITY            "anonymous@example.org"
+#define EAP_IDENTITY            "device-cn@example.org"
+/* Recommended for production: outer identity sent in cleartext (phase 1). */
+#define EAP_ANONYMOUS_IDENTITY  "anonymous@example.org"
 #define EAP_DISABLE_TIME_CHECK  1
 */
 

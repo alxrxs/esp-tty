@@ -22,6 +22,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <limits.h>
 
 #include "esp_log.h"
 #include "esp_http_client.h"
@@ -230,6 +231,12 @@ static int _scep_http_request(esp_http_client_method_t  method,
     int rc = SCEP_TRANSPORT_OK;
 
     if (method == HTTP_METHOD_POST && body && body_len > 0) {
+        if (body_len > (size_t)INT_MAX) {
+            ESP_LOGE(TAG, "POST body too large: %zu", body_len);
+            rc = SCEP_TRANSPORT_ERR_INVALID_ARG;
+            goto cleanup;
+        }
+
         err = esp_http_client_set_header(client,
                                          "Content-Type",
                                          "application/x-pki-message");

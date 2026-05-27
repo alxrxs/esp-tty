@@ -7,6 +7,8 @@
 
 #include "usb_cdc_drain.h"
 
+#include <limits.h>
+
 /* Match the original tinyusb_cdcacm_read chunk size used in cdc_rx_callback. */
 #define USB_CDC_DRAIN_BUF 64
 
@@ -26,7 +28,10 @@ int usb_cdc_drain_ex(usb_cdc_drain_read_fn read_fn, void *ctx,
     if (!read_fn) return -1;
 
     uint8_t buf[USB_CDC_DRAIN_BUF];
-    int total = 0;
+    /* Use size_t internally to avoid signed-integer overflow UB on
+     * long-running drains (~2GB+ of CDC traffic).  Clamp to INT_MAX
+     * when returning so the caller-visible `int` contract is preserved. */
+    size_t total = 0;
 
     while (1) {
         size_t rxd = 0;
@@ -57,8 +62,15 @@ int usb_cdc_drain_ex(usb_cdc_drain_read_fn read_fn, void *ctx,
             }
         }
 
-        total += (int)rxd;
+        /* Saturating add: if we would overflow size_t or exceed INT_MAX,
+         * pin to INT_MAX -- the caller (cdc_rx_callback) ignores the
+         * return value, so saturation is safe.  Documented in the header. */
+        if (rxd > (size_t)INT_MAX - total) {
+            total = (size_t)INT_MAX;
+        } else {
+            total += rxd;
+        }
     }
 
-    return total;
+    return (total > (size_t)INT_MAX) ? INT_MAX : (int)total;
 }

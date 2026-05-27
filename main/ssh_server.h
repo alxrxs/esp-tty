@@ -14,6 +14,8 @@
 
 #pragma once
 
+#include <stdbool.h>
+
 #include "esp_err.h"
 #include "ring.h"
 #include "scrollback.h"
@@ -35,6 +37,14 @@ extern "C" {
  */
 esp_err_t ssh_server_start(ring_t *usb_to_ssh, ring_t *ssh_to_usb,
                            scrollback_t *scrollback);
+
+/*
+ * Returns true once ssh_server_task has successfully bind()+listen()ed
+ * on TCP/SSH_PORT.  Used by the OTA rollback timer to refuse marking an
+ * image valid if the server never came up (would otherwise lock us into
+ * a broken slot).
+ */
+bool ssh_server_is_listening(void);
 
 #ifdef __cplusplus
 }

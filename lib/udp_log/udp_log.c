@@ -69,6 +69,53 @@
 # define UDP_LOG_LINE_MAX  256
 #endif
 
+/* Tag denylist: ESP_LOG lines whose tag (the token between the
+ * ") <tag>: " separator) matches any entry below are written to UART
+ * only -- NOT mirrored over UDP.  These tags can carry sensitive
+ * material (cert bytes, RADIUS exchanges, SSH client identifiers)
+ * that we don't want broadcast to a UDP collector.  Override or
+ * extend in config.h via UDP_LOG_TAG_DENYLIST.  See M14. */
+#ifndef UDP_LOG_TAG_DENYLIST
+# define UDP_LOG_TAG_DENYLIST  "scep_enroll", "cert_renew", "wifi", "ssh_server"
+#endif
+
+static const char *const s_udp_log_tag_denylist[] = { UDP_LOG_TAG_DENYLIST };
+
+/* Return true if the formatted ESP_LOG line `line` (length llen) carries
+ * a tag that appears in s_udp_log_tag_denylist.  ESP_LOG_LEVEL formats
+ * the line as e.g. "I (12345) wifi: ...", so we look for ") <tag>: ".
+ * Falls back to false (forward) on any parse anomaly. */
+static bool udp_log_tag_blocked(const char *line, size_t llen)
+{
+    /* Find ") " -- the closing paren of the (ms) timestamp. */
+    const char *rp = NULL;
+    for (size_t i = 0; i + 1 < llen; i++) {
+        if (line[i] == ')' && line[i+1] == ' ') {
+            rp = &line[i+2];
+            break;
+        }
+    }
+    if (!rp) return false;
+    /* Tag runs until ':' (followed by space).  Cap at 32 chars. */
+    size_t tag_max = (size_t)(line + llen - rp);
+    if (tag_max > 32) tag_max = 32;
+    size_t tlen = 0;
+    while (tlen < tag_max && rp[tlen] != ':' && rp[tlen] != '\0'
+                          && rp[tlen] != '\n' && rp[tlen] != ' ') {
+        tlen++;
+    }
+    if (tlen == 0 || tlen >= tag_max) return false;
+    for (size_t k = 0;
+         k < sizeof(s_udp_log_tag_denylist) / sizeof(s_udp_log_tag_denylist[0]);
+         k++) {
+        const char *deny = s_udp_log_tag_denylist[k];
+        if (strlen(deny) == tlen && strncmp(rp, deny, tlen) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /* Datagram payload ceiling.  1300 leaves room for the IPv4+UDP header
  * (28 B) and any tunnel overhead under a typical 1500-byte path MTU. */
 #ifndef UDP_LOG_DGRAM_MAX
@@ -257,6 +304,10 @@ static int udp_log_vprintf_hook(const char *fmt, va_list args)
     if (n < 0) n = 0;
     size_t llen = ((size_t)n < sizeof(line)) ? (size_t)n : sizeof(line) - 1;
     if (llen == 0) return ret;
+
+    /* 2b. Tag denylist: don't mirror sensitive tags over the network.
+     *     UART has already received the line via s_prev_vprintf above. */
+    if (udp_log_tag_blocked(line, llen)) return ret;
 
     /* 3. Lazy socket creation on first use. */
     if (atomic_load(&s_sock) == -1) {

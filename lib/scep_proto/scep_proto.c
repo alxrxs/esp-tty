@@ -264,7 +264,12 @@ static int build_name_der(const scep_subject_t *s,
 /* -----------------------------------------------------------------------
  * PKCS#7 padding
  * --------------------------------------------------------------------- */
-static size_t pkcs7_padded_len(size_t n) { return n + (16 - (n % 16)); }
+/* Returns 0 (error sentinel) if padding would overflow size_t.  Callers
+ * must check for 0 before allocating. */
+static size_t pkcs7_padded_len(size_t n) {
+    if (n > SIZE_MAX - 16) return 0;
+    return n + (16 - (n % 16));
+}
 
 static void pkcs7_pad(const uint8_t *in, size_t in_len,
                       uint8_t *out, size_t out_len)
@@ -651,6 +656,7 @@ int scep_build_pkimessage_pkcsreq(const uint8_t      *csr_der,
      * AES-256-CBC encrypt the CSR
      * ------------------------------------------------------------------ */
     size_t padded_len = pkcs7_padded_len(csr_len);
+    if (padded_len == 0) { ret = -1; goto done; }   /* overflow */
     uint8_t *padded  = malloc(padded_len);
     enc_csr = malloc(padded_len);
     if (!padded || !enc_csr) {

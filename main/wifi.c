@@ -131,6 +131,15 @@
 #error "SCEP_NO_NTP_USE_ISSUANCE_TIME and NTP_BEFORE_EAPTLS are mutually exclusive -- pick one"
 #endif
 
+/* Fallback floor used by SCEP_NO_NTP_USE_ISSUANCE_TIME mode before the
+ * first enrollment.  Override in config.h to a more recent epoch if the
+ * firmware lives long without a re-flash.  Defaults to 2025-01-01 UTC,
+ * which is recent enough to reject pre-issued certs but old enough to
+ * accept any cert minted for this firmware.  See M15. */
+#if defined(SCEP_NO_NTP_USE_ISSUANCE_TIME) && !defined(SCEP_NO_NTP_BUILD_EPOCH)
+#  define SCEP_NO_NTP_BUILD_EPOCH 1735689600  /* 2025-01-01T00:00:00Z */
+#endif
+
 #if !defined(BRIDGE_LOOPBACK) && defined(MDNS_ENABLE)
 #include "mdns.h"
 #include "mdns_dispatch.h"
@@ -247,6 +256,8 @@ extern const uint8_t eap_client_key_end[]   asm("_binary_client_key_end");
 #define EAP_CRT_MIN_BYTES    64
 #define EAP_KEY_MIN_BYTES    64
 
+#include "mbedtls/x509_crt.h"
+
 #endif /* WIFI_USE_ENTERPRISE */
 
 /* --------------------------------------------------------------------------
@@ -336,6 +347,24 @@ static const char *TAG = "wifi";
 
 static EventGroupHandle_t s_wifi_event_group;
 static int                s_retry_num = 0;
+
+/* Double-init guard: esp_netif_init / esp_event_loop_create_default /
+ * esp_wifi_init must each be called exactly once.  Without this flag,
+ * a second call into wifi_smart_init_common / wifi_init_sta /
+ * wifi_init_smart / wifi_init_enterprise_bootstrap would abort via
+ * ESP_ERROR_CHECK on ESP_ERR_INVALID_STATE. */
+static _Atomic bool s_wifi_inited = false;
+
+/* Safely (re)create the WiFi event group, freeing any existing handle
+ * so a stale handle isn't leaked across re-init paths. */
+static void wifi_event_group_reset(void) {
+    if (s_wifi_event_group != NULL) {
+        vEventGroupDelete(s_wifi_event_group);
+        s_wifi_event_group = NULL;
+    }
+    s_wifi_event_group = xEventGroupCreate();
+    configASSERT(s_wifi_event_group);
+}
 
 /* Kept so the enterprise extension point can call esp_netif_get_ip_info()
  * from a task if needed. */
@@ -1125,18 +1154,37 @@ static void wifi_event_handler(void *arg,
                 goto disc_done;
             }
 
+            /* Classify the disconnect reason so security-relevant failures
+             * (auth/handshake/association rejection) use a much longer
+             * backoff than transient radio problems.  Hammering RADIUS
+             * with bad credentials saturates audit logs at the upstream. */
+            bool security_fail = false;
+            switch (ev->reason) {
+                case WIFI_REASON_AUTH_FAIL:
+                case WIFI_REASON_HANDSHAKE_TIMEOUT:
+                case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
+                case WIFI_REASON_ASSOC_FAIL:
+                case WIFI_REASON_AUTH_EXPIRE:
+                case WIFI_REASON_802_1X_AUTH_FAILED:
+                    security_fail = true;
+                    break;
+                default:
+                    break;
+            }
+
             const bool infinite = (WIFI_MAX_RETRY == 0);
             if (infinite || s_retry_num < WIFI_MAX_RETRY) {
                 s_retry_num++;
 
-                /* Exponential backoff with jitter: 1s, 2s, 4s, ... 60s.
-                 * Without this, the reconnect loop fires immediately on
-                 * each disconnect, hammering the AP and flooding the log.
-                 * Jitter (+/- 25%) avoids synchronised reconnect storms
-                 * across multiple devices fleeing the same AP. */
+                /* Exponential backoff with jitter.  Transient (radio) caps
+                 * at 60s; security-relevant failures cap at 5 minutes so
+                 * a real RADIUS rejection doesn't flood audit logs.  We
+                 * still retry forever -- the rejection could be transient
+                 * (e.g. RADIUS server restart). */
                 uint32_t base_ms = 1000u << ((s_retry_num - 1) < 6
                                               ? (s_retry_num - 1) : 6);
-                if (base_ms > 60000u) base_ms = 60000u;
+                uint32_t cap_ms = security_fail ? 300000u : 60000u;
+                if (base_ms > cap_ms) base_ms = cap_ms;
                 /* Jitter using esp_random; fall back to s_retry_num
                  * mixing if esp_random is unavailable in this context. */
                 uint32_t jitter_window = base_ms / 4;
@@ -1150,16 +1198,17 @@ static void wifi_event_handler(void *arg,
                  * flooding. */
                 bool emit = (s_retry_num <= 5) || ((s_retry_num % 10) == 0);
                 if (emit) {
+                    const char *kind = security_fail ? "AUTH" : "LINK";
                     if (infinite) {
                         ESP_LOGW(TAG,
-                            "disconnected (reason %d), retry %d (infinite), "
+                            "%s disconnect (reason %d), retry %d (infinite), "
                             "backoff %u ms",
-                            ev->reason, s_retry_num, (unsigned)delay_ms);
+                            kind, ev->reason, s_retry_num, (unsigned)delay_ms);
                     } else {
                         ESP_LOGW(TAG,
-                            "disconnected (reason %d), retry %d/%d, "
+                            "%s disconnect (reason %d), retry %d/%d, "
                             "backoff %u ms",
-                            ev->reason, s_retry_num, WIFI_MAX_RETRY,
+                            kind, ev->reason, s_retry_num, WIFI_MAX_RETRY,
                             (unsigned)delay_ms);
                     }
                 }
@@ -1267,15 +1316,21 @@ esp_err_t wifi_init_sta(void)
     /* QEMU/Wokwi: no WiFi radio -- init the TCP/IP stack only so LwIP
      * sockets work, then return immediately (SSH server binds to 0.0.0.0). */
     ESP_LOGI(TAG, "BRIDGE_LOOPBACK: skipping WiFi, init netif only");
+    bool bl_already = atomic_exchange(&s_wifi_inited, true);
+    if (bl_already) {
+        ESP_LOGW(TAG, "BRIDGE_LOOPBACK: wifi already inited; skipping");
+        return ESP_ERR_INVALID_STATE;
+    }
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     s_sta_netif = esp_netif_create_default_wifi_sta();
     return ESP_OK;
 #endif
 
-    /* 1. Create the EventGroup used to synchronise with app_main / ssh_task. */
-    s_wifi_event_group = xEventGroupCreate();
-    configASSERT(s_wifi_event_group);
+    /* 1. Create the EventGroup used to synchronise with app_main / ssh_task.
+     * wifi_event_group_reset() deletes any stale handle first to avoid a leak
+     * if this function is somehow entered twice. */
+    wifi_event_group_reset();
 
 #if DHCP_RETRY_TIMEOUT_SEC > 0 && !defined(USE_STATIC_IPV4)
     /* Create the DHCP watchdog as a one-shot timer; the event handler
@@ -1296,7 +1351,14 @@ esp_err_t wifi_init_sta(void)
 
     /* 2. Initialise the TCP/IP stack and create the default event loop.
      *    Order matters: esp_netif_init() before esp_event_loop_create_default()
-     *    before esp_netif_create_default_wifi_sta(). */
+     *    before esp_netif_create_default_wifi_sta().
+     *    Double-init guard: skip these (and esp_wifi_init below) if a
+     *    previous wifi_init_* already brought them up. */
+    bool already_inited = atomic_exchange(&s_wifi_inited, true);
+    if (already_inited) {
+        ESP_LOGW(TAG, "wifi already inited; skipping netif/event/wifi init");
+        return ESP_ERR_INVALID_STATE;
+    }
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
@@ -1512,6 +1574,17 @@ esp_err_t wifi_init_sta(void)
     ESP_ERROR_CHECK(esp_eap_client_set_identity(
         (const unsigned char *)EAP_IDENTITY, strlen(EAP_IDENTITY)));
 
+#ifdef EAP_ANONYMOUS_IDENTITY
+    /* Outer EAP identity sent in clear before the TLS tunnel is set up.
+     * Recommended for RADIUS deployments that route by NAI realm
+     * (e.g. "anonymous@realm").  Without this, the inner identity
+     * (set via esp_eap_client_set_identity above) leaks during phase 1. */
+    ESP_ERROR_CHECK(esp_eap_client_set_anonymous_identity(
+        (const unsigned char *)EAP_ANONYMOUS_IDENTITY,
+        strlen(EAP_ANONYMOUS_IDENTITY)));
+    ESP_LOGI(TAG, "EAP outer NAI configured");
+#endif
+
     /* CA certificate: validates the RADIUS server's certificate.
      * Embedded via EMBED_TXTFILES -- buffer is null-terminated PEM.
      * Length includes the null terminator (end - start). */
@@ -1651,6 +1724,42 @@ esp_err_t wifi_init_sta(void)
 #ifndef BOOTSTRAP_NTP_SYNC_TIMEOUT_SEC
 # define BOOTSTRAP_NTP_SYNC_TIMEOUT_SEC  30
 #endif
+
+#ifdef WIFI_USE_ENTERPRISE
+/* Parse the embedded client.crt and return true iff notAfter is closer
+ * than CERT_REENROLL_THRESHOLD_SEC from `now`.  Returns false on any
+ * parse error -- a parse failure shouldn't block the EAP-TLS attempt
+ * (the supplicant will emit its own diagnostic).  Used by Mode B+'s
+ * wifi_init_enterprise_bootstrap to detect when the embedded cert has
+ * aged past validity (M8 fix). */
+static bool eval_embedded_client_cert_expired(time_t now)
+{
+    mbedtls_x509_crt crt;
+    mbedtls_x509_crt_init(&crt);
+    size_t crt_len = (size_t)(eap_client_crt_end - eap_client_crt_start);
+    int rc = mbedtls_x509_crt_parse(&crt, eap_client_crt_start, crt_len);
+    bool expired = false;
+    if (rc == 0) {
+        struct tm tmv = {
+            .tm_year = crt.valid_to.year - 1900,
+            .tm_mon  = crt.valid_to.mon  - 1,
+            .tm_mday = crt.valid_to.day,
+            .tm_hour = crt.valid_to.hour,
+            .tm_min  = crt.valid_to.min,
+            .tm_sec  = crt.valid_to.sec,
+        };
+        time_t expiry = mktime(&tmv);
+        if (expiry > 0 &&
+            (expiry - now) < (time_t)CERT_REENROLL_THRESHOLD_SEC) {
+            expired = true;
+        }
+    } else {
+        ESP_LOGW(TAG, "[b+] mbedtls_x509_crt_parse(client.crt): %d", rc);
+    }
+    mbedtls_x509_crt_free(&crt);
+    return expired;
+}
+#endif /* WIFI_USE_ENTERPRISE */
 
 /* When SCEP returns pkiStatus=PENDING (the CA queued the request for manual
  * NDES approval), wait this many ms before the next enrollment attempt.
@@ -1859,7 +1968,35 @@ static esp_err_t smart_on_ip_full(void)
 {
 #ifdef SCEP_NO_NTP_USE_ISSUANCE_TIME
     /* No-NTP mode: skip SNTP entirely.  We'll set the clock from the cert's
-     * NotBefore after enrollment below. */
+     * NotBefore after enrollment below.
+     *
+     * M15: before we kick off HTTPS to the SCEP server, set a build-time
+     * floor on the clock.  Without this, mbedTLS's X.509 time validation
+     * during the TLS handshake runs with time(NULL) == 0 (epoch) and accepts
+     * ANY notBefore/notAfter (including long-expired or future certs).
+     * The floor below is the firmware compile time -- best-effort, not a
+     * substitute for NTP, but it tightens the validation window from
+     * "all of history" to "after this firmware was built". */
+    {
+        time_t now = time(NULL);
+        if (now < SCEP_NO_NTP_BUILD_EPOCH) {
+            struct timeval tv = {
+                .tv_sec  = (time_t)SCEP_NO_NTP_BUILD_EPOCH,
+                .tv_usec = 0,
+            };
+            if (settimeofday(&tv, NULL) == 0) {
+                ESP_LOGW(TAG, "[smart] no-NTP mode: clock floor set to "
+                              "firmware build epoch %lld -- TLS time "
+                              "validation is best-effort until enrollment "
+                              "issuance time is applied",
+                         (long long)SCEP_NO_NTP_BUILD_EPOCH);
+            } else {
+                ESP_LOGW(TAG, "[smart] no-NTP mode: settimeofday(build_epoch) "
+                              "failed -- TLS time validation will accept "
+                              "any cert validity window");
+            }
+        }
+    }
     ESP_LOGI(TAG, "[smart] no-NTP mode: skipping SNTP sync");
 #else
     bool synced = smart_ntp_wait_sync();
@@ -2028,6 +2165,18 @@ static esp_err_t smart_configure_eaptls(const cred_store_t *creds)
                      esp_err_to_name(err));
             return ESP_FAIL;
         }
+#ifdef EAP_ANONYMOUS_IDENTITY
+        /* See main path: outer/anonymous identity for NAI-realm routing. */
+        err = esp_eap_client_set_anonymous_identity(
+            (const unsigned char *)EAP_ANONYMOUS_IDENTITY,
+            strlen(EAP_ANONYMOUS_IDENTITY));
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "[smart] esp_eap_client_set_anonymous_identity failed: %s",
+                     esp_err_to_name(err));
+            return ESP_FAIL;
+        }
+        ESP_LOGI(TAG, "[smart] EAP outer NAI configured");
+#endif
     }
 
     if (creds && creds->ca_chain_len > 0 && creds->dev_cert_len > 0 &&
@@ -2218,9 +2367,10 @@ static esp_err_t wifi_smart_init_common(
     esp_event_handler_instance_t *out_inst_wifi,
     esp_event_handler_instance_t *out_inst_ip)
 {
-    /* 1. Shared resources (event group, DHCP watchdog). */
-    s_wifi_event_group = xEventGroupCreate();
-    configASSERT(s_wifi_event_group);
+    /* 1. Shared resources (event group, DHCP watchdog).
+     * wifi_event_group_reset() deletes any stale handle first so a
+     * repeated init path doesn't leak the previous one. */
+    wifi_event_group_reset();
 
 #if DHCP_RETRY_TIMEOUT_SEC > 0 && !defined(USE_STATIC_IPV4)
     s_dhcp_watchdog = xTimerCreate(
@@ -2232,7 +2382,13 @@ static esp_err_t wifi_smart_init_common(
     }
 #endif
 
-    /* 2. TCP/IP stack + netif. */
+    /* 2. TCP/IP stack + netif.  Skip if a previous wifi init already
+     * brought these up; calling them twice asserts on ESP_ERR_INVALID_STATE. */
+    bool already_inited = atomic_exchange(&s_wifi_inited, true);
+    if (already_inited) {
+        ESP_LOGW(TAG, "[smart] wifi already inited; skipping netif/event/wifi init");
+        return ESP_ERR_INVALID_STATE;
+    }
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
@@ -2519,18 +2675,17 @@ esp_err_t wifi_init_enterprise_bootstrap(void)
     }
 
     const bool cert_present  = true;
-    /* NOTE: cert_expired is hardcoded false here because we cannot evaluate
-     * NotAfter without both a synced clock and mbedTLS cert parsing.  NTP
-     * bootstrap on the PSK network is the runtime mechanism that eventually
-     * gives us a valid clock; at that point wifi_init_enterprise_bootstrap
-     * has already entered the main loop.  See finding #8 in the security
-     * review for what a proper fix would require (mbedtls_x509_crt_parse
-     * after NTP sync, before the first ENTERPRISE attempt). */
-    const bool cert_expired  = false;
+    /* cert_expired is re-evaluated after every NTP sync via the helper
+     * eval_embedded_client_cert_expired() (defined below).  Until the
+     * clock is plausible we cannot evaluate it, so it starts false. */
+    bool cert_expired  = false;
 
     /* 6. Evaluate clock. */
     time_t now = time(NULL);
     bool ntp_synced = (now >= MIN_PLAUSIBLE_EPOCH);
+    if (ntp_synced) {
+        cert_expired = eval_embedded_client_cert_expired(now);
+    }
 
     bool ntp_req = (NTP_BEFORE_EAPTLS != 0);
 
@@ -2592,6 +2747,20 @@ esp_err_t wifi_init_enterprise_bootstrap(void)
             }
             now = time(NULL);
             ntp_synced = (now >= MIN_PLAUSIBLE_EPOCH);
+            if (ntp_synced) {
+                cert_expired = eval_embedded_client_cert_expired(now);
+                if (cert_expired) {
+                    /* Embedded cert is past its notAfter -- the next
+                     * enterprise attempt will deterministically fail.
+                     * Mode B+ has no re-enrollment path, so log clearly
+                     * and slow down (10 min between attempts) so we
+                     * still recover if the RADIUS clock gets re-synced. */
+                    ESP_LOGE(TAG, "[b+] embedded client.crt is EXPIRED -- "
+                                  "EAP-TLS will fail; sleeping 10 min "
+                                  "before retrying");
+                    vTaskDelay(pdMS_TO_TICKS(600000));
+                }
+            }
             continue;
         }
     }
