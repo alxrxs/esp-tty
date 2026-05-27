@@ -194,6 +194,13 @@ esp_err_t scep_enroll(const char *scep_url,
     uint8_t *spki_der       = NULL;
     uint8_t *p7_req         = NULL;
     uint8_t *issued_cert_der = NULL;
+    /* cred_store_t is ~14 KB (dev_key 2 KB + dev_cert 4 KB + ca_chain 8 KB + metadata).
+     * Stack-allocating it inside a 32 KB FreeRTOS task that is already running
+     * mbedTLS RSA scratch (~4-8 KB) and ASN.1 builders would overflow.  Heap
+     * allocate from internal RAM (NVS APIs and mbedTLS expect 8-bit accessible
+     * memory; this also matches the dev_key_der/issued_cert_der allocator
+     * choice above for credentials-bearing buffers). */
+    cred_store_t *creds      = NULL;
 
 /* DIAGNOSTIC: prefer PSRAM over internal RAM for SCEP scratch.  On Zero
  * v0.2 silicon the internal-RAM heap's spinlock CAS hangs under SCEP
@@ -466,8 +473,14 @@ esp_err_t scep_enroll(const char *scep_url,
     /* ------------------------------------------------------------------ */
     /* Step 11b: Parse NotAfter and build credential bundle                */
     /* ------------------------------------------------------------------ */
-    cred_store_t creds;
-    memset(&creds, 0, sizeof(creds));
+    creds = heap_caps_calloc(1, sizeof(cred_store_t),
+                             MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!creds) {
+        ESP_LOGE(TAG, "heap_caps_calloc(cred_store_t, %zu B) failed",
+                 sizeof(cred_store_t));
+        result = ESP_ERR_NO_MEM;
+        goto done;
+    }
 
     /* Private key */
     if (dev_key_der_len > CRED_DEV_KEY_MAX) {
@@ -475,8 +488,8 @@ esp_err_t scep_enroll(const char *scep_url,
                  dev_key_der_len, CRED_DEV_KEY_MAX);
         goto done;
     }
-    memcpy(creds.dev_key, dev_key_der, dev_key_der_len);
-    creds.dev_key_len = dev_key_der_len;
+    memcpy(creds->dev_key, dev_key_der, dev_key_der_len);
+    creds->dev_key_len = dev_key_der_len;
 
     /* Issued cert */
     if (issued_cert_len > CRED_DEV_CERT_MAX) {
@@ -484,8 +497,8 @@ esp_err_t scep_enroll(const char *scep_url,
                  issued_cert_len, CRED_DEV_CERT_MAX);
         goto done;
     }
-    memcpy(creds.dev_cert, issued_cert_der, issued_cert_len);
-    creds.dev_cert_len = issued_cert_len;
+    memcpy(creds->dev_cert, issued_cert_der, issued_cert_len);
+    creds->dev_cert_len = issued_cert_len;
 
     /* CA chain -- concatenate every distinct cert the bundle exposed so the
      * RADIUS supplicant has the full path it needs.  In a 2-tier deployment
@@ -521,7 +534,7 @@ esp_err_t scep_enroll(const char *scep_url,
              * this is non-secret CA material. */
             if (scan + 1 > chain_off) break;
             size_t hdr = 0, body = 0;
-            uint8_t b1 = creds.ca_chain[scan + 1];
+            uint8_t b1 = creds->ca_chain[scan + 1];
             if (b1 < 0x80) { hdr = 2; body = b1; }
             else {
                 size_t n = b1 & 0x7F;
@@ -529,11 +542,11 @@ esp_err_t scep_enroll(const char *scep_url,
                 hdr = 2 + n;
                 body = 0;
                 for (size_t k = 0; k < n; k++)
-                    body = (body << 8) | creds.ca_chain[scan + 2 + k];
+                    body = (body << 8) | creds->ca_chain[scan + 2 + k];
             }
             size_t whole = hdr + body;
             if (scan + whole > chain_off) break;
-            if (whole == clen && memcmp(&creds.ca_chain[scan], cder, clen) == 0) {
+            if (whole == clen && memcmp(&creds->ca_chain[scan], cder, clen) == 0) {
                 already = 1;
                 break;
             }
@@ -546,31 +559,46 @@ esp_err_t scep_enroll(const char *scep_url,
                           CRED_CA_CHAIN_MAX, i);
             break;
         }
-        memcpy(creds.ca_chain + chain_off, cder, clen);
+        memcpy(creds->ca_chain + chain_off, cder, clen);
         chain_off += clen;
     }
-    creds.ca_chain_len = chain_off;
+    creds->ca_chain_len = chain_off;
     ESP_LOGI(TAG, "CA chain assembled: %zu B (deduped from %d bundle slots)",
-             creds.ca_chain_len, 3);
+             creds->ca_chain_len, 3);
 
-    /* NotAfter */
+    /* NotAfter
+     *
+     * We refuse to persist credentials when not_after cannot be parsed.
+     * Rationale (option a from the audit):
+     *   - Storing not_after=0 triggers cert_renewer_decide → RENEW_NOW_CORRUPT
+     *     on every boot even though the certificate itself is functionally valid.
+     *   - When the SCEP server is temporarily unreachable the device would
+     *     re-enroll on every boot instead of using the working cert.
+     *   - Leaving the old credentials in place is the correct behaviour: the
+     *     cert is usable, and cert_renewer's time-based renewal path will fire
+     *     normally once the clock and CA are both healthy.
+     *   - If there are NO old credentials (first enrollment) the caller falls
+     *     back to its existing "no creds, retry later" handling -- same as a
+     *     network failure.  No silent boot-loop of pointless re-enrollments.
+     */
     esp_err_t err = cred_store_parse_not_after(issued_cert_der, issued_cert_len,
-                                               &creds.not_after);
+                                               &creds->not_after);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Could not parse NotAfter from issued cert: %s -- "
-                      "storing 0 (cert_renewer_decide treats not_after=0 as "
-                      "immediately expired and will trigger renewal on next cycle)",
+        ESP_LOGE(TAG, "Could not parse NotAfter from issued cert: %s -- "
+                      "refusing to overwrite credentials with an unusable bundle "
+                      "(old creds, if any, remain in place; cert_renewer will retry)",
                  esp_err_to_name(err));
-        creds.not_after = 0;
-    } else {
-        ESP_LOGI(TAG, "Cert NotAfter: epoch %llu", (unsigned long long)creds.not_after);
+        /* Leave any existing credentials intact. */
+        goto done;
     }
+    ESP_LOGI(TAG, "Cert NotAfter: epoch %llu", (unsigned long long)creds->not_after);
 
     /* ------------------------------------------------------------------ */
     /* Step 12: Save credentials to NVS                                    */
     /* ------------------------------------------------------------------ */
-    err = cred_store_save(&creds);
-    zeroize(&creds, sizeof(creds));
+    err = cred_store_save(creds);
+    /* creds (containing the live RSA-2048 private key) is zeroized + freed in
+     * the done: cleanup below on every exit path -- success and failure. */
 
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "cred_store_save failed: %s", esp_err_to_name(err));
@@ -619,6 +647,14 @@ done:
     heap_caps_free(csr_der);
     heap_caps_free(spki_der);
     heap_caps_free(p7_req);
+
+    if (creds) {
+        /* Zeroize the entire bundle: even ca_chain (non-secret) shares the
+         * allocation with dev_key (secret).  Single zeroize keeps the wipe
+         * path simple and avoids a partial-wipe bug if the layout changes. */
+        zeroize(creds, sizeof(*creds));
+        heap_caps_free(creds);
+    }
 
     return result;
 }

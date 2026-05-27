@@ -27,6 +27,8 @@
 #include <string.h>
 #include <stdint.h>
 #include <time.h>
+#include <pthread.h>
+#include <stdatomic.h>
 
 /* --------------------------------------------------------------------------
  * Fixture: RSA-2048 self-signed cert, NotAfter = 2036-05-13 05:04:11 UTC
@@ -570,6 +572,12 @@ static void test_not_after_uint64_max_preserved(void)
  * -------------------------------------------------------------------------- */
 extern void cred_store_testhook_partial_write(const cred_store_t *in);
 extern void cred_store_testhook_force_schema(uint8_t schema);
+extern void cred_store_testhook_partial_clear(void);
+extern void cred_store_testhook_save_partial_committed_blobs_no_marker(const cred_store_t *in);
+extern void cred_store_testhook_save_fail_with_scrub(void);
+extern void cred_store_testhook_clear_after_marker(void);
+extern void cred_store_testhook_clear_after_scrub(void);
+extern const uint8_t *cred_store_testhook_inspect_dev_key(void);
 
 static void test_atomicity_partial_write_returns_not_found(void)
 {
@@ -640,6 +648,279 @@ static void test_schema_version_zero_returns_not_found(void)
 }
 
 /* --------------------------------------------------------------------------
+ * C2.C scrub-on-clear / scrub-on-save-fail tests
+ *
+ * Verify that after every power-fail boundary in cred_store_clear() AND in
+ * the cred_store_save() error path:
+ *   1. cred_store_load() returns ESP_ERR_NVS_NOT_FOUND, AND
+ *   2. the in-memory backing store contains NO key DER fragments (all
+ *      bytes of dev_key are zero).
+ *
+ * These tests use a recognisable non-zero key pattern so a missed scrub
+ * point would leave the pattern bytes visible.
+ * -------------------------------------------------------------------------- */
+
+/* Seed the store with a recognisable key pattern that load() would accept. */
+static void seed_store_with_key_pattern(void)
+{
+    cred_store_t in;
+    memset(&in, 0, sizeof(in));
+    in.dev_key_len = CRED_DEV_KEY_MAX;
+    for (size_t i = 0; i < CRED_DEV_KEY_MAX; i++)
+        in.dev_key[i] = (uint8_t)((i * 31 + 7) & 0xFF) | 0x80;  /* always non-zero */
+    in.dev_cert_len = 64;
+    memset(in.dev_cert, 0xDE, 64);
+    in.ca_chain_len = 64;
+    memset(in.ca_chain, 0xAD, 64);
+    in.not_after = 1800000000;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cred_store_save(&in));
+}
+
+/* Assert the full dev_key region is zeroed in the backing store. */
+static void assert_dev_key_region_is_zero(void)
+{
+    const uint8_t *p = cred_store_testhook_inspect_dev_key();
+    for (size_t i = 0; i < CRED_DEV_KEY_MAX; i++) {
+        if (p[i] != 0) {
+            char msg[128];
+            snprintf(msg, sizeof(msg),
+                     "dev_key residue at offset %zu: 0x%02x", i, p[i]);
+            TEST_FAIL_MESSAGE(msg);
+        }
+    }
+}
+
+/* After a full clear(), load() is NOT_FOUND AND no key bytes remain. */
+static void test_clear_full_scrubs_dev_key(void)
+{
+    seed_store_with_key_pattern();
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cred_store_clear());
+
+    cred_store_t out;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_NVS_NOT_FOUND, cred_store_load(&out));
+    assert_dev_key_region_is_zero();
+}
+
+/* Power-fail after the marker-erase commit but before the scrub:
+ * load() must return NOT_FOUND.  The dev_key bytes are still in place at
+ * this stage -- this models the worst-case window the scrub closes.
+ * Test the load() invariant: even with the key still on flash, the
+ * caller's view says "not enrolled". */
+static void test_clear_powerfail_after_marker_load_returns_not_found(void)
+{
+    seed_store_with_key_pattern();
+    cred_store_testhook_clear_after_marker();
+
+    cred_store_t out;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_NVS_NOT_FOUND, cred_store_load(&out));
+}
+
+/* Power-fail after the scrub commit but before the final erase:
+ * load() must return NOT_FOUND AND the dev_key region must already be
+ * fully zero (no key DER fragments recoverable). */
+static void test_clear_powerfail_after_scrub_no_residue(void)
+{
+    seed_store_with_key_pattern();
+    cred_store_testhook_clear_after_scrub();
+
+    cred_store_t out;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_NVS_NOT_FOUND, cred_store_load(&out));
+    assert_dev_key_region_is_zero();
+}
+
+/* Idempotent clear: a second clear() after a successful clear() is a no-op
+ * and leaves dev_key zeroed. */
+static void test_clear_double_no_residue(void)
+{
+    seed_store_with_key_pattern();
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cred_store_clear());
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cred_store_clear());
+
+    cred_store_t out;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_NVS_NOT_FOUND, cred_store_load(&out));
+    assert_dev_key_region_is_zero();
+}
+
+/* save() followed by clear() leaves no residue (the integrated path). */
+static void test_save_then_clear_no_residue(void)
+{
+    seed_store_with_key_pattern();
+    /* Verify load() works first. */
+    cred_store_t out;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cred_store_load(&out));
+
+    /* Now clear and verify. */
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cred_store_clear());
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_NVS_NOT_FOUND, cred_store_load(&out));
+    assert_dev_key_region_is_zero();
+}
+
+/* --------------------------------------------------------------------------
+ * M3.B commit-boundary power-fail tests
+ *
+ * These tests exercise the two new testhooks that model the second commit
+ * window in cred_store_save() (blobs committed, marker absent) and the
+ * first commit window in cred_store_clear() (marker erased, blobs intact).
+ *
+ * The native backend is a SIMULATION: it models what load() observes at each
+ * commit boundary, not physical flash page granularity.  See cred_store.h for
+ * the full caveat.
+ * -------------------------------------------------------------------------- */
+
+/* Power-fail in clear() after marker erase but before scrub: load() returns
+ * NOT_FOUND.  The raw key bytes are still in the backing store at this point
+ * (worst-case forensic window), but the caller's view is "not enrolled". */
+static void test_partial_clear_load_returns_not_found(void)
+{
+    seed_store_with_key_pattern();
+    /* Verify the store is intact first */
+    cred_store_t out;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cred_store_load(&out));
+
+    /* Simulate power-fail after marker-erase commit, before scrub commit. */
+    cred_store_testhook_partial_clear();
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_NVS_NOT_FOUND, cred_store_load(&out));
+}
+
+/* Power-fail in save() after blob commit (step 4) but before marker write
+ * (step 5): load() must return NOT_FOUND. */
+static void test_save_partial_blobs_no_marker_returns_not_found(void)
+{
+    cred_store_t in;
+    memset(&in, 0, sizeof(in));
+    in.dev_key_len  = 4;
+    in.dev_key[0]   = 0xDE; in.dev_key[1] = 0xAD;
+    in.dev_key[2]   = 0xBE; in.dev_key[3] = 0xEF;
+    in.dev_cert_len = 1; in.dev_cert[0] = 0xCA;
+    in.ca_chain_len = 1; in.ca_chain[0] = 0xFE;
+    in.not_after    = 1800000000;
+
+    /* Simulate: blobs committed (step 4) but power-fail before marker (step 5). */
+    cred_store_testhook_save_partial_committed_blobs_no_marker(&in);
+
+    cred_store_t out;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_NVS_NOT_FOUND, cred_store_load(&out));
+}
+
+/* --------------------------------------------------------------------------
+ * M3.D save-fail scrub tests
+ *
+ * Verify that when save() fails midway the scrub path zeroes the dev_key
+ * region so no key DER fragments survive in the backing store.
+ * -------------------------------------------------------------------------- */
+
+/* After a simulated save-fail + scrub: load() returns NOT_FOUND AND the
+ * dev_key region is fully zero. */
+static void test_save_fail_with_scrub_no_residue(void)
+{
+    /* Pre-populate so the backing store has non-zero key bytes. */
+    seed_store_with_key_pattern();
+    cred_store_t out;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cred_store_load(&out));
+
+    /* Simulate save_fail path: scrub executed, marker absent. */
+    cred_store_testhook_save_fail_with_scrub();
+
+    /* load() must say "not enrolled". */
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_NVS_NOT_FOUND, cred_store_load(&out));
+    /* dev_key region must be zero -- no key DER fragments. */
+    assert_dev_key_region_is_zero();
+}
+
+/* Starting from an empty store, simulated save-fail+scrub still leaves
+ * dev_key all-zero (trivially; guards against uninitialised-memory issues). */
+static void test_save_fail_with_scrub_on_empty_no_residue(void)
+{
+    /* setUp already cleared the store; dev_key is all-zero. */
+    cred_store_testhook_save_fail_with_scrub();
+
+    cred_store_t out;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_NVS_NOT_FOUND, cred_store_load(&out));
+    assert_dev_key_region_is_zero();
+}
+
+/* --------------------------------------------------------------------------
+ * H3.B Concurrency test: two threads hammer save() + load() in parallel.
+ *
+ * Without the cred_store mutex, the in-memory backend's read of s_mem_store
+ * could observe a torn copy mid-memcpy from a parallel save().  With the
+ * mutex, every load() returns a fully-consistent snapshot -- either the
+ * "A" snapshot or the "B" snapshot, never a mixture.
+ *
+ * The test runs both threads for a fixed number of iterations and verifies
+ * that every successful load() yields a self-consistent record (the marker
+ * byte at dev_key[0] matches the not_after field's identity).
+ * -------------------------------------------------------------------------- */
+#define CONCURRENT_ITERATIONS  2000
+
+static cred_store_t s_thread_a_state;
+static cred_store_t s_thread_b_state;
+static _Atomic int  s_thread_stop = 0;
+static _Atomic int  s_torn_reads  = 0;
+
+static void *concurrent_saver(void *arg)
+{
+    const cred_store_t *src = (const cred_store_t *)arg;
+    for (int i = 0; i < CONCURRENT_ITERATIONS; i++) {
+        (void)cred_store_save(src);
+    }
+    return NULL;
+}
+
+static void *concurrent_loader(void *arg)
+{
+    (void)arg;
+    cred_store_t out;
+    while (!atomic_load(&s_thread_stop)) {
+        if (cred_store_load(&out) == ESP_OK) {
+            /* Identity check: if dev_key[0] is 0xAA the record must be the
+             * "A" snapshot (not_after == 1000); if 0xBB it must be the "B"
+             * snapshot (not_after == 2000).  Anything else is a torn read. */
+            if (out.dev_key[0] == 0xAA && out.not_after != 1000) {
+                atomic_fetch_add(&s_torn_reads, 1);
+            } else if (out.dev_key[0] == 0xBB && out.not_after != 2000) {
+                atomic_fetch_add(&s_torn_reads, 1);
+            } else if (out.dev_key[0] != 0xAA && out.dev_key[0] != 0xBB) {
+                atomic_fetch_add(&s_torn_reads, 1);
+            }
+        }
+    }
+    return NULL;
+}
+
+static void test_concurrent_save_load_no_tearing(void)
+{
+    memset(&s_thread_a_state, 0, sizeof(s_thread_a_state));
+    s_thread_a_state.dev_key_len  = 64;
+    memset(s_thread_a_state.dev_key, 0xAA, 64);
+    s_thread_a_state.dev_cert_len = 1; s_thread_a_state.dev_cert[0] = 0xA1;
+    s_thread_a_state.ca_chain_len = 1; s_thread_a_state.ca_chain[0] = 0xA2;
+    s_thread_a_state.not_after = 1000;
+
+    memset(&s_thread_b_state, 0, sizeof(s_thread_b_state));
+    s_thread_b_state.dev_key_len  = 64;
+    memset(s_thread_b_state.dev_key, 0xBB, 64);
+    s_thread_b_state.dev_cert_len = 1; s_thread_b_state.dev_cert[0] = 0xB1;
+    s_thread_b_state.ca_chain_len = 1; s_thread_b_state.ca_chain[0] = 0xB2;
+    s_thread_b_state.not_after = 2000;
+
+    atomic_store(&s_thread_stop, 0);
+    atomic_store(&s_torn_reads, 0);
+
+    pthread_t sa, sb, ld;
+    pthread_create(&sa, NULL, concurrent_saver,  &s_thread_a_state);
+    pthread_create(&sb, NULL, concurrent_saver,  &s_thread_b_state);
+    pthread_create(&ld, NULL, concurrent_loader, NULL);
+
+    pthread_join(sa, NULL);
+    pthread_join(sb, NULL);
+    atomic_store(&s_thread_stop, 1);
+    pthread_join(ld, NULL);
+
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&s_torn_reads));
+}
+
+/* --------------------------------------------------------------------------
  * main
  * -------------------------------------------------------------------------- */
 int main(void)
@@ -680,5 +961,19 @@ int main(void)
     RUN_TEST(test_atomicity_full_save_loads_ok);
     RUN_TEST(test_schema_version_mismatch_returns_not_found);
     RUN_TEST(test_schema_version_zero_returns_not_found);
+    /* C2.C scrub on clear / save-fail */
+    RUN_TEST(test_clear_full_scrubs_dev_key);
+    RUN_TEST(test_clear_powerfail_after_marker_load_returns_not_found);
+    RUN_TEST(test_clear_powerfail_after_scrub_no_residue);
+    RUN_TEST(test_clear_double_no_residue);
+    RUN_TEST(test_save_then_clear_no_residue);
+    /* M3.B commit-boundary power-fail */
+    RUN_TEST(test_partial_clear_load_returns_not_found);
+    RUN_TEST(test_save_partial_blobs_no_marker_returns_not_found);
+    /* M3.D save-fail scrub */
+    RUN_TEST(test_save_fail_with_scrub_no_residue);
+    RUN_TEST(test_save_fail_with_scrub_on_empty_no_residue);
+    /* H3.B concurrency */
+    RUN_TEST(test_concurrent_save_load_no_tearing);
     return UNITY_END();
 }

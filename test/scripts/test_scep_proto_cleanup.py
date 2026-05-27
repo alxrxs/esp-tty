@@ -10,12 +10,16 @@ cleanup label and leaked the heap-allocated enc_csr (CSR ciphertext) and
 enc_cek (the RSA-wrapped AES content-encryption key -- a secret that
 should be wiped before release).
 
-This test guards against regressing back to plain CHK() inside that
-block by:
-  - asserting that CHK_G is defined at least twice in the file (once
-    for the env_scratch block, once for the outer SignedData block);
-  - asserting that the env_scratch block (delimited by two well-known
-    landmarks) contains no naked CHK() invocations;
+After the M3.A fix the env_scratch block uses ENC_CHK (not CHK_G) so
+the macro names are unmistakably distinct:
+  - ENC_CHK: env_scratch (EnvelopedData) build block only
+  - CHK_G:   outer SignedData build block only
+
+This test guards against regressing by:
+  - asserting ENC_CHK is defined exactly once (env_scratch block) and
+    CHK_G is defined exactly once (SignedData block);
+  - asserting that the env_scratch block contains no naked CHK() or
+    CHK_G() invocations -- only ENC_CHK();
   - asserting that `done:` frees enc_csr, enc_cek, env_scratch, and
     calls mbedtls_x509_crt_free(&ra_crt).
 
@@ -36,33 +40,45 @@ def _read():
 
 
 def test_chk_g_macro_defined_twice():
-    """CHK_G must be re-defined for both the env_scratch and SignedData blocks."""
+    """After M3.A: ENC_CHK for env_scratch block, CHK_G for SignedData block.
+    ENC_CHK and CHK_G must each be defined exactly once."""
     src = _read()
-    defs = re.findall(r"#define\s+CHK_G", src)
-    assert len(defs) >= 2, (
-        f"Expected at least 2 #define CHK_G (env_scratch + SignedData "
-        f"blocks); found {len(defs)}."
+    enc_chk_defs = re.findall(r"#define\s+ENC_CHK", src)
+    chk_g_defs   = re.findall(r"#define\s+CHK_G", src)
+    assert len(enc_chk_defs) == 1, (
+        f"Expected exactly 1 #define ENC_CHK (env_scratch block); "
+        f"found {len(enc_chk_defs)}."
+    )
+    assert len(chk_g_defs) == 1, (
+        f"Expected exactly 1 #define CHK_G (SignedData block); "
+        f"found {len(chk_g_defs)}."
     )
 
 
 def test_env_scratch_block_uses_chk_g_only():
-    """The env_scratch backwards-write block must not contain naked CHK()."""
+    """The env_scratch backwards-write block must use ENC_CHK, not CHK_G or naked CHK()."""
     src = _read()
     # Locate the env_scratch block by its distinctive comment landmark and
     # the memmove that closes it.
     m = re.search(
-        r"Inside this block use CHK_G.*?"
+        r"Inside this block use ENC_CHK.*?"
         r"memmove\s*\(\s*env_scratch\s*,",
         src, re.DOTALL)
     assert m, ("Could not locate env_scratch backwards-write block.  "
-               "Did the cleanup landmark comment change?")
+               "Did the cleanup landmark comment change from 'ENC_CHK' "
+               "to something else?")
     body = m.group(0)
-    # Search for CHK( that isn't CHK_G(.
-    naked = re.findall(r"(?<!_)\bCHK\(", body)
+    # Search for CHK( that isn't ENC_CHK(.
+    naked = re.findall(r"(?<!ENC_)\bCHK\(", body)
     assert not naked, (
-        f"env_scratch block must use CHK_G() so failures unwind via "
-        f"done:; found {len(naked)} naked CHK() invocation(s) that would "
-        f"leak enc_csr/enc_cek on error."
+        f"env_scratch block must use ENC_CHK() (not CHK_G or CHK) so "
+        f"failures unwind via done:; found {len(naked)} plain CHK() or "
+        f"CHK_G() invocation(s) that could leak enc_csr/enc_cek on error."
+    )
+    # Verify ENC_CHK is actually used (not just defined and never called).
+    enc_chk_calls = re.findall(r"\bENC_CHK\(", body)
+    assert len(enc_chk_calls) > 0, (
+        "No ENC_CHK() calls found in env_scratch block -- macro is unused."
     )
 
 

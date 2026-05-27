@@ -56,26 +56,43 @@ def test_wifi_c_defines_flag_and_setter():
         "wifi.c must define wifi_signal_eap_creds_rotated()."
 
 
-def test_assoc_leave_branch_consumes_flag():
-    """The ASSOC_LEAVE event branch must consume the flag and reconnect."""
+def test_disconnect_handler_consumes_flag_unconditionally():
+    """The DISCONNECTED handler must atomic_exchange the flag at the top,
+    BEFORE inspecting ev->reason.  H2.C: if the flag were only consumed
+    inside the ASSOC_LEAVE branch, a disconnect that surfaces with a
+    different reason (RADIUS reject -> AUTH_FAIL, AP went away ->
+    BEACON_TIMEOUT, ...) would leak the flag into a later, unrelated
+    ASSOC_LEAVE, spuriously triggering the post-renewal reconnect path."""
     src = _read(WIFI_C)
-    # Extract the ASSOC_LEAVE handler block (roughly: from the if line up
-    # to the closing brace + 'goto disc_done' that signals fall-through).
+    # Locate the entire disconnect handler.
     m = re.search(
-        r"if\s*\(\s*ev->reason\s*==\s*WIFI_REASON_ASSOC_LEAVE\s*\)\s*\{"
-        r"(.*?)goto\s+disc_done;\s*\}",
+        r"event_id\s*==\s*WIFI_EVENT_STA_DISCONNECTED(.+?)disc_done\s*:",
         src, re.DOTALL)
-    assert m, "Could not locate ASSOC_LEAVE branch in wifi.c"
+    assert m, "Could not locate WIFI_EVENT_STA_DISCONNECTED handler"
     body = m.group(1)
-    assert "s_eap_creds_just_rotated" in body, (
-        "ASSOC_LEAVE branch must inspect s_eap_creds_just_rotated."
+    # The atomic_exchange consumption must appear BEFORE the
+    # WIFI_REASON_ASSOC_LEAVE check.
+    exch = re.search(r"atomic_exchange\(\s*&s_eap_creds_just_rotated", body)
+    al = body.find("WIFI_REASON_ASSOC_LEAVE")
+    assert exch, "Handler must consume s_eap_creds_just_rotated via atomic_exchange"
+    assert al > 0, "ASSOC_LEAVE branch missing from handler"
+    assert exch.start() < al, (
+        "atomic_exchange(&s_eap_creds_just_rotated) MUST run before the "
+        "ASSOC_LEAVE check so the flag is cleared on EVERY disconnect path, "
+        "not just the ones that happen to surface as ASSOC_LEAVE."
     )
-    assert "atomic_exchange" in body, (
-        "ASSOC_LEAVE branch must atomic_exchange the flag (read+clear)."
-    )
-    assert "esp_wifi_connect" in body, (
+    # The ASSOC_LEAVE branch should still observe the value and reconnect.
+    al_branch = re.search(
+        r"if\s*\(\s*ev->reason\s*==\s*WIFI_REASON_ASSOC_LEAVE\s*\).*?disc_done;\s*\}",
+        body, re.DOTALL)
+    assert al_branch, "Could not locate ASSOC_LEAVE branch"
+    al_body = al_branch.group(0)
+    assert "rotated_expected" in al_body, (
+        "ASSOC_LEAVE branch must check the consumed-flag value to decide "
+        "between reconnect and planned-teardown.")
+    assert "esp_wifi_connect" in al_body, (
         "ASSOC_LEAVE branch must call esp_wifi_connect() when the flag "
-        "is set, otherwise the device stays offline after renewal."
+        "was set, otherwise the device stays offline after renewal."
     )
 
 

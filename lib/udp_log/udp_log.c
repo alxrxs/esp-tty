@@ -177,12 +177,19 @@ static SemaphoreHandle_t s_acc_mutex = NULL;
  * s_acc_mutex, so a single static instance is safe. */
 static char s_wire[UDP_LOG_SEQ_HDR_MAX + UDP_LOG_DGRAM_MAX];
 
-/* Flush task handle + running flag. */
+/* Flush task handle + running flag.
+ *
+ * `s_running` is read by the flush task (one task) and written by
+ * udp_log_init / udp_log_deinit running in the caller task; possibly on
+ * a different ESP32-S3 core.  `s_installed` is read by udp_log_deinit
+ * (caller task) and written by udp_log_init (caller task).  Both are
+ * conceptually shared across tasks/cores, so use _Atomic with default
+ * seq_cst ordering. */
 static TaskHandle_t s_flush_task = NULL;
-static volatile bool s_running   = false;
+static _Atomic bool s_running   = false;
 
 /* True after udp_log_init() installs the hook. */
-static volatile bool s_installed = false;
+static _Atomic bool s_installed = false;
 
 /* --------------------------------------------------------------------------
  * Lazy socket creation
@@ -353,7 +360,7 @@ static void flush_task_fn(void *arg)
     const TickType_t poll_ticks    = pdMS_TO_TICKS(UDP_LOG_POLL_MS);
     const TickType_t timeout_ticks = pdMS_TO_TICKS(UDP_LOG_FLUSH_TIMEOUT_MS);
 
-    while (s_running) {
+    while (atomic_load(&s_running)) {
         vTaskDelay(poll_ticks);
         if (!s_acc_mutex) continue;
         if (xSemaphoreTake(s_acc_mutex, portMAX_DELAY) != pdTRUE) continue;
@@ -375,42 +382,47 @@ static void flush_task_fn(void *arg)
  * -------------------------------------------------------------------------- */
 esp_err_t udp_log_init(void)
 {
-    if (s_installed) return ESP_OK;
+    /* First-call wins: atomically claim the install slot.  Without the
+     * exchange, two concurrent callers could both clear the early-return
+     * check, both create mutexes, and leak the first set. */
+    if (atomic_exchange(&s_installed, true)) return ESP_OK;
 
     s_init_mutex = xSemaphoreCreateMutex();
     s_acc_mutex  = xSemaphoreCreateMutex();
     if (!s_init_mutex || !s_acc_mutex) {
         if (s_init_mutex) { vSemaphoreDelete(s_init_mutex); s_init_mutex = NULL; }
         if (s_acc_mutex)  { vSemaphoreDelete(s_acc_mutex);  s_acc_mutex  = NULL; }
+        atomic_store(&s_installed, false);
         return ESP_FAIL;
     }
 
-    s_running = true;
+    atomic_store(&s_running, true);
     if (xTaskCreate(flush_task_fn, "udp_log", UDP_LOG_FLUSH_STACK, NULL,
                     UDP_LOG_FLUSH_PRIO, &s_flush_task) != pdPASS) {
-        s_running = false;
+        atomic_store(&s_running, false);
         vSemaphoreDelete(s_init_mutex);
         vSemaphoreDelete(s_acc_mutex);
         s_init_mutex = NULL;
         s_acc_mutex  = NULL;
+        atomic_store(&s_installed, false);
         return ESP_FAIL;
     }
 
     s_prev_vprintf = esp_log_set_vprintf(udp_log_vprintf_hook);
-    s_installed    = true;
     return ESP_OK;
 }
 
 void udp_log_deinit(void)
 {
-    if (!s_installed) return;
+    /* atomic_exchange returns the prior value; if it was false there was
+     * nothing to tear down. */
+    if (!atomic_exchange(&s_installed, false)) return;
 
     esp_log_set_vprintf(s_prev_vprintf);
     s_prev_vprintf = NULL;
-    s_installed    = false;
 
     /* Tell the flush task to exit; it will self-delete on the next tick. */
-    s_running = false;
+    atomic_store(&s_running, false);
 
     int fd = atomic_exchange(&s_sock, -1);
     if (fd >= 0) {

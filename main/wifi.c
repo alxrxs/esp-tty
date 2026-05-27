@@ -79,6 +79,7 @@
 /* config.h must come before the WIFI_USE_ENTERPRISE guard below because
  * that macro is defined there (not on the command line). */
 #include "wifi.h"
+#include "wifi_backoff.h"
 #ifdef BRIDGE_LOOPBACK
 /* QEMU/Wokwi simulation: open AP, no password, no authmode requirement */
 #define WIFI_SSID  "Wokwi-GUEST"
@@ -346,7 +347,11 @@ extern const uint8_t eap_client_key_end[]   asm("_binary_client_key_end");
 static const char *TAG = "wifi";
 
 static EventGroupHandle_t s_wifi_event_group;
-static int                s_retry_num = 0;
+/* s_retry_num is read/written by both the system event-loop task (in the
+ * disconnect handler) and the application task that observes connection
+ * progress.  On dual-core ESP32-S3 plain `int` provides no cross-core
+ * visibility; use _Atomic with default seq_cst ordering. */
+static _Atomic int        s_retry_num = 0;
 
 /* Double-init guard: esp_netif_init / esp_event_loop_create_default /
  * esp_wifi_init must each be called exactly once.  Without this flag,
@@ -722,16 +727,24 @@ static void ipv6_bring_up_bootstrap(void)
 
 static _Atomic bool s_ntp_started = false;
 
-/* Set by cert_renewer just before it calls esp_wifi_disconnect() to trigger
- * 802.1X re-auth with freshly enrolled credentials.  When the resulting
- * WIFI_EVENT_STA_DISCONNECTED arrives with reason=ASSOC_LEAVE, the event
- * handler normally treats it as a planned teardown and skips reconnect.
- * With this flag set, we instead clear it and call esp_wifi_connect() so
- * the supplicant picks up the new EAP creds and re-associates.
+/* Cert-renewal post-disconnect reconnect signal.
  *
- * Only used in Mode C builds (WIFI_ENTERPRISE_SSID && !WIFI_USE_ENTERPRISE)
- * where the cert_renewer task runs, but the flag itself is defined
- * unconditionally to keep the event handler simple. */
+ * Lifecycle (single-shot, edge-triggered):
+ *   1. cert_renewer calls wifi_signal_eap_creds_rotated() exactly ONCE,
+ *      then calls esp_wifi_disconnect().
+ *   2. The NEXT WIFI_EVENT_STA_DISCONNECTED event (regardless of reason)
+ *      consumes the flag via atomic_exchange and clears it.
+ *      - If the reason is ASSOC_LEAVE (the expected outcome of our own
+ *        disconnect call), the handler reconnects with the new creds.
+ *      - If the reason is anything else (e.g. AUTH_FAIL because RADIUS
+ *        rejected the new cert, or BEACON_TIMEOUT because the AP went
+ *        away first), the handler still consumes the flag (so it cannot
+ *        leak into a future unrelated ASSOC_LEAVE) and falls through to
+ *        the normal classification + backoff path -- which is the right
+ *        answer for those reasons.
+ *
+ * Only meaningfully set in Mode C builds where the cert_renewer task runs,
+ * but the flag is defined unconditionally to keep the handler simple. */
 static _Atomic bool s_eap_creds_just_rotated = false;
 
 void wifi_signal_eap_creds_rotated(void)
@@ -813,7 +826,15 @@ static void ntp_start_task(void *pvParameters)
     while ((xTaskGetTickCount() - ntp_start) < ntp_timeout) {
         esp_err_t wret = esp_netif_sntp_sync_wait(pdMS_TO_TICKS(5000));
         if (wret == ESP_OK) {
-            /* sync_cb already logged the timestamp */
+            /* sync_cb already logged the timestamp.
+             *
+             * M1.B: clear s_ntp_started so that a subsequent WiFi reconnect
+             * that calls ntp_dispatch_start() (via IP_EVENT_STA_GOT_IP) can
+             * start a fresh NTP sync on the new netif.  Without this reset the
+             * atomic_exchange guard in ntp_dispatch_start() would see "true"
+             * forever after the first successful sync and permanently block
+             * re-sync on WiFi reconnects. */
+            atomic_store(&s_ntp_started, false);
             vTaskDelete(NULL);
             return;
         }
@@ -822,6 +843,11 @@ static void ntp_start_task(void *pvParameters)
     ESP_LOGW(TAG, "NTP: sync not complete within %d s -- continuing in background",
              NTP_SYNC_TIMEOUT_SEC);
 
+    /* M1.B: also clear the guard on the timeout path so that a subsequent
+     * WiFi reconnect can re-attempt NTP sync.  The SNTP client continues
+     * running in the background (esp_netif_sntp_deinit is not called here),
+     * but ntp_dispatch_start() is allowed to start a fresh task next time. */
+    atomic_store(&s_ntp_started, false);
     vTaskDelete(NULL);
 }
 
@@ -974,6 +1000,94 @@ static void apply_max_tx_power(void)
 }
 
 /* --------------------------------------------------------------------------
+ * Reconnect backoff timer
+ *
+ * Deferring the esp_wifi_connect() call to a FreeRTOS one-shot timer keeps
+ * the system event task unblocked during the backoff window.  Blocking the
+ * event task with vTaskDelay() stalls ALL WIFI_EVENT and IP_EVENT dispatch
+ * for the delay's duration -- including the STA_GOT_IP we are waiting for
+ * if the driver reconnects via another path, and any subsequent disconnect
+ * events (which would otherwise queue up and overflow).
+ *
+ * Race-safety: the timer-handle pointer is created exactly once (under the
+ * double-init guard) and is only written-once.  Start/stop calls and the
+ * timer callback all run from various tasks but operate on FreeRTOS timer
+ * APIs that are themselves task-safe.  When a fresh disconnect arrives
+ * while a backoff is pending, xTimerStop+xTimerChangePeriod+xTimerStart
+ * atomically replaces the pending fire (xTimerChangePeriod implicitly
+ * starts the timer; but we call xTimerStop first so the callback cannot
+ * race with the change).  If a STA_CONNECTED/GOT_IP arrives while the
+ * timer is pending we stop it explicitly so the deferred connect doesn't
+ * fire after we are already up.
+ * -------------------------------------------------------------------------- */
+static TimerHandle_t s_reconnect_timer = NULL;
+
+static void reconnect_timer_cb(TimerHandle_t t)
+{
+    (void)t;
+    /* The timer callback runs in the timer-service task.  If we are
+     * already connected (s_retry_num reset to 0 by the success path),
+     * skip the connect to avoid a needless extra association attempt. */
+    EventBits_t bits = s_wifi_event_group
+        ? xEventGroupGetBits(s_wifi_event_group) : 0;
+    if (bits & WIFI_CONNECTED_BIT) {
+        ESP_LOGD(TAG, "reconnect_timer_cb: already connected -- skipping");
+        return;
+    }
+    esp_err_t err = esp_wifi_connect();
+    if (err != ESP_OK) {
+        /* Most likely ESP_ERR_WIFI_CONN if the driver is in a transitional
+         * state.  Log + leave; the next disconnect event will re-arm us. */
+        ESP_LOGW(TAG, "reconnect_timer_cb: esp_wifi_connect: %s",
+                 esp_err_to_name(err));
+    }
+}
+
+static void reconnect_timer_schedule(uint32_t delay_ms)
+{
+    if (!s_reconnect_timer) {
+        /* Should not happen: the timer is created in wifi_init_sta /
+         * wifi_smart_init_common before the event handler is registered.
+         * If it ever does, fall back to immediate connect so we don't
+         * silently stop retrying. */
+        ESP_LOGW(TAG, "reconnect_timer_schedule: timer not created -- "
+                      "calling esp_wifi_connect immediately");
+        esp_wifi_connect();
+        return;
+    }
+    /* Stop first to cancel any pending fire, then set the new period and
+     * start.  xTimerChangePeriod auto-starts but doesn't cancel a pending
+     * callback that has already been queued by the timer service; the
+     * explicit stop avoids that corner. */
+    if (delay_ms == 0) delay_ms = 1;  /* xTimerChangePeriod rejects 0 */
+    xTimerStop(s_reconnect_timer, 0);
+    xTimerChangePeriod(s_reconnect_timer, pdMS_TO_TICKS(delay_ms), 0);
+    /* xTimerChangePeriod implicitly starts a stopped timer; xTimerStart
+     * is a no-op safety belt against future FreeRTOS behaviour changes. */
+    xTimerStart(s_reconnect_timer, 0);
+}
+
+static void reconnect_timer_cancel(void)
+{
+    if (s_reconnect_timer) xTimerStop(s_reconnect_timer, 0);
+}
+
+static void reconnect_timer_create_once(void)
+{
+    if (s_reconnect_timer) return;
+    s_reconnect_timer = xTimerCreate(
+        "wifi_reconn",
+        pdMS_TO_TICKS(1000),   /* placeholder; real period set on schedule */
+        pdFALSE,               /* one-shot */
+        NULL,
+        reconnect_timer_cb);
+    if (!s_reconnect_timer) {
+        ESP_LOGW(TAG, "Failed to create reconnect-backoff timer -- "
+                      "falling back to immediate reconnects (no backoff)");
+    }
+}
+
+/* --------------------------------------------------------------------------
  * Event handler
  *
  * Runs in the system event task context (stack ~3 kB).  Keep it lean.
@@ -1000,6 +1114,10 @@ static void wifi_event_handler(void *arg,
             esp_wifi_connect();
 
         } else if (event_id == WIFI_EVENT_STA_CONNECTED) {
+            /* Cancel any pending deferred reconnect: L2 is back up, so a
+             * stale fire would just bounce the link. */
+            reconnect_timer_cancel();
+
             /* L2 association succeeded.
              *
              * Static IPv4: stop the DHCP client (which may have auto-started
@@ -1034,7 +1152,7 @@ static void wifi_event_handler(void *arg,
                         ESP_LOGI(TAG, "Gateway    : " IPSTR, IP2STR(&ip.gw));
                     }
                 }
-                s_retry_num = 0;
+                atomic_store(&s_retry_num, 0);
                 xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
 #if !defined(BRIDGE_LOOPBACK) && defined(MDNS_ENABLE)
                 mdns_dispatch_start();
@@ -1075,7 +1193,7 @@ static void wifi_event_handler(void *arg,
                     ESP_LOGI(TAG, "Gateway    : " IPSTR, IP2STR(&ip.gw));
                 }
             }
-            s_retry_num = 0;
+            atomic_store(&s_retry_num, 0);
             xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
 #if !defined(BRIDGE_LOOPBACK) && defined(MDNS_ENABLE)
             mdns_dispatch_start();
@@ -1127,99 +1245,87 @@ static void wifi_event_handler(void *arg,
             if (s_dhcp_watchdog) xTimerStop(s_dhcp_watchdog, 0);
 #endif
 
+            /* ALWAYS consume the cert-renewal flag here, regardless of
+             * reason code.  See the s_eap_creds_just_rotated declaration
+             * for the lifecycle.  Without this, the flag could leak when
+             * the disconnect that follows cert_renewer's
+             * esp_wifi_disconnect() surfaces with a reason other than
+             * ASSOC_LEAVE (RADIUS reject -> AUTH_FAIL, AP went away ->
+             * BEACON_TIMEOUT, ...).  A future, unrelated ASSOC_LEAVE
+             * would then spuriously trigger the post-renewal reconnect. */
+            bool rotated_expected = atomic_exchange(
+                &s_eap_creds_just_rotated, false);
+
             /* Reason 8 (ASSOC_LEAVE) is the disconnect that fires when we
              * call esp_wifi_stop() ourselves to transition between PSK
              * bootstrap and enterprise.  The next wifi_mode_* call will
              * start a fresh session; auto-reconnect here would race it. */
             if (ev->reason == WIFI_REASON_ASSOC_LEAVE) {
-                /* If cert_renewer just rotated creds and called
-                 * esp_wifi_disconnect() to force 802.1X re-auth, treat the
-                 * resulting ASSOC_LEAVE as a reconnect trigger, NOT a
-                 * planned teardown.  smart_eap_apply_creds() has already
-                 * pushed the new certificates into the supplicant, so the
-                 * next esp_wifi_connect() will use them. */
-                bool rotated_expected = atomic_exchange(
-                    &s_eap_creds_just_rotated, false);
                 if (rotated_expected) {
+                    /* cert_renewer rotated creds and called
+                     * esp_wifi_disconnect() to force 802.1X re-auth.
+                     * smart_eap_apply_creds() pushed the new certificates
+                     * into the supplicant; the connect below will use them. */
                     ESP_LOGI(TAG, "disconnected (reason %d -- post-renewal: "
                                   "reconnecting with new EAP creds)",
                              ev->reason);
-                    s_retry_num = 0;
-                    esp_wifi_connect();
+                    atomic_store(&s_retry_num, 0);
+                    reconnect_timer_cancel();
+                    esp_err_t cerr = esp_wifi_connect();
+                    if (cerr != ESP_OK) {
+                        ESP_LOGW(TAG, "post-renewal esp_wifi_connect: %s",
+                                 esp_err_to_name(cerr));
+                    }
                     goto disc_done;
                 }
                 ESP_LOGI(TAG, "disconnected (reason %d -- planned teardown)",
                          ev->reason);
-                /* fall through past the retry block */
+                reconnect_timer_cancel();
                 goto disc_done;
             }
 
-            /* Classify the disconnect reason so security-relevant failures
-             * (auth/handshake/association rejection) use a much longer
-             * backoff than transient radio problems.  Hammering RADIUS
-             * with bad credentials saturates audit logs at the upstream. */
-            bool security_fail = false;
-            switch (ev->reason) {
-                case WIFI_REASON_AUTH_FAIL:
-                case WIFI_REASON_HANDSHAKE_TIMEOUT:
-                case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
-                case WIFI_REASON_ASSOC_FAIL:
-                case WIFI_REASON_AUTH_EXPIRE:
-                case WIFI_REASON_802_1X_AUTH_FAILED:
-                    security_fail = true;
-                    break;
-                default:
-                    break;
-            }
+            /* Classify the disconnect reason: security-relevant failures
+             * (auth, handshake, key-management, 802.1X) use the longer
+             * 5-minute cap so RADIUS rejections / MIC failures / cipher
+             * mismatches don't flood upstream audit logs or accelerate
+             * brute-force attempts.  See wifi_backoff.c for the full list
+             * of security-relevant reason codes and their rationales. */
+            bool security_fail = wifi_backoff_is_security_failure(ev->reason);
 
             const bool infinite = (WIFI_MAX_RETRY == 0);
-            if (infinite || s_retry_num < WIFI_MAX_RETRY) {
-                s_retry_num++;
+            int cur_retry = atomic_load(&s_retry_num);
+            if (infinite || cur_retry < WIFI_MAX_RETRY) {
+                /* atomic_fetch_add returns the previous value; we want the
+                 * post-increment for the backoff/log computations below. */
+                cur_retry = atomic_fetch_add(&s_retry_num, 1) + 1;
 
-                /* Exponential backoff with jitter.  Transient (radio) caps
-                 * at 60s; security-relevant failures cap at 5 minutes so
-                 * a real RADIUS rejection doesn't flood audit logs.  We
-                 * still retry forever -- the rejection could be transient
-                 * (e.g. RADIUS server restart). */
-                uint32_t base_ms = 1000u << ((s_retry_num - 1) < 6
-                                              ? (s_retry_num - 1) : 6);
-                uint32_t cap_ms = security_fail ? 300000u : 60000u;
-                if (base_ms > cap_ms) base_ms = cap_ms;
-                /* Jitter using esp_random; fall back to s_retry_num
-                 * mixing if esp_random is unavailable in this context. */
-                uint32_t jitter_window = base_ms / 4;
-                uint32_t jitter = jitter_window ?
-                    (esp_random() % (2u * jitter_window)) - jitter_window
-                    : 0u;
-                uint32_t delay_ms = base_ms + jitter;
+                uint32_t delay_ms = wifi_backoff_compute_ms(
+                    cur_retry, security_fail, esp_random());
 
-                /* Rate-limit the disconnect log: at retry < 5 print every
-                 * event; afterwards print 1-of-10 to keep the trail without
+                /* Rate-limit the disconnect log: every event for the
+                 * first 5 retries, then 1-of-10 to keep the trail without
                  * flooding. */
-                bool emit = (s_retry_num <= 5) || ((s_retry_num % 10) == 0);
+                bool emit = (cur_retry <= 5) || ((cur_retry % 10) == 0);
                 if (emit) {
                     const char *kind = security_fail ? "AUTH" : "LINK";
                     if (infinite) {
                         ESP_LOGW(TAG,
                             "%s disconnect (reason %d), retry %d (infinite), "
                             "backoff %u ms",
-                            kind, ev->reason, s_retry_num, (unsigned)delay_ms);
+                            kind, ev->reason, cur_retry, (unsigned)delay_ms);
                     } else {
                         ESP_LOGW(TAG,
                             "%s disconnect (reason %d), retry %d/%d, "
                             "backoff %u ms",
-                            kind, ev->reason, s_retry_num, WIFI_MAX_RETRY,
+                            kind, ev->reason, cur_retry, WIFI_MAX_RETRY,
                             (unsigned)delay_ms);
                     }
                 }
 
-                /* vTaskDelay inside the system event task blocks all other
-                 * WiFi/IP events for the duration -- acceptable for short
-                 * (<= 60s) backoff since no useful event would arrive while
-                 * we're disassociated anyway, and the alternative (a timer)
-                 * adds significant complexity for marginal gain. */
-                vTaskDelay(pdMS_TO_TICKS(delay_ms));
-                esp_wifi_connect();
+                /* Defer the reconnect to the timer-service task so the
+                 * system event task stays free to dispatch other WiFi/IP
+                 * events during the backoff window. */
+                reconnect_timer_schedule(delay_ms);
             } else {
                 /* Signal permanent failure to wifi_init_sta()'s wait. */
                 xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
@@ -1227,9 +1333,10 @@ static void wifi_event_handler(void *arg,
                          WIFI_MAX_RETRY, ev->reason);
 
                 /* RECONNECT_FOREVER: keep retrying even after signalling
-                 * failure so we recover if the AP comes back later.
-                 * Remove the call below if you want hard-stop semantics. */
-                esp_wifi_connect();
+                 * failure so we recover if the AP comes back later.  Use
+                 * the LINK cap so we are not stuck at 5 min after an
+                 * unrelated transient at the give-up boundary. */
+                reconnect_timer_schedule(WIFI_BACKOFF_LINK_CAP_MS);
             }
         disc_done: ;
         }
@@ -1279,7 +1386,7 @@ static void wifi_event_handler(void *arg,
             if (s_dhcp_watchdog) xTimerStop(s_dhcp_watchdog, 0);
 #endif
 
-            s_retry_num = 0;
+            atomic_store(&s_retry_num, 0);
             xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
 #if !defined(BRIDGE_LOOPBACK) && defined(MDNS_ENABLE)
             mdns_dispatch_start();
@@ -1348,6 +1455,10 @@ esp_err_t wifi_init_sta(void)
                       "retries will rely on lwIP's default behaviour");
     }
 #endif
+
+    /* Create the reconnect-backoff timer before any event handler is
+     * registered so the disconnect handler can schedule it from event 0. */
+    reconnect_timer_create_once();
 
     /* 2. Initialise the TCP/IP stack and create the default event loop.
      *    Order matters: esp_netif_init() before esp_event_loop_create_default()
@@ -1731,33 +1842,69 @@ esp_err_t wifi_init_sta(void)
  * parse error -- a parse failure shouldn't block the EAP-TLS attempt
  * (the supplicant will emit its own diagnostic).  Used by Mode B+'s
  * wifi_init_enterprise_bootstrap to detect when the embedded cert has
- * aged past validity (M8 fix). */
+ * aged past validity (M8 fix).
+ *
+ * M1.A: mbedtls_x509_time fields are UTC.  mktime() interprets struct tm
+ * as LOCAL time via the process TZ (set by NTP init to e.g. EET-2EEST),
+ * which would compute expiry 2-3 hours early and trigger premature
+ * re-enrollment.  We use Howard Hinnant's days-from-civil formula
+ * (the same algorithm used by cred_store's x509_time_to_epoch) to
+ * convert UTC fields to a POSIX epoch without any TZ interpretation.
+ *
+ * M1.F: the embedded cert bytes never change at runtime, so parsing on
+ * every NTP-sync iteration is wasteful.  We cache the valid_to epoch in
+ * a file-static variable and parse only on the first call.  The cached
+ * value depends only on cert bytes (not on system time), so it remains
+ * correct across NTP time-jumps. */
+static time_t s_embedded_cert_valid_to_epoch = -1;   /* -1 = not yet parsed */
+
 static bool eval_embedded_client_cert_expired(time_t now)
 {
-    mbedtls_x509_crt crt;
-    mbedtls_x509_crt_init(&crt);
-    size_t crt_len = (size_t)(eap_client_crt_end - eap_client_crt_start);
-    int rc = mbedtls_x509_crt_parse(&crt, eap_client_crt_start, crt_len);
-    bool expired = false;
-    if (rc == 0) {
-        struct tm tmv = {
-            .tm_year = crt.valid_to.year - 1900,
-            .tm_mon  = crt.valid_to.mon  - 1,
-            .tm_mday = crt.valid_to.day,
-            .tm_hour = crt.valid_to.hour,
-            .tm_min  = crt.valid_to.min,
-            .tm_sec  = crt.valid_to.sec,
-        };
-        time_t expiry = mktime(&tmv);
-        if (expiry > 0 &&
-            (expiry - now) < (time_t)CERT_REENROLL_THRESHOLD_SEC) {
-            expired = true;
+    /* Lazy-initialise once: parse the cert and cache the notAfter epoch. */
+    if (s_embedded_cert_valid_to_epoch < 0) {
+        mbedtls_x509_crt crt;
+        mbedtls_x509_crt_init(&crt);
+        size_t crt_len = (size_t)(eap_client_crt_end - eap_client_crt_start);
+        int rc = mbedtls_x509_crt_parse(&crt, eap_client_crt_start, crt_len);
+        if (rc != 0) {
+            ESP_LOGW(TAG, "[b+] mbedtls_x509_crt_parse(client.crt): %d", rc);
+            mbedtls_x509_crt_free(&crt);
+            /* Leave s_embedded_cert_valid_to_epoch at -1; return false so
+             * a parse failure doesn't permanently block the EAP-TLS attempt. */
+            return false;
         }
-    } else {
-        ESP_LOGW(TAG, "[b+] mbedtls_x509_crt_parse(client.crt): %d", rc);
+
+        /* Convert UTC notAfter using Howard Hinnant's date-to-epoch formula.
+         * This is equivalent to timegm() but without the TZ lookup that
+         * mktime() performs.  newlib on ESP-IDF does not export timegm(). */
+        const mbedtls_x509_time *vt = &crt.valid_to;
+        int y = vt->year;
+        int m = vt->mon;
+        int d = vt->day;
+        y -= (m <= 2);
+        int era = (y >= 0 ? y : y - 399) / 400;
+        unsigned yoe = (unsigned)(y - era * 400);
+        unsigned doy = (153U * (unsigned)(m > 2 ? m - 3 : m + 9) + 2U) / 5U
+                       + (unsigned)d - 1U;
+        unsigned doe = yoe * 365U + yoe / 4U - yoe / 100U + doy;
+        int64_t days  = (int64_t)era * 146097LL + (int64_t)doe - 719468LL;
+        int64_t epoch = days * 86400LL
+                      + (int64_t)vt->hour * 3600LL
+                      + (int64_t)vt->min  * 60LL
+                      + (int64_t)vt->sec;
+
+        mbedtls_x509_crt_free(&crt);
+        s_embedded_cert_valid_to_epoch = (time_t)epoch;
+        ESP_LOGI(TAG, "[b+] embedded client.crt notAfter epoch cached: %lld",
+                 (long long)s_embedded_cert_valid_to_epoch);
     }
-    mbedtls_x509_crt_free(&crt);
-    return expired;
+
+    if (s_embedded_cert_valid_to_epoch <= 0) {
+        /* Implausible epoch from parse -- don't block on it. */
+        return false;
+    }
+
+    return (s_embedded_cert_valid_to_epoch - now) < (time_t)CERT_REENROLL_THRESHOLD_SEC;
 }
 #endif /* WIFI_USE_ENTERPRISE */
 
@@ -1824,7 +1971,7 @@ static esp_err_t wifi_mode_psk(const char *ssid,
     /* Reset event-group bits from any previous round. */
     xEventGroupClearBits(s_wifi_event_group,
                          WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
-    s_retry_num = 0;
+    atomic_store(&s_retry_num, 0);
 
     /* Mark PSK bootstrap as active BEFORE esp_wifi_start() so the event
      * handler sees the flag when WIFI_EVENT_STA_CONNECTED fires.  This
@@ -1891,6 +2038,20 @@ static bool smart_ntp_wait_sync(void)
     const char *const servers[] = { NTP_SERVERS };
     const size_t n_servers = sizeof(servers) / sizeof(servers[0]);
 
+    /* M1.D: cap num_of_servers against CONFIG_LWIP_SNTP_MAX_SERVERS so we
+     * don't write beyond the cfg.servers[] array bound.  Mirror the same
+     * cap + warn pattern used in ntp_start_task. */
+    if (n_servers > CONFIG_LWIP_SNTP_MAX_SERVERS) {
+        for (size_t i = CONFIG_LWIP_SNTP_MAX_SERVERS; i < n_servers; i++) {
+            ESP_LOGW(TAG, "[smart] NTP server[%u] \"%s\" dropped (exceeds "
+                          "CONFIG_LWIP_SNTP_MAX_SERVERS=%d)",
+                     (unsigned)i, servers[i], CONFIG_LWIP_SNTP_MAX_SERVERS);
+        }
+    }
+    const size_t n_servers_capped = (n_servers < (size_t)CONFIG_LWIP_SNTP_MAX_SERVERS)
+                                    ? n_servers
+                                    : (size_t)CONFIG_LWIP_SNTP_MAX_SERVERS;
+
     esp_sntp_config_t cfg = {
         .smooth_sync                = false,
         .server_from_dhcp           = false,
@@ -1900,9 +2061,9 @@ static bool smart_ntp_wait_sync(void)
         .renew_servers_after_new_IP = false,
         .ip_event_to_renew          = IP_EVENT_STA_GOT_IP,
         .index_of_first_server      = 0,
-        .num_of_servers             = n_servers,
+        .num_of_servers             = n_servers_capped,
     };
-    for (size_t i = 0; i < n_servers && i < CONFIG_LWIP_SNTP_MAX_SERVERS; i++) {
+    for (size_t i = 0; i < n_servers_capped; i++) {
         cfg.servers[i] = servers[i];
     }
 
@@ -2067,6 +2228,13 @@ static esp_err_t smart_on_ip_full(void)
     {
         cred_store_t *fresh_creds = heap_caps_calloc(1, sizeof(cred_store_t),
                                                      MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+        /* M1.E: log clearly when the allocation fails so the subsequent
+         * "clock unchanged" warning is not the only diagnostic visible. */
+        if (!fresh_creds) {
+            ESP_LOGW(TAG, "[smart] no-NTP mode: calloc(%u B) for cred_store_t "
+                          "failed -- cannot set clock from cert NotBefore",
+                     (unsigned)sizeof(cred_store_t));
+        }
         if (fresh_creds && cred_store_load(fresh_creds) == ESP_OK && fresh_creds->dev_cert_len > 0) {
             uint64_t not_before_epoch = 0;
             esp_err_t nb_err = cred_store_parse_not_before(
@@ -2296,7 +2464,7 @@ static esp_err_t wifi_mode_enterprise(const char         *ssid,
 
     xEventGroupClearBits(s_wifi_event_group,
                          WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
-    s_retry_num = 0;
+    atomic_store(&s_retry_num, 0);
 
     /* Clear PSK-bootstrap flag BEFORE esp_wifi_start() so the event handler
      * sees that we are now on the enterprise (production) network and applies
@@ -2360,16 +2528,39 @@ static esp_err_t wifi_mode_enterprise(const char         *ssid,
  * Writes the two handler instance handles to *out_inst_wifi / *out_inst_ip
  * so callers can unregister them once the enterprise connection is established.
  *
- * Returns ESP_OK on success; aborts via configASSERT / ESP_ERROR_CHECK on any
- * unrecoverable setup failure (same behaviour as the original per-function
- * code). */
+ * Idempotent: on a second call this function reuses the cached handler
+ * instances from the first successful init and writes them to the
+ * out-parameters.  Callers can therefore call us unconditionally and still
+ * pass valid handles to esp_event_handler_instance_unregister later.
+ *
+ * Returns ESP_OK on success (including the already-inited reuse path);
+ * aborts via configASSERT / ESP_ERROR_CHECK on any unrecoverable setup
+ * failure that should never happen at runtime.  Returns ESP_ERR_INVALID_ARG
+ * if either out-parameter pointer is NULL. */
+static esp_event_handler_instance_t s_cached_inst_wifi = NULL;
+static esp_event_handler_instance_t s_cached_inst_ip   = NULL;
+
 static esp_err_t wifi_smart_init_common(
     esp_event_handler_instance_t *out_inst_wifi,
     esp_event_handler_instance_t *out_inst_ip)
 {
-    /* 1. Shared resources (event group, DHCP watchdog).
-     * wifi_event_group_reset() deletes any stale handle first so a
-     * repeated init path doesn't leak the previous one. */
+    if (!out_inst_wifi || !out_inst_ip) return ESP_ERR_INVALID_ARG;
+
+    /* 1. Double-init guard FIRST.  Earlier revisions reset the event group
+     * before this check, which deleted-and-recreated the group on every
+     * call even when we then bailed out without doing the rest of the
+     * init -- leaking semantics for any task holding a handle to the
+     * original group.  Check the guard first so the destructive
+     * wifi_event_group_reset() runs only on the genuine first init. */
+    bool already_inited = atomic_exchange(&s_wifi_inited, true);
+    if (already_inited) {
+        ESP_LOGW(TAG, "[smart] wifi already inited; reusing cached handles");
+        *out_inst_wifi = s_cached_inst_wifi;
+        *out_inst_ip   = s_cached_inst_ip;
+        return ESP_OK;
+    }
+
+    /* 2. Shared resources (event group, DHCP watchdog). */
     wifi_event_group_reset();
 
 #if DHCP_RETRY_TIMEOUT_SEC > 0 && !defined(USE_STATIC_IPV4)
@@ -2382,13 +2573,9 @@ static esp_err_t wifi_smart_init_common(
     }
 #endif
 
-    /* 2. TCP/IP stack + netif.  Skip if a previous wifi init already
-     * brought these up; calling them twice asserts on ESP_ERR_INVALID_STATE. */
-    bool already_inited = atomic_exchange(&s_wifi_inited, true);
-    if (already_inited) {
-        ESP_LOGW(TAG, "[smart] wifi already inited; skipping netif/event/wifi init");
-        return ESP_ERR_INVALID_STATE;
-    }
+    reconnect_timer_create_once();
+
+    /* 3. TCP/IP stack + event loop. */
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
@@ -2424,13 +2611,17 @@ static esp_err_t wifi_smart_init_common(
     }
 #endif
 
-    /* 4. Persistent event handlers (reconnect + IP logging). */
+    /* 5. Persistent event handlers (reconnect + IP logging).  Cache the
+     * resulting instance handles so the idempotent reuse path above can
+     * hand them back to subsequent callers. */
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
         WIFI_EVENT, ESP_EVENT_ANY_ID,
         &wifi_event_handler, NULL, out_inst_wifi));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
         IP_EVENT, IP_EVENT_STA_GOT_IP,
         &wifi_event_handler, NULL, out_inst_ip));
+    s_cached_inst_wifi = *out_inst_wifi;
+    s_cached_inst_ip   = *out_inst_ip;
 
 #if IPV6_MODE != IPV6_MODE_DISABLED && defined(CONFIG_LWIP_IPV6)
     esp_event_handler_instance_t inst_ip6;
@@ -2449,7 +2640,12 @@ esp_err_t wifi_init_smart(void)
 {
     esp_event_handler_instance_t inst_wifi;
     esp_event_handler_instance_t inst_ip;
-    wifi_smart_init_common(&inst_wifi, &inst_ip);
+    esp_err_t init_err = wifi_smart_init_common(&inst_wifi, &inst_ip);
+    if (init_err != ESP_OK) {
+        ESP_LOGE(TAG, "[smart] wifi_smart_init_common failed: %s",
+                 esp_err_to_name(init_err));
+        return init_err;
+    }
 
     /* 5. Load stored credentials.
      *
@@ -2575,24 +2771,50 @@ esp_err_t wifi_init_smart(void)
                  * approval ticket).  Wait SCEP_PENDING_RETRY_DELAY_MS before
                  * the next bootstrap pass.
                  *
-                 * If a cached cert exists and is still valid, fall through to
-                 * the enterprise path during the backoff so the device can
-                 * still come up on the production network.  Re-evaluating
-                 * decision after the backoff allows recovery without rebooting. */
+                 * M1.C: if a cached cert is present AND not expired, the device
+                 * should immediately attempt the enterprise path with that cert
+                 * -- only the SCEP renewal is blocked, not existing credentials.
+                 * We reload state below and let wifi_decide_next_step choose
+                 * ENTERPRISE.  The long sleep only applies when there is no
+                 * usable cert (i.e. the device genuinely cannot get online
+                 * until the CA approves the new cert). */
                 ESP_LOGW(TAG,
                     "[smart] SCEP returned PENDING -- backing off %u s before "
                     "next enrollment attempt",
                     (unsigned)(SCEP_PENDING_RETRY_DELAY_MS / 1000u));
-                if (cert_present) {
-                    /* Try enterprise first; the cached cert may still work. */
-                    ESP_LOGI(TAG,
-                        "[smart] cached cert present -- attempting enterprise "
-                        "during PENDING backoff");
-                    /* Fall through: refresh state, allow the loop to retry
-                     * enterprise without re-running SCEP first. */
+
+                /* Reload state now (before the conditional sleep) so that
+                 * cert_present / cert_expired reflect reality after the
+                 * bootstrap pass updated NVS. */
+                cert_present = (cred_store_load(creds_p) == ESP_OK);
+                now = time(NULL);
+                ntp_synced = (now >= MIN_PLAUSIBLE_EPOCH);
+                if (cert_present && ntp_synced) {
+                    time_t expiry = (time_t)creds_p->not_after;
+                    cert_expired = (expiry - now) < (time_t)CERT_REENROLL_THRESHOLD_SEC;
+                } else {
+                    cert_expired = false;
                 }
-                /* Sleep before next iteration so the next BOOTSTRAP_FULL pass
-                 * (if needed) doesn't immediately re-flood NDES. */
+
+                if (cert_present && !cert_expired) {
+                    /* The cached cert is still functional -- go straight to
+                     * enterprise so the device comes up while waiting for CA
+                     * approval.  The outer loop will reach WIFI_DECISION_ENTERPRISE
+                     * on the next iteration without re-running SCEP first. */
+                    ESP_LOGI(TAG,
+                        "[smart] cached cert still valid -- attempting enterprise "
+                        "during PENDING backoff; SCEP retry after %u s",
+                        (unsigned)(SCEP_PENDING_RETRY_DELAY_MS / 1000u));
+                    /* Reset enterprise attempts so the circuit-breaker doesn't
+                     * gate us out immediately after a fresh state reload. */
+                    enterprise_attempts = 0;
+                    continue;
+                }
+
+                /* No usable cert -- sleep the full backoff before retrying. */
+                ESP_LOGW(TAG,
+                    "[smart] no usable cached cert -- sleeping %u s for CA approval",
+                    (unsigned)(SCEP_PENDING_RETRY_DELAY_MS / 1000u));
                 vTaskDelay(pdMS_TO_TICKS(SCEP_PENDING_RETRY_DELAY_MS));
             } else if (rc != ESP_OK) {
                 ESP_LOGE(TAG,
@@ -2648,7 +2870,12 @@ esp_err_t wifi_init_enterprise_bootstrap(void)
 {
     esp_event_handler_instance_t inst_wifi;
     esp_event_handler_instance_t inst_ip;
-    wifi_smart_init_common(&inst_wifi, &inst_ip);
+    esp_err_t init_err = wifi_smart_init_common(&inst_wifi, &inst_ip);
+    if (init_err != ESP_OK) {
+        ESP_LOGE(TAG, "[b+] wifi_smart_init_common failed: %s",
+                 esp_err_to_name(init_err));
+        return init_err;
+    }
 
     /* 5. Embedded certs sanity-check.  Cert is always "present" and treated as
      *    non-expired (we cannot evaluate NotAfter without a synced clock and

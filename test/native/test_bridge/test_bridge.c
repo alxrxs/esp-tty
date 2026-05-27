@@ -6,6 +6,7 @@
  */
 
 #include <pthread.h>
+#include <stdatomic.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -38,7 +39,7 @@ static int ring_write_cb(void *ctx, const uint8_t *buf, size_t len)
 typedef struct {
     ring_t         *src;
     ring_t         *dst;
-    volatile bool   stop;
+    _Atomic bool   stop;
 } pump_thread_arg_t;
 
 static void *pump_thread(void *arg)
@@ -110,7 +111,7 @@ void test_bridge_lossless_ordering(void)
     TEST_ASSERT_EQUAL_INT(0, warg.result);
 
     /* Shut down pump */
-    parg.stop = true;
+    atomic_store(&parg.stop, true);
     ring_close(a_to_b);
     pthread_join(pump_thr, NULL);
 
@@ -132,7 +133,7 @@ void test_bridge_stop_flag_terminates(void)
     pthread_create(&pump_thr, NULL, pump_thread, &parg);
 
     /* Set stop flag and unblock the pump's blocked ring_recv */
-    parg.stop = true;
+    atomic_store(&parg.stop, true);
     ring_close(a_to_b);
 
     /* join must complete -- pump must not spin forever */
@@ -197,7 +198,7 @@ void test_bridge_full_duplex_no_drops(void)
     pthread_join(prod_thr, NULL);
     TEST_ASSERT_EQUAL_INT(0, parg2.result);
 
-    parg.stop = true;
+    atomic_store(&parg.stop, true);
     ring_close(ab);
     pthread_join(pump_thr, NULL);
 
@@ -252,7 +253,7 @@ void test_bridge_terminates_on_write_error(void)
 {
     counted_read_ctx_t rctx = {.call_count = 0, .bytes_per_call = 4};
     fail_write_ctx_t   wctx = {.call_count = 0, .fail_on_call = 3};
-    volatile bool stop = false;
+    _Atomic bool stop = false;
 
     bridge_pump(counted_read_cb, &rctx,
                 fail_write_cb,   &wctx,
@@ -271,7 +272,7 @@ void test_bridge_terminates_on_write_error(void)
 typedef struct {
     int             call_count;
     int             set_stop_on_call;
-    volatile bool  *stop_flag;
+    _Atomic bool *stop_flag;
 } stop_setting_write_ctx_t;
 
 static int stop_setting_write_cb(void *ctx, const uint8_t *buf, size_t len)
@@ -288,7 +289,7 @@ static int stop_setting_write_cb(void *ctx, const uint8_t *buf, size_t len)
 void test_bridge_stop_observed_before_next_read(void)
 {
     counted_read_ctx_t rctx = {.call_count = 0, .bytes_per_call = 4};
-    volatile bool stop = false;
+    _Atomic bool stop = false;
     stop_setting_write_ctx_t wctx = {.call_count = 0,
                                      .set_stop_on_call = 2,
                                      .stop_flag = &stop};
@@ -331,7 +332,7 @@ static int sink_write_cb(void *ctx, const uint8_t *buf, size_t len)
 void test_bridge_terminates_on_read_eof(void)
 {
     int read_calls = 0;
-    volatile bool stop = false;
+    _Atomic bool stop = false;
 
     bridge_pump(eof_read_cb,  &read_calls,
                 sink_write_cb, NULL,
@@ -347,7 +348,7 @@ void test_bridge_stop_flag_preset_skips_all_io(void)
 {
     counted_read_ctx_t rctx = {.call_count = 0, .bytes_per_call = 4};
     fail_write_ctx_t   wctx = {.call_count = 0, .fail_on_call = 1};
-    volatile bool stop = true;
+    _Atomic bool stop = true;
 
     bridge_pump(counted_read_cb, &rctx,
                 fail_write_cb,   &wctx,
@@ -367,7 +368,7 @@ static int zero_write_cb(void *ctx, const uint8_t *buf, size_t len)
 void test_bridge_terminates_on_write_zero(void)
 {
     counted_read_ctx_t rctx = {.call_count = 0, .bytes_per_call = 4};
-    volatile bool stop = false;
+    _Atomic bool stop = false;
 
     bridge_pump(counted_read_cb, &rctx,
                 zero_write_cb,   NULL,
@@ -403,7 +404,7 @@ static int capture_write(void *ctx, const uint8_t *buf, size_t len)
 void test_bridge_forwards_single_byte_exact_value(void)
 {
     int calls = 0;
-    volatile bool stop = false;
+    _Atomic bool stop = false;
     s_forwarded_byte = 0;
 
     bridge_pump(one_byte_read, &calls,
@@ -423,7 +424,7 @@ static int error_read_cb(void *ctx, uint8_t *buf, size_t cap)
 void test_bridge_terminates_on_read_error(void)
 {
     fail_write_ctx_t wctx = {.call_count = 0, .fail_on_call = 99};
-    volatile bool stop = false;
+    _Atomic bool stop = false;
 
     bridge_pump(error_read_cb, NULL,
                 fail_write_cb, &wctx,

@@ -717,13 +717,15 @@ int scep_build_pkimessage_pkcsreq(const uint8_t      *csr_der,
     if (!env_scratch) { ret = -1; goto done; }
 
     size_t env_ci_len = 0; /* ContentInfo DER length */
-    /* Inside this block use CHK_G (goto done on failure) so that enc_csr,
+    /* Inside this block use ENC_CHK (goto done on failure) so that enc_csr,
      * enc_cek (sensitive: wrapped CEK), env_scratch and ra_crt are all
-     * released by the unified cleanup at done:.  Plain CHK_G() would return
-     * directly and leak heap + the CEK secret. */
-#undef  CHK_G
-#define CHK_G(x) do { int _r = (x); if (_r < 0) { ret = _r; goto done; } \
-                      len += (size_t)(_r); } while(0)
+     * released by the unified cleanup at done:.  The outer CHK macro does
+     * `return _r` which would bypass cleanup and leak heap + the CEK secret.
+     * ENC_CHK is named distinctly from any outer macro to avoid shadowing
+     * bugs: a future edit introducing CHK_G outside this block in a function
+     * without a local `len` variable would silently corrupt the outer len. */
+#define ENC_CHK(x) do { int _r = (x); if (_r < 0) { ret = _r; goto done; } \
+                        len += (size_t)(_r); } while(0)
     {
         uint8_t *ep = env_scratch + env_sz;
         uint8_t *es = env_scratch;
@@ -732,9 +734,9 @@ int scep_build_pkimessage_pkcsreq(const uint8_t      *csr_der,
         size_t enc_content_len;
         {
             size_t len = 0;
-            CHK_G(mbedtls_asn1_write_raw_buffer(&ep, es, enc_csr, padded_len));
-            CHK_G(mbedtls_asn1_write_len(&ep, es, padded_len));
-            CHK_G(mbedtls_asn1_write_tag(&ep, es, 0x80));
+            ENC_CHK(mbedtls_asn1_write_raw_buffer(&ep, es, enc_csr, padded_len));
+            ENC_CHK(mbedtls_asn1_write_len(&ep, es, padded_len));
+            ENC_CHK(mbedtls_asn1_write_tag(&ep, es, 0x80));
             enc_content_len = len;
         }
 
@@ -742,15 +744,15 @@ int scep_build_pkimessage_pkcsreq(const uint8_t      *csr_der,
         {
             size_t len = 0;
             /* Write IV OCTET STRING first (backward = it appears after OID in DER) */
-            CHK_G(mbedtls_asn1_write_raw_buffer(&ep, es, iv, IV_LEN));
-            CHK_G(mbedtls_asn1_write_len(&ep, es, IV_LEN));
-            CHK_G(mbedtls_asn1_write_tag(&ep, es, MBEDTLS_ASN1_OCTET_STRING));
+            ENC_CHK(mbedtls_asn1_write_raw_buffer(&ep, es, iv, IV_LEN));
+            ENC_CHK(mbedtls_asn1_write_len(&ep, es, IV_LEN));
+            ENC_CHK(mbedtls_asn1_write_tag(&ep, es, MBEDTLS_ASN1_OCTET_STRING));
             /* Write OID (backward = it appears before IV in DER) */
-            CHK_G(w_oid(&ep, es, OID_AES256_CBC, sizeof(OID_AES256_CBC)));
+            ENC_CHK(w_oid(&ep, es, OID_AES256_CBC, sizeof(OID_AES256_CBC)));
             /* len is now the total body (OID TLV + IV OCTET STRING TLV) */
             size_t cea_body = len;
-            CHK_G(mbedtls_asn1_write_len(&ep, es, cea_body));
-            CHK_G(mbedtls_asn1_write_tag(&ep, es,
+            ENC_CHK(mbedtls_asn1_write_len(&ep, es, cea_body));
+            ENC_CHK(mbedtls_asn1_write_tag(&ep, es,
                 MBEDTLS_ASN1_CONSTRUCTED | MBEDTLS_ASN1_SEQUENCE));
             cea_len = len;
         }
@@ -758,7 +760,7 @@ int scep_build_pkimessage_pkcsreq(const uint8_t      *csr_der,
         size_t ct_oid_len; /* contentType OID */
         {
             size_t len = 0;
-            CHK_G(w_oid(&ep, es, OID_DATA, sizeof(OID_DATA)));
+            ENC_CHK(w_oid(&ep, es, OID_DATA, sizeof(OID_DATA)));
             ct_oid_len = len;
         }
 
@@ -767,8 +769,8 @@ int scep_build_pkimessage_pkcsreq(const uint8_t      *csr_der,
         size_t eci_hdr_len;
         {
             size_t len = 0;
-            CHK_G(mbedtls_asn1_write_len(&ep, es, eci_body));
-            CHK_G(mbedtls_asn1_write_tag(&ep, es,
+            ENC_CHK(mbedtls_asn1_write_len(&ep, es, eci_body));
+            ENC_CHK(mbedtls_asn1_write_tag(&ep, es,
                 MBEDTLS_ASN1_CONSTRUCTED | MBEDTLS_ASN1_SEQUENCE));
             eci_hdr_len = len;
         }
@@ -778,21 +780,21 @@ int scep_build_pkimessage_pkcsreq(const uint8_t      *csr_der,
         size_t ktri_body_len;
         {
             size_t len = 0;
-            CHK_G(mbedtls_asn1_write_raw_buffer(&ep, es, enc_cek, ra_rsa_len));
-            CHK_G(mbedtls_asn1_write_len(&ep, es, ra_rsa_len));
-            CHK_G(mbedtls_asn1_write_tag(&ep, es, MBEDTLS_ASN1_OCTET_STRING));
-            CHK_G(w_alg_null(&ep, es, OID_RSA_ENCRYPTION, sizeof(OID_RSA_ENCRYPTION)));
-            CHK_G(w_issuer_serial(&ep, es,
+            ENC_CHK(mbedtls_asn1_write_raw_buffer(&ep, es, enc_cek, ra_rsa_len));
+            ENC_CHK(mbedtls_asn1_write_len(&ep, es, ra_rsa_len));
+            ENC_CHK(mbedtls_asn1_write_tag(&ep, es, MBEDTLS_ASN1_OCTET_STRING));
+            ENC_CHK(w_alg_null(&ep, es, OID_RSA_ENCRYPTION, sizeof(OID_RSA_ENCRYPTION)));
+            ENC_CHK(w_issuer_serial(&ep, es,
                 ra_issuer, ra_issuer_len, ra_serial, ra_serial_len));
-            CHK_G(mbedtls_asn1_write_int(&ep, es, 0));
+            ENC_CHK(mbedtls_asn1_write_int(&ep, es, 0));
             ktri_body_len = len;
         }
         /* KTRI SEQUENCE */
         size_t ktri_hdr_len;
         {
             size_t len = 0;
-            CHK_G(mbedtls_asn1_write_len(&ep, es, ktri_body_len));
-            CHK_G(mbedtls_asn1_write_tag(&ep, es,
+            ENC_CHK(mbedtls_asn1_write_len(&ep, es, ktri_body_len));
+            ENC_CHK(mbedtls_asn1_write_tag(&ep, es,
                 MBEDTLS_ASN1_CONSTRUCTED | MBEDTLS_ASN1_SEQUENCE));
             ktri_hdr_len = len;
         }
@@ -802,8 +804,8 @@ int scep_build_pkimessage_pkcsreq(const uint8_t      *csr_der,
         size_t ri_set_hdr;
         {
             size_t len = 0;
-            CHK_G(mbedtls_asn1_write_len(&ep, es, ktri_total));
-            CHK_G(mbedtls_asn1_write_tag(&ep, es,
+            ENC_CHK(mbedtls_asn1_write_len(&ep, es, ktri_total));
+            ENC_CHK(mbedtls_asn1_write_tag(&ep, es,
                 MBEDTLS_ASN1_CONSTRUCTED | MBEDTLS_ASN1_SET));
             ri_set_hdr = len;
         }
@@ -813,7 +815,7 @@ int scep_build_pkimessage_pkcsreq(const uint8_t      *csr_der,
         size_t ver_len;
         {
             size_t len = 0;
-            CHK_G(mbedtls_asn1_write_int(&ep, es, 0));
+            ENC_CHK(mbedtls_asn1_write_int(&ep, es, 0));
             ver_len = len;
         }
 
@@ -824,8 +826,8 @@ int scep_build_pkimessage_pkcsreq(const uint8_t      *csr_der,
         size_t ed_hdr;
         {
             size_t len = 0;
-            CHK_G(mbedtls_asn1_write_len(&ep, es, ed_body));
-            CHK_G(mbedtls_asn1_write_tag(&ep, es,
+            ENC_CHK(mbedtls_asn1_write_len(&ep, es, ed_body));
+            ENC_CHK(mbedtls_asn1_write_tag(&ep, es,
                 MBEDTLS_ASN1_CONSTRUCTED | MBEDTLS_ASN1_SEQUENCE));
             ed_hdr = len;
         }
@@ -835,8 +837,8 @@ int scep_build_pkimessage_pkcsreq(const uint8_t      *csr_der,
         size_t ci_wrap_hdr;
         {
             size_t len = 0;
-            CHK_G(mbedtls_asn1_write_len(&ep, es, ed_total));
-            CHK_G(mbedtls_asn1_write_tag(&ep, es, 0xA0)); /* [0] EXPLICIT */
+            ENC_CHK(mbedtls_asn1_write_len(&ep, es, ed_total));
+            ENC_CHK(mbedtls_asn1_write_tag(&ep, es, 0xA0)); /* [0] EXPLICIT */
             ci_wrap_hdr = len;
         }
         size_t ci_inner_body = ed_total + ci_wrap_hdr;
@@ -844,7 +846,7 @@ int scep_build_pkimessage_pkcsreq(const uint8_t      *csr_der,
         size_t ci_oid_len;
         {
             size_t len = 0;
-            CHK_G(w_oid(&ep, es, OID_ENVELOPED_DATA, sizeof(OID_ENVELOPED_DATA)));
+            ENC_CHK(w_oid(&ep, es, OID_ENVELOPED_DATA, sizeof(OID_ENVELOPED_DATA)));
             ci_oid_len = len;
         }
         size_t ci_inner = ci_inner_body + ci_oid_len;
@@ -852,8 +854,8 @@ int scep_build_pkimessage_pkcsreq(const uint8_t      *csr_der,
         size_t ci_seq_hdr;
         {
             size_t len = 0;
-            CHK_G(mbedtls_asn1_write_len(&ep, es, ci_inner));
-            CHK_G(mbedtls_asn1_write_tag(&ep, es,
+            ENC_CHK(mbedtls_asn1_write_len(&ep, es, ci_inner));
+            ENC_CHK(mbedtls_asn1_write_tag(&ep, es,
                 MBEDTLS_ASN1_CONSTRUCTED | MBEDTLS_ASN1_SEQUENCE));
             ci_seq_hdr = len;
         }
@@ -862,7 +864,7 @@ int scep_build_pkimessage_pkcsreq(const uint8_t      *csr_der,
         /* Move to front of env_scratch */
         memmove(env_scratch, ep, env_ci_len);
     }
-#undef CHK_G
+#undef ENC_CHK
     /* enc_csr / enc_cek are no longer needed; the CEK ciphertext doesn't
      * reveal the key but we still zero it out as defence in depth.  Free
      * happens at done: -- keep them allocated here in case some later

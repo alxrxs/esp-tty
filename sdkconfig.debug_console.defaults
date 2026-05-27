@@ -18,6 +18,19 @@
 # but Wi-Fi, SCEP, mDNS, and SSH listen on TCP -- everything except the
 # serial bridge -- remain operational.
 
+# -- Compiler optimization (developer tradeoff) --------------------------------
+# Base sdkconfig.defaults sets CONFIG_COMPILER_OPTIMIZATION_PERF=y (-O2) for
+# production.  Debug builds need -Og so GDB can step through code without the
+# instruction scheduler reordering everything and eliminating locals.  At -O2,
+# breakpoints land on wrong lines and variables show as <optimized out>.
+#
+# Tradeoff: -Og binaries are larger and 20-40% slower, which matters for the
+# crypto HW paths.  Accepted for debug envs where correctness of the GDB
+# session matters more than performance.  Never use this overlay in field
+# firmware -- use the base sdkconfig.defaults directly.
+CONFIG_COMPILER_OPTIMIZATION_PERF=n
+CONFIG_COMPILER_OPTIMIZATION_DEBUG=y
+
 # -- Console output ------------------------------------------------------------
 # Switch the IDF console from UART0 to USB-Serial-JTAG.
 # These three settings are mutually exclusive; the base sdkconfig.defaults

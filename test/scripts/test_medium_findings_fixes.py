@@ -4,6 +4,7 @@ Each test grep-asserts on a specific code change so that future refactors
 don't silently regress the fix.  Pair with the relevant native unit tests
 where the matcher logic can be exercised on the host.
 """
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -46,8 +47,13 @@ def test_m2_ssh_server_header_exposes_is_listening():
     h = _read("main/ssh_server.h")
     assert "bool ssh_server_is_listening(void)" in h
     c = _read("main/ssh_server.c")
-    assert "s_ssh_listening = true" in c, (
-        "ssh_server_task must set s_ssh_listening = true after bind+listen.")
+    # s_ssh_listening is now _Atomic bool for cross-core visibility on
+    # ESP32-S3 dual-Xtensa, so the assignment is atomic_store rather than a
+    # bare `=`.  Accept either spelling.
+    set_true = ("s_ssh_listening = true" in c
+                or "atomic_store(&s_ssh_listening, true)" in c)
+    assert set_true, (
+        "ssh_server_task must publish s_ssh_listening=true after bind+listen.")
 
 
 # ---- M3 wifi double-init guard ------------------------------------------
@@ -104,19 +110,25 @@ def test_m6_successful_auth_is_logged():
 # ---- M7 security-failure backoff ----------------------------------------
 
 def test_m7_auth_disconnect_uses_longer_backoff():
-    src = _read("main/wifi.c")
-    # The reason classification must reference at least these symbols.
-    for sym in (
-        "WIFI_REASON_AUTH_FAIL",
-        "WIFI_REASON_HANDSHAKE_TIMEOUT",
-        "WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT",
-        "WIFI_REASON_ASSOC_FAIL",
-    ):
-        assert sym in src, f"Missing classification of {sym} in wifi.c"
-    # And the cap must be raised for security failures.
-    assert "security_fail" in src
-    assert "300000u" in src, (
-        "Security-relevant disconnects must use a 5+ minute backoff cap.")
+    # Post-H2.A: classification moved to lib/wifi_backoff/.  Numeric IEEE
+    # 802.11 reason codes appear in wifi_backoff.c; the wifi.c handler
+    # delegates via wifi_backoff_is_security_failure().
+    wifi_src = _read("main/wifi.c")
+    assert "wifi_backoff_is_security_failure(" in wifi_src, (
+        "wifi.c must call the helper to classify disconnect reasons.")
+    assert "security_fail" in wifi_src
+
+    backoff_c = _read("lib/wifi_backoff/wifi_backoff.c")
+    # The four originally-required codes (M7 baseline) + H2.A additions.
+    # 4WAY_HANDSHAKE_TIMEOUT=15, AUTH_FAIL=202, ASSOC_FAIL=203, HANDSHAKE_TIMEOUT=204.
+    for code in (15, 202, 203, 204):
+        assert re.search(rf"case\s+{code}\s*:", backoff_c), (
+            f"reason code {code} must be classified as security failure")
+
+    # The 5-minute cap is the SECURITY cap.
+    backoff_h = _read("lib/wifi_backoff/wifi_backoff.h")
+    assert "WIFI_BACKOFF_SECURITY_CAP_MS  300000u" in backoff_h, (
+        "Security-relevant disconnects must use a 5-minute backoff cap.")
 
 
 # ---- M8 embedded cert expiry parsing ------------------------------------

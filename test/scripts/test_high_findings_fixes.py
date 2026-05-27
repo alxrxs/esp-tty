@@ -21,20 +21,30 @@ def _read(rel):
 
 def test_a1_accept_retry_handles_want_write():
     src = _read("main/ssh_server.c")
-    # The do/while loop must reference both WANT codes.
+    # The retry classifier must reference both WANT codes plus the
+    # rekey/channel-data status codes (H1.B widened the retryable set).
     assert "WS_WANT_READ" in src and "WS_WANT_WRITE" in src, (
-        "wolfSSH_accept retry loop must handle both WS_WANT_READ and "
-        "WS_WANT_WRITE -- handshake on slow links returns WANT_WRITE when "
-        "the outbound buffer is full."
+        "wolfSSH_accept retry classifier must handle both WS_WANT_READ "
+        "and WS_WANT_WRITE -- handshake on slow links returns WANT_WRITE "
+        "when the outbound buffer is full."
     )
-    # Specifically, the conditional in the loop must combine them.
+    # The retryable predicate lives in is_retryable_handshake_err().
     m = re.search(
-        r"do\s*\{[^}]*wolfSSH_accept[^}]*\}\s*while\s*\([^;]*?"
-        r"WS_WANT_READ[^;]*?WS_WANT_WRITE",
+        r"is_retryable_handshake_err\s*\([^)]*\)\s*\{[^}]*?"
+        r"WS_WANT_READ[^}]*?WS_WANT_WRITE",
         src, re.DOTALL)
     assert m, (
-        "Expected wolfSSH_accept retry loop to OR WS_WANT_READ with "
-        "WS_WANT_WRITE in its while-condition."
+        "Expected is_retryable_handshake_err() to reference WS_WANT_READ "
+        "and WS_WANT_WRITE."
+    )
+    # And the wolfSSH_accept do/while must call the classifier.
+    m2 = re.search(
+        r"do\s*\{[^}]*wolfSSH_accept[^}]*\}\s*while\s*\([^;]*?"
+        r"is_retryable_handshake_err",
+        src, re.DOTALL)
+    assert m2, (
+        "Expected wolfSSH_accept retry loop to gate the while-condition "
+        "on is_retryable_handshake_err(werr)."
     )
 
 
@@ -150,16 +160,27 @@ def test_a6_accept_log_rate_limited():
 
 def test_a6_wifi_reconnect_exponential_backoff():
     src = _read("main/wifi.c")
-    # The reconnect block must include a vTaskDelay (the backoff).
-    m = re.search(r'backoff %u ms', src)
-    assert m, (
+    # The reconnect block still logs the backoff value.
+    assert re.search(r'backoff %u ms', src), (
         "Expected the WIFI_EVENT_STA_DISCONNECTED reconnect path to log a "
-        "backoff value and delay before calling esp_wifi_connect()."
+        "backoff value."
     )
-    # And the delay must come from a computed base with jitter.
-    assert "jitter" in src, (
-        "Expected reconnect backoff to include jitter to avoid synchronised "
-        "reconnect storms across a fleet."
+    # H2.B/D: the math now lives in the pure wifi_backoff helper and the
+    # delay is scheduled on a FreeRTOS one-shot timer (not inline
+    # vTaskDelay -- that would block the system event task).
+    assert "wifi_backoff_compute_ms(" in src, (
+        "Expected wifi.c to delegate backoff math to wifi_backoff_compute_ms."
+    )
+    assert "reconnect_timer_schedule(" in src, (
+        "Expected wifi.c to defer the reconnect to a FreeRTOS timer "
+        "(reconnect_timer_schedule) instead of blocking the event task."
+    )
+    # The helper itself must include jitter to avoid synchronised reconnect
+    # storms across a fleet.
+    backoff_c = _read("lib/wifi_backoff/wifi_backoff.c")
+    assert "jitter" in backoff_c, (
+        "wifi_backoff.c must include jitter to avoid synchronised reconnect "
+        "storms across a fleet."
     )
 
 
@@ -195,3 +216,71 @@ def test_a7_eap_identity_not_logged_in_cleartext_at_info():
             f"INFO-level identity log line interpolates a value but is not "
             f"using id_redacted: {line!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# H1.A -- OTA branch in the accept loop frees the WOLFSSH and closes the fd
+# ---------------------------------------------------------------------------
+
+def test_h1a_ota_branch_frees_wolfssh_and_closes_fd():
+    src = _read("main/ssh_server.c")
+    # Find the OTA branch (introduced when username == "ota") and assert
+    # that wolfSSH_free(ssh) and close(client_fd) both appear before the
+    # subsequent `continue`.  Without these, every failed OTA attempt
+    # leaks the WOLFSSH and the client_fd.
+    m = re.search(
+        r"ota_session_handler\s*\([^)]*\)\s*;"  # call site
+        r"[^}]*?wolfSSH_free\s*\(\s*ssh\s*\)"   # frees ssh
+        r"[^}]*?close\s*\(\s*client_fd\s*\)"    # closes fd
+        r"[^}]*?continue\s*;",                   # then continues
+        src, re.DOTALL)
+    assert m, (
+        "Expected the OTA branch of the accept loop to call wolfSSH_free(ssh) "
+        "and close(client_fd) after ota_session_handler() returns and before "
+        "`continue` -- otherwise a failed OTA leaks both resources."
+    )
+
+
+# ---------------------------------------------------------------------------
+# H1.B -- retryable handshake classifier covers WANT_READ/WRITE + rekey/chan
+# ---------------------------------------------------------------------------
+
+def test_h1b_retryable_handshake_classifier_complete():
+    src = _read("main/ssh_server.c")
+    m = re.search(
+        r"is_retryable_handshake_err\s*\([^)]*\)\s*\{(.+?)\n\}",
+        src, re.DOTALL)
+    assert m, "Expected is_retryable_handshake_err() helper to be defined."
+    body = m.group(1)
+    for code in ("WS_WANT_READ", "WS_WANT_WRITE",
+                 "WS_REKEYING", "WS_CHAN_RXD"):
+        assert code in body, (
+            f"is_retryable_handshake_err must enumerate {code} as retryable "
+            "(see wolfssh/error.h for the full set)."
+        )
+
+
+# ---------------------------------------------------------------------------
+# H1.C -- monotonic clock for handshake deadline, not wall-clock time()
+# ---------------------------------------------------------------------------
+
+def test_h1c_handshake_deadline_uses_monotonic_clock():
+    src = _read("main/ssh_server.c")
+    # No time(NULL) in the file at all -- the wall clock is unsafe for
+    # any deadline arithmetic and we don't use it for log timestamps here.
+    code_only = re.sub(r"/\*.*?\*/", "", src, flags=re.DOTALL)
+    code_only = re.sub(r"//[^\n]*", "", code_only)
+    assert "time(NULL)" not in code_only, (
+        "main/ssh_server.c must not use time(NULL): wall clock can jump "
+        "(NTP) and is unsafe for deadlines.  Use esp_timer_get_time() "
+        "or xTaskGetTickCount() instead."
+    )
+    # And the handshake loop must use esp_timer_get_time() for its deadline.
+    m = re.search(
+        r"do\s*\{[^}]*wolfSSH_accept[^}]*\}\s*while\s*\([^;]*?"
+        r"esp_timer_get_time\s*\(\s*\)\s*<\s*deadline_us",
+        src, re.DOTALL)
+    assert m, (
+        "Expected the wolfSSH_accept retry loop to bound itself by "
+        "esp_timer_get_time() < deadline_us (monotonic microseconds since boot)."
+    )

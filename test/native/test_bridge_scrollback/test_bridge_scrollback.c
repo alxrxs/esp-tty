@@ -11,6 +11,7 @@
  * a scrollback, confirming that the two components interoperate correctly.
  */
 
+#include <stdatomic.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -139,7 +140,7 @@ static void *consumer_thread(void *arg)
 typedef struct {
     ring_t        *src;
     ring_t        *dst;
-    volatile bool  stop;
+    _Atomic bool   stop;
 } pump_arg_t;
 
 static int ring_read_cb(void *ctx, uint8_t *buf, size_t cap)
@@ -204,7 +205,7 @@ void test_bridge_pump_into_scrollback(void)
     TEST_ASSERT_EQUAL_INT(0, carg.result);
 
     /* Shut down the pump */
-    parg.stop = true;
+    atomic_store(&parg.stop, true);
     ring_close(ab);
     pthread_join(pump_thr, NULL);
 
@@ -384,7 +385,7 @@ void test_bridge_scrollback_last_one_line(void)
     pthread_join(cons_thr, NULL);
     TEST_ASSERT_EQUAL_INT(0, carg.result);
 
-    parg.stop = true;
+    atomic_store(&parg.stop, true);
     ring_close(ab);
     pthread_join(pump_thr, NULL);
 

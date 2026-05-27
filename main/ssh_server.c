@@ -26,11 +26,14 @@
 #include <sys/select.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
-#include <time.h>
 #include <unistd.h>
 #include <sys/time.h>
 
+#include <stdatomic.h>
+#include <stdbool.h>
+
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -60,17 +63,32 @@ static scrollback_t *s_scrollback  = NULL;
 static SemaphoreHandle_t s_session_mutex;
 static WOLFSSH      *s_active_ssh  = NULL;
 static int           s_active_fd   = -1;
-static volatile bool s_pump_stop   = false;
-static bool          s_pumps_running = false;  /* true only while both pump tasks are live */
+
+/*
+ * Atomic state shared across tasks (and cores).  On ESP32-S3 the two
+ * Xtensa cores have separate L1 caches; `volatile` alone provides
+ * per-CPU compiler ordering but no inter-core memory ordering, so a
+ * stale value can persist indefinitely.  All cross-task scalars below
+ * use _Atomic with the default seq_cst ordering -- correctness over
+ * performance, and the access frequency is too low to matter.
+ */
+static _Atomic bool s_pump_stop  = false;
+/* Number of pump tasks currently live (0, 1, or 2).  Only written under
+ * s_session_mutex.  teardown_active_session() takes exactly this many
+ * semaphore counts from s_pump_done_sem, so a partial-failure path where
+ * only one pump was created never blocks waiting for a give that will
+ * never arrive. */
+static int           s_pump_count = 0;
 
 /* Set true by ssh_server_task once bind+listen succeed; used by the OTA
  * rollback timer in main.c to decide whether to mark the image valid. */
-static volatile bool s_ssh_listening = false;
+static _Atomic bool s_ssh_listening = false;
 
 #if SSH_KEEPALIVE_INTERVAL_SEC > 0
 /* Last tick at which pump_ssh_to_usb received inbound data from the client.
- * Written by pump_ssh_to_usb; read by the main session loop for keepalive. */
-static volatile TickType_t s_last_ssh_rx_tick = 0;
+ * Written by pump_ssh_to_usb (one task), read by the main session loop
+ * (different task, possibly different core). */
+static _Atomic uint32_t s_last_ssh_rx_tick = 0;
 #endif
 
 /*
@@ -244,11 +262,11 @@ static int ssh_read_cb(void *ctx, uint8_t *buf, size_t cap)
 {
     WOLFSSH *ssh = (WOLFSSH *)ctx;
     for (;;) {
-        if (s_pump_stop) return -1;
+        if (atomic_load(&s_pump_stop)) return -1;
         int n = wolfSSH_stream_read(ssh, buf, (word32)cap);
         if (n > 0) {
 #if SSH_KEEPALIVE_INTERVAL_SEC > 0
-            s_last_ssh_rx_tick = xTaskGetTickCount();
+            atomic_store(&s_last_ssh_rx_tick, (uint32_t)xTaskGetTickCount());
 #endif
             return n;
         }
@@ -300,7 +318,7 @@ static void pump_ssh_to_usb(void *arg)
                 ring_write_cb, a->ring,
                 &s_pump_stop);
     /* Signal the other direction to stop */
-    s_pump_stop = true;
+    atomic_store(&s_pump_stop, true);
     free(a);
     /* Signal teardown that this pump direction has exited.
      * teardown_active_session() waits on s_pump_done_sem twice before
@@ -315,7 +333,7 @@ static void pump_usb_to_ssh(void *arg)
     bridge_pump(ring_read_cb, a->ring,
                 ssh_write_cb, a->ssh,
                 &s_pump_stop);
-    s_pump_stop = true;
+    atomic_store(&s_pump_stop, true);
     free(a);
     /* Signal teardown that this pump direction has exited. */
     if (s_pump_done_sem) xSemaphoreGive(s_pump_done_sem);
@@ -331,7 +349,7 @@ static void teardown_active_session(void)
     /* Caller must hold s_session_mutex */
     if (s_active_ssh == NULL) return;
 
-    s_pump_stop = true;
+    atomic_store(&s_pump_stop, true);
     /* Unblock pump_usb_to_ssh which may be blocked on ring_recv(s_usb_to_ssh). */
     ring_close(s_usb_to_ssh);
 
@@ -344,29 +362,36 @@ static void teardown_active_session(void)
         s_active_fd = -1;
     }
 
-    /* Wait for both pump tasks to signal completion before touching wolfSSH.
-     * Each pump task gives s_pump_done_sem once just before vTaskDelete;
-     * we take twice (one per direction). Timeout of 5 s is a safety net.
-     * Only wait when pump tasks were actually launched (not for OTA sessions
-     * or failed handshakes where pump tasks were never started). */
-    if (s_pumps_running && s_pump_done_sem) {
+    /* Wait for exactly s_pump_count pump tasks to signal completion before
+     * touching wolfSSH.  Each pump task gives s_pump_done_sem once just
+     * before vTaskDelete; we take exactly s_pump_count times, matching the
+     * actual number of tasks started.  This is correct for three cases:
+     *   - Both pumps started (s_pump_count == 2): take twice.
+     *   - Only one pump started due to partial failure (s_pump_count == 1):
+     *     take once -- the second take would block 5 s waiting for a give
+     *     that will never arrive.
+     *   - No pumps started (s_pump_count == 0): skip the drain entirely
+     *     (OTA sessions, failed handshakes, OOM before xTaskCreate).
+     * Timeout of 5 s per take is a safety net against a hung pump task. */
+    if (s_pump_count > 0 && s_pump_done_sem) {
         /* Drain any spurious count left by a previous timeout so we do not
          * incorrectly consume a stale give as a fresh pump-exit signal. */
         while (xSemaphoreTake(s_pump_done_sem, 0) == pdTRUE) {}  /* finding 4 */
 
         TickType_t timeout = pdMS_TO_TICKS(5000);
-        bool pump1_ok = (xSemaphoreTake(s_pump_done_sem, timeout) == pdTRUE);
-        if (!pump1_ok)
-            ESP_LOGW(TAG, "teardown: pump_ssh_to_usb did not exit within 5 s");
-        bool pump2_ok = (xSemaphoreTake(s_pump_done_sem, timeout) == pdTRUE);
-        if (!pump2_ok)
-            ESP_LOGW(TAG, "teardown: pump_usb_to_ssh did not exit within 5 s");
-        s_pumps_running = false;
+        bool all_ok = true;
+        for (int i = 0; i < s_pump_count; i++) {
+            if (xSemaphoreTake(s_pump_done_sem, timeout) != pdTRUE) {
+                ESP_LOGW(TAG, "teardown: pump task %d did not exit within 5 s", i);
+                all_ok = false;
+            }
+        }
+        s_pump_count = 0;
 
-        /* finding 3: if either pump timed out it may still be inside wolfSSH --
+        /* finding 3: if any pump timed out it may still be inside wolfSSH --
          * calling wolfSSH_free now would be a use-after-free.  Skip the free
          * and accept the resource leak as the lesser evil. */
-        if (!pump1_ok || !pump2_ok) {
+        if (!all_ok) {
             ESP_LOGE(TAG, "teardown: pump(s) still running -- leaking session "
                           "to avoid use-after-free");
             s_active_ssh = NULL;
@@ -384,6 +409,41 @@ static void teardown_active_session(void)
 /* ------------------------------------------------------------------ */
 /* SSH server accept loop                                              */
 /* ------------------------------------------------------------------ */
+
+/*
+ * Classifies a wolfSSH error code observed mid-handshake (between
+ * wolfSSH_accept() calls) as retryable or fatal.
+ *
+ * Retryable codes are transient states where re-entering wolfSSH_accept()
+ * will make forward progress once the underlying I/O or protocol step
+ * completes; the accept loop continues until either WS_SUCCESS or the
+ * monotonic wall-clock deadline elapses.
+ *
+ *   WS_WANT_READ      -- need more bytes from peer (most common case
+ *                        when peer is slow or pipelining is disabled).
+ *   WS_WANT_WRITE     -- outbound send buffer full (slow / congested
+ *                        TCP link); will drain.
+ *   WS_REKEYING       -- key re-exchange in progress (RFC 4253 §9). The
+ *                        wolfSSH state machine completes the rekey on
+ *                        subsequent accept() calls.
+ *   WS_CHAN_RXD       -- a channel-data packet arrived while we were
+ *                        still in accept(); benign, the data is queued
+ *                        and accept() will resume.
+ *
+ * Everything else -- including WS_FATAL_ERROR, version mismatches,
+ * algorithm-negotiation failures, MAC errors, peer disconnects --
+ * is fatal and must not be retried (would burn CPU and ultimately
+ * hit the deadline anyway).
+ *
+ * Reference: managed_components/wolfssl__wolfssh/wolfssh/error.h
+ */
+static bool is_retryable_handshake_err(int werr)
+{
+    return werr == WS_WANT_READ
+        || werr == WS_WANT_WRITE
+        || werr == WS_REKEYING
+        || werr == WS_CHAN_RXD;
+}
 
 static void ssh_server_task(void *arg)
 {
@@ -413,7 +473,7 @@ static void ssh_server_task(void *arg)
         return;
     }
 
-    s_ssh_listening = true;
+    atomic_store(&s_ssh_listening, true);
     ESP_LOGI(TAG, "Listening on TCP port %d", SSH_PORT);
 
     while (1) {
@@ -486,7 +546,7 @@ static void ssh_server_task(void *arg)
         wolfSSH_SetTerminalResizeCtx(ssh, s_ssh_to_usb);
         s_active_ssh = ssh;
         s_active_fd  = client_fd;
-        s_pump_stop   = false;
+        atomic_store(&s_pump_stop, false);
 
         xSemaphoreGive(s_session_mutex);
 
@@ -500,29 +560,36 @@ static void ssh_server_task(void *arg)
         struct timeval tv = { .tv_sec = 1, .tv_usec = 0 }; /* short per-recv slice */
         setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-        /* SSH handshake + auth (retried under wall-clock deadline).
+        /* SSH handshake + auth, retried under a monotonic deadline.
          *
-         * wolfSSH_accept may return either WS_WANT_READ (need more inbound
-         * data from peer) or WS_WANT_WRITE (outbound buffer full, e.g.
-         * the kernel's TCP send buffer is congested on a slow link).  Both
-         * are recoverable; the per-call wait is provided by SO_RCVTIMEO
-         * (read side) and the SO_SNDTIMEO default (write side) on the
-         * client_fd, so this loop does not busy-spin -- each iteration
-         * blocks inside wolfSSL's read/write up to ~1 s.  The wall-clock
-         * deadline bounds total handshake time regardless. */
-        time_t deadline = time(NULL) + SSH_HANDSHAKE_TIMEOUT_SEC;
+         * Deadline uses esp_timer_get_time() (microseconds since boot,
+         * never jumps) rather than time(NULL): if NTP syncs DURING the
+         * handshake the wall clock can leap by ~1.7e9 s, and a deadline
+         * computed from time(NULL) would suddenly be in the past and
+         * abort the handshake.  See finding H1.C.
+         *
+         * Per-call blocking is provided by SO_RCVTIMEO (read side) and
+         * the default SO_SNDTIMEO (write side) on client_fd, so the
+         * loop is not a busy-spin -- each iteration blocks inside
+         * wolfSSL up to ~1 s.  Retryable wolfSSH error codes are
+         * enumerated in is_retryable_handshake_err(); anything else is
+         * treated as fatal. */
+        const int64_t deadline_us = esp_timer_get_time()
+            + (int64_t)SSH_HANDSHAKE_TIMEOUT_SEC * 1000000LL;
         int ret;
         int werr;
         do {
             ret = wolfSSH_accept(ssh);
             werr = wolfSSH_get_error(ssh);
-        } while (ret != WS_SUCCESS &&
-                 (werr == WS_WANT_READ || werr == WS_WANT_WRITE) &&
-                 time(NULL) < deadline);
+        } while (ret != WS_SUCCESS
+                 && is_retryable_handshake_err(werr)
+                 && esp_timer_get_time() < deadline_us);
 
         if (ret != WS_SUCCESS) {
-            ESP_LOGW(TAG, "wolfSSH_accept failed: %d (err %d)",
-                     ret, wolfSSH_get_error(ssh));
+            ESP_LOGW(TAG, "wolfSSH_accept failed: ret=%d err=%d (%s)",
+                     ret, werr,
+                     (esp_timer_get_time() >= deadline_us)
+                         ? "deadline" : "fatal");
             xSemaphoreTake(s_session_mutex, portMAX_DELAY);
             teardown_active_session();
             xSemaphoreGive(s_session_mutex);
@@ -557,10 +624,16 @@ static void ssh_server_task(void *arg)
             s_active_ssh = NULL;
             s_active_fd  = -1;
             xSemaphoreGive(s_session_mutex);
-            /* ota_session_handler owns the SSH session and may reboot */
-            ota_session_handler(ssh);
-            /* If we get here, OTA failed. ota_session_handler does not call
-             * wolfSSH_free on failure (handled in ota_session.c, out of scope). */
+
+            /* H1.A: ota_session_handler does not own the lifetime of `ssh`
+             * or `client_fd`.  Its success path calls esp_restart() so the
+             * cleanup below is unreachable on success; its failure path
+             * returns ESP_FAIL without freeing either resource, so we
+             * MUST release them here to avoid leaking ~several KB of
+             * heap (WOLFSSH) and a socket per failed OTA attempt. */
+            (void)ota_session_handler(ssh);
+            wolfSSH_free(ssh);
+            close(client_fd);
             continue;
         }
 
@@ -646,9 +719,9 @@ static void ssh_server_task(void *arg)
         a2b->ssh  = ssh; a2b->ring = s_ssh_to_usb;
         b2a->ring = s_usb_to_ssh; b2a->ssh = ssh;
 
-        /* finding 1: capture xTaskCreate results; set s_pumps_running only
-         * after BOTH tasks are confirmed created so teardown is not entered
-         * prematurely on OOM with zero live tasks to wait on. */
+        /* finding 1: capture xTaskCreate results; set s_pump_count only
+         * after confirming how many tasks actually started so teardown
+         * takes exactly that many semaphore counts from s_pump_done_sem. */
         BaseType_t rc_a2b = xTaskCreate(pump_ssh_to_usb, "pump_a2b",
                                         8192, a2b, 6, NULL);
         BaseType_t rc_b2a = (rc_a2b == pdPASS)
@@ -657,20 +730,19 @@ static void ssh_server_task(void *arg)
 
         if (rc_a2b != pdPASS || rc_b2a != pdPASS) {
             ESP_LOGE(TAG, "OOM creating pump task(s) -- aborting session");
-            /* If a2b started but b2a failed, signal a2b to stop; it will
-             * give the semaphore once and we wait for it below. */
-            s_pump_stop = true;
+            atomic_store(&s_pump_stop, true);
             if (rc_a2b == pdPASS) {
-                /* a2b task is running; wait for it to exit before teardown */
-                s_pumps_running = true;
-                ring_close(s_usb_to_ssh); /* unblock pump_usb_to_ssh if needed */
-            } else {
-                /* Neither task started -- free both args ourselves */
-                free(a2b);
+                /* a2b started but b2a failed: record exactly 1 live pump so
+                 * teardown waits for that one give and no more. */
+                s_pump_count = 1;
+                ring_close(s_usb_to_ssh); /* unblock ring_recv in pump_usb_to_ssh */
+                /* b2a was never handed to a task -- free it here */
                 free(b2a);
-            }
-            if (rc_b2a != pdPASS && rc_a2b == pdPASS) {
-                /* Only a2b is running; b2a arg was never handed off */
+            } else {
+                /* Neither task started: no pump gives will arrive, teardown
+                 * must not wait at all. */
+                s_pump_count = 0;
+                free(a2b);
                 free(b2a);
             }
             xSemaphoreTake(s_session_mutex, portMAX_DELAY);
@@ -679,24 +751,24 @@ static void ssh_server_task(void *arg)
             continue;
         }
 
-        s_pumps_running = true;
+        s_pump_count = 2;
 
 #if SSH_KEEPALIVE_INTERVAL_SEC > 0
         /* Initialise keepalive state for this session. */
         ssh_keepalive_t ka;
-        s_last_ssh_rx_tick = xTaskGetTickCount();
+        atomic_store(&s_last_ssh_rx_tick, (uint32_t)xTaskGetTickCount());
         ssh_keepalive_init(&ka,
             (uint32_t)pdMS_TO_TICKS(SSH_KEEPALIVE_INTERVAL_SEC * 1000UL),
             (uint32_t)SSH_KEEPALIVE_COUNT_MAX,
             (uint32_t)xTaskGetTickCount());
-        TickType_t prev_rx_tick = s_last_ssh_rx_tick;
+        uint32_t prev_rx_tick = atomic_load(&s_last_ssh_rx_tick);
 #endif
 
         /* Block until the session ends (pump tasks set s_pump_stop), but
          * also poll the listen socket so an incoming connection preempts the
          * current session. Without this, a new client would queue in the
          * kernel backlog until the current session naturally ends. */
-        while (!s_pump_stop) {
+        while (!atomic_load(&s_pump_stop)) {
             fd_set rfds;
             FD_ZERO(&rfds);
             FD_SET(listen_fd, &rfds);
@@ -704,13 +776,13 @@ static void ssh_server_task(void *arg)
             int sel = select(listen_fd + 1, &rfds, NULL, NULL, &ptv);
             if (sel > 0 && FD_ISSET(listen_fd, &rfds)) {
                 ESP_LOGI(TAG, "New connection pending -- preempting session");
-                s_pump_stop = true;
+                atomic_store(&s_pump_stop, true);
                 break;
             }
 
 #if SSH_KEEPALIVE_INTERVAL_SEC > 0
             TickType_t now = xTaskGetTickCount();
-            TickType_t cur_rx_tick = s_last_ssh_rx_tick;
+            uint32_t cur_rx_tick = atomic_load(&s_last_ssh_rx_tick);
             /* note: 200ms select granularity may miss a one-tick burst that
              * arrives and clears between two consecutive loop iterations. */  /* finding 9 */
             bool got_inbound = (cur_rx_tick != prev_rx_tick);
@@ -727,7 +799,7 @@ static void ssh_server_task(void *arg)
                     ssh_keepalive_sent(&ka, (uint32_t)now);
                 } else {
                     ESP_LOGW(TAG, "SSH keepalive send failed (%d), dropping", kr);
-                    s_pump_stop = true;
+                    atomic_store(&s_pump_stop, true);
                     break;
                 }
             } else if (act == SSH_KA_DROP) {
@@ -735,7 +807,7 @@ static void ssh_server_task(void *arg)
                     "SSH keepalive: peer unresponsive after %lu probes, "
                     "dropping session",
                     (unsigned long)ka.unanswered);
-                s_pump_stop = true;
+                atomic_store(&s_pump_stop, true);
                 break;
             }
 #endif
@@ -754,7 +826,7 @@ static void ssh_server_task(void *arg)
 
 bool ssh_server_is_listening(void)
 {
-    return s_ssh_listening;
+    return atomic_load(&s_ssh_listening);
 }
 
 esp_err_t ssh_server_start(ring_t *usb_to_ssh, ring_t *ssh_to_usb,

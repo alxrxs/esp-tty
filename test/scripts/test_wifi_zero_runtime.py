@@ -412,10 +412,16 @@ def test_sta_disconnected_retry_increments_s_retry_num():
     )
     assert m, "STA_DISCONNECTED handler block (up to disc_done: label) not found"
     block = m.group(1)
-    assert "s_retry_num++" in block, (
-        "s_retry_num++ not found in STA_DISCONNECTED handler block. "
-        "The retry counter must be incremented each time esp_wifi_connect is "
-        "called so WIFI_MAX_RETRY enforcement is accurate."
+    # s_retry_num was converted from plain `int` to `_Atomic int` for
+    # cross-core visibility on ESP32-S3 dual-Xtensa; the increment now uses
+    # atomic_fetch_add.  Accept either spelling so this test does not pin
+    # the implementation to one C-language idiom.
+    incremented = ("s_retry_num++" in block
+                   or "atomic_fetch_add(&s_retry_num" in block)
+    assert incremented, (
+        "s_retry_num is not incremented inside the STA_DISCONNECTED handler "
+        "block. The retry counter must be incremented each time "
+        "esp_wifi_connect is called so WIFI_MAX_RETRY enforcement is accurate."
     )
 
 

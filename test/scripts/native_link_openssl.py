@@ -9,4 +9,4 @@ mbedTLS libraries to the native test environment.
 """
 Import("env")  # noqa: F821  (PlatformIO injects this)
 
-env.Append(LIBS=["crypto", "mbedcrypto", "mbedx509", "mbedtls"])
+env.Append(LIBS=["crypto", "mbedcrypto", "mbedx509", "mbedtls", "pthread"])

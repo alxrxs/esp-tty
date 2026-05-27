@@ -298,9 +298,26 @@ void app_main(void)
        as a 303a:1001 CDC ACM device -- no SSH bridge in this build. */
     ESP_LOGI(TAG, "USB_DEBUG_CONSOLE_ONLY -- TinyUSB skipped, logs via USB-Serial-JTAG");
 #else
-    ESP_ERROR_CHECK(usb_cdc_init(usb_to_ssh, ssh_to_usb, scrollback));
-    ESP_ERROR_CHECK(usb_cdc_start_task());
-    ESP_LOGI(TAG, "USB CDC ACM ready -- plug USB-C cable to native USB port");
+    /* usb_cdc_init is RECOVERABLE: TinyUSB OOM is rare but non-fatal because
+     * the device is still reachable over TCP/WiFi+SSH.  Log and continue
+     * rather than aborting the whole device over a bridge-path failure. */
+    {
+        esp_err_t usb_err = usb_cdc_init(usb_to_ssh, ssh_to_usb, scrollback);
+        if (usb_err != ESP_OK) {
+            ESP_LOGE(TAG, "usb_cdc_init failed (%s) -- USB CDC bridge unavailable; "
+                          "SSH over TCP/WiFi still operational",
+                     esp_err_to_name(usb_err));
+        } else {
+            esp_err_t task_err = usb_cdc_start_task();
+            if (task_err != ESP_OK) {
+                ESP_LOGE(TAG, "usb_cdc_start_task failed (%s) -- USB CDC bridge unavailable; "
+                              "SSH over TCP/WiFi still operational",
+                         esp_err_to_name(task_err));
+            } else {
+                ESP_LOGI(TAG, "USB CDC ACM ready -- plug USB-C cable to native USB port");
+            }
+        }
+    }
 #endif
 
 #ifdef SCEP_KEYGEN_BENCH_ON_BOOT
@@ -353,7 +370,22 @@ void app_main(void)
        of RSA scratch and competes for the crypto HW with the host_key
        generation done inside ssh_server_start().  Letting SSH come up
        first gives the host key a clean head start. */
-    ESP_ERROR_CHECK(ssh_server_start(usb_to_ssh, ssh_to_usb, scrollback));
+    /* ssh_server_start is RECOVERABLE: host_key_load_or_generate (wave-2 H3.A)
+     * only fails if RNG init is catastrophically broken.  In that pathological
+     * case the device is still useful for OTA recovery via DFU, so we log and
+     * skip SSH rather than abort()-ing the whole firmware.  Every other
+     * ssh_server_start failure (OOM on mutex/semaphore/task) is similarly
+     * non-fatal for the OTA/DFU path. */
+    {
+        esp_err_t ssh_err = ssh_server_start(usb_to_ssh, ssh_to_usb, scrollback);
+        if (ssh_err != ESP_OK) {
+            ESP_LOGE(TAG, "ssh_server_start failed (%s) -- SSH unavailable; "
+                          "device accessible via OTA/DFU for recovery",
+                     esp_err_to_name(ssh_err));
+        }
+        /* No else: ssh_server_task is now running; rollback_timer_cb checks
+         * ssh_server_is_listening() independently. */
+    }
 
 #if defined(WIFI_ENTERPRISE_SSID) && defined(SCEP_URL) && !defined(WIFI_USE_ENTERPRISE)
     /* Certificate renewal watchdog (Mode C only -- Mode B+ uses embedded

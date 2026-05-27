@@ -14,6 +14,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -29,10 +30,17 @@ typedef int (*bridge_write_fn)(void *ctx, const uint8_t *buf, size_t len);
 /*
  * Pump bytes from r/r_ctx to w/w_ctx until *stop becomes true or either
  * callback returns an error (<=0).  Blocking -- call from a dedicated task.
+ *
+ * `stop` is an _Atomic bool because the producer (a separate task that
+ * decides to tear down the session) and the consumer (this loop) run on
+ * different FreeRTOS tasks and, on ESP32-S3, may run on different Xtensa
+ * cores.  `volatile` alone provides per-CPU compiler ordering but no
+ * inter-core memory ordering, so a stale `false` could be observed
+ * indefinitely.  atomic_load(seq_cst) ensures cross-core visibility.
  */
 void bridge_pump(bridge_read_fn  r, void *r_ctx,
                  bridge_write_fn w, void *w_ctx,
-                 volatile bool  *stop);
+                 _Atomic bool   *stop);
 
 #ifdef __cplusplus
 }

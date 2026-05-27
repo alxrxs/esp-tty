@@ -20,6 +20,7 @@
 #include "esp_log.h"
 
 #include <inttypes.h>
+#include <stdatomic.h>
 #include <stdint.h>
 
 #if !defined(BRIDGE_LOOPBACK) && !defined(USB_DEBUG_CONSOLE_ONLY)
@@ -31,7 +32,6 @@
 #include "tinyusb_default_config.h"
 #include "esp_system.h"        /* esp_restart */
 #include "esp_rom_sys.h"       /* esp_rom_delay_us */
-#include "freertos/FreeRTOS.h" /* portDISABLE_INTERRUPTS */
 /* Two cooperating mechanisms are required for software-triggered DFU on
  * ESP32-S3 USB-OTG (TinyUSB) builds:
  *   1) RTC_CNTL_FORCE_DOWNLOAD_BOOT in RTC_CNTL_OPTION1_REG -- forces
@@ -55,31 +55,32 @@ static const char *TAG = "usb_cdc";
  * RX FIFO chunks). */
 static usb_cdc_boot_trigger_t s_boot_trigger;
 
-/* on-match callback: reboot the chip into the ROM serial bootloader
- * without needing the BOOT button.
+/* Single-shot guard: prevents a double-spawn of boot_trigger_reset_task
+ * if the magic is observed twice in rapid succession (e.g. two host
+ * writes arriving back-to-back, each containing the magic suffix).
+ * atomic_exchange in on_boot_trigger_match guarantees first-call-wins. */
+static _Atomic bool s_boot_triggered = false;
+
+/* boot_trigger_shutdown_handler -- registered via esp_register_shutdown_handler
+ * in boot_trigger_reset_task and invoked by esp_restart() AFTER all other
+ * IDF shutdown hooks have run (including TinyUSB teardown).
  *
- * Mechanism: set USBDC_BOOT_DFU in the ROM USB-persist flags, then
- * esp_restart().  The ROM bootloader honours this flag on the next
- * boot and enters DFU (download) mode via the USB-Serial-JTAG
- * controller, re-enumerating as VID:PID 303a:1001 on the host.
+ * Writing the persist flags here -- after USB-OTG teardown -- guarantees
+ * the ROM sees the DFU flag on next boot and is not overwritten by the
+ * TinyUSB shutdown sequence.  Mirrors the IDF-internal pattern in
+ * esp_usb_console_before_restart() (esp-idf issue #9826,
+ * arduino-esp32 usb_persist_restart()).
  *
- * Why USBDC_BOOT_DFU and not RTC_CNTL_FORCE_DOWNLOAD_BOOT:
- *   On ESP32-S3 builds that use USB-OTG (TinyUSB), the OTG peripheral
- *   persists across esp_restart() so the host doesn't see a USB
- *   disconnect.  RTC_CNTL_FORCE_DOWNLOAD_BOOT causes the chip to
- *   enter download mode at the CPU/boot-strap level, but the USB
- *   peripheral is still owned by TinyUSB-OTG, not USB-Serial-JTAG,
- *   so the host never sees the bootloader's 303a:1001 endpoint.
- *   USBDC_BOOT_DFU is checked by the ROM USB stack and routes the
- *   USB pins back to the ROM USB-Serial-JTAG controller cleanly.
- *   Reference: esp-idf issue #9826, arduino-esp32 usb_persist_restart().
- *
- * Intentionally does not return -- esp_restart() never returns. */
-/* Shutdown handler invoked from inside esp_restart() AFTER other
- * cleanup (including the TinyUSB driver teardown above).  This is the
- * last write the chip does before the actual reset, so the value the
- * ROM reads on next boot is exactly what we put here.  Mirrors the
- * IDF-internal esp_usb_console_before_restart() pattern. */
+ * Why both flags are needed:
+ *   USBDC_BOOT_DFU alone: the ROM USB stack routes the USB pins to
+ *     USB-Serial-JTAG (303a:1001), but the chip does not enter download
+ *     mode unless the GPIO0/boot-strap condition is also satisfied.
+ *   RTC_CNTL_FORCE_DOWNLOAD_BOOT alone: the CPU enters download mode
+ *     but the USB peripheral may still be in OTG mode, so the host
+ *     never sees the 303a:1001 endpoint -- it still sees the stale
+ *     TinyUSB descriptor.
+ *   Both together: the ROM enters download mode AND routes USB to the
+ *     USB-Serial-JTAG controller, so the host sees VID:PID 303a:1001. */
 static void boot_trigger_shutdown_handler(void)
 {
     chip_usb_set_persist_flags(USBDC_BOOT_DFU);
@@ -94,13 +95,27 @@ static void boot_trigger_reset_task(void *arg)
 {
     (void)arg;
     /* Brief delay so the spawning callback can return cleanly and any
-     * lingering USB IN traffic gets flushed before we tear it down. */
+     * lingering USB IN traffic gets flushed before we tear it down.
+     * (The lower task priority is the primary mechanism; this delay is
+     * belt-and-braces.) */
     vTaskDelay(pdMS_TO_TICKS(50));
 
     /* Register the persist-flag setter so it fires LAST during the
      * esp_restart() shutdown-handler sequence -- after TinyUSB has
-     * been torn down, so the OTG teardown doesn't reset our flag. */
-    esp_register_shutdown_handler(boot_trigger_shutdown_handler);
+     * been torn down, so the OTG teardown doesn't reset our flag.
+     * If registration fails (out of shutdown-handler slots), write the
+     * persist flags inline before esp_restart() as a best-effort
+     * fallback -- some host stacks may not see the new descriptor but
+     * the ROM still routes to DFU on the next boot. */
+    esp_err_t sh_err = esp_register_shutdown_handler(
+        boot_trigger_shutdown_handler);
+    if (sh_err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_register_shutdown_handler failed: %s -- "
+                      "writing persist flags inline as fallback",
+                 esp_err_to_name(sh_err));
+        chip_usb_set_persist_flags(USBDC_BOOT_DFU);
+        REG_WRITE(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT);
+    }
 
     /* Tear down TinyUSB so the USB-OTG peripheral releases the USB
      * pins.  Without this, the ROM bootloader boots into download
@@ -111,19 +126,48 @@ static void boot_trigger_reset_task(void *arg)
     (void)tinyusb_driver_uninstall();
 
     esp_restart();
-    /* unreachable */
-    vTaskDelete(NULL);
+    /* unreachable -- esp_restart() does not return */
 }
 
 static void on_boot_trigger_match(void *ctx)
 {
     (void)ctx;
+    /* First-call-wins: the matcher feed loop is byte-by-byte and two
+     * magic sequences could arrive back-to-back within a single drain
+     * pass.  A second spawn would call tinyusb_driver_uninstall() on
+     * an already-torn-down driver and esp_restart() twice -- both
+     * undefined.  atomic_exchange returns the previous value; on a
+     * repeat call we observe true and return without effect. */
+    if (atomic_exchange(&s_boot_triggered, true)) return;
+
     ESP_LOGW(TAG, "USB CDC boot trigger magic detected -- "
                   "rebooting into ROM serial bootloader (DFU mode)");
+
     /* Spawn a background task -- the heavy work (driver_uninstall,
-     * esp_restart) must NOT run inside this TinyUSB-owned callback. */
-    (void)xTaskCreate(boot_trigger_reset_task, "boot_trig", 4096,
-                      NULL, configMAX_PRIORITIES - 2, NULL);
+     * esp_restart) must NOT run inside this TinyUSB-owned callback.
+     *
+     * Priority is deliberately LOW (tskIDLE_PRIORITY + 3) so the
+     * spawned task does not preempt the TinyUSB callback unwinding
+     * before this function returns.  A high priority here would race
+     * the unwind and could lead to driver_uninstall running while the
+     * TinyUSB stack is still inside the very callback that triggered
+     * us. */
+    /* 8192-byte stack: tinyusb_driver_uninstall() walks the TinyUSB internal
+     * teardown chain (semaphore wait + USB-OTG peripheral reset), and
+     * esp_restart() walks every registered shutdown handler.  Combined frame
+     * depth in the IDF USB stack can approach 4 KB alone, leaving no margin
+     * in a 4096-byte stack.  8192 provides headroom without wasteful excess. */
+    BaseType_t rc = xTaskCreate(boot_trigger_reset_task, "boot_trig",
+                                8192, NULL,
+                                tskIDLE_PRIORITY + 3, NULL);
+    if (rc != pdPASS) {
+        ESP_LOGE(TAG, "xTaskCreate(boot_trig) failed (rc=%d) -- "
+                      "DFU trigger not armed; clearing single-shot guard "
+                      "so a subsequent magic can retry", (int)rc);
+        /* Clear the guard so a later trigger can try again; without this
+         * the device would silently ignore every future magic. */
+        atomic_store(&s_boot_triggered, false);
+    }
 }
 
 /* Custom USB device descriptor. Overrides sdkconfig at runtime via
@@ -262,7 +306,15 @@ esp_err_t usb_cdc_init(ring_t *usb_to_ssh, ring_t *ssh_to_usb,
      * the inner constness on our side. */
     tusb_cfg.descriptor.string       = (const char **)s_usb_strings;
     tusb_cfg.descriptor.string_count = sizeof(s_usb_strings) / sizeof(s_usb_strings[0]);
-    ESP_ERROR_CHECK(tinyusb_driver_install(&tusb_cfg));
+    /* Recoverable: transient DRAM exhaustion at boot can fail this call.
+     * The device can still run usefully without USB CDC (it serves SSH over
+     * TCP), so bubble the error up rather than aborting. */
+    esp_err_t err = tinyusb_driver_install(&tusb_cfg);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "tinyusb_driver_install failed: %s -- USB CDC unavailable",
+                 esp_err_to_name(err));
+        return err;
+    }
 
     const tinyusb_config_cdcacm_t acm_cfg = {
         .cdc_port                    = TINYUSB_CDC_ACM_0,
@@ -271,7 +323,23 @@ esp_err_t usb_cdc_init(ring_t *usb_to_ssh, ring_t *ssh_to_usb,
         .callback_line_state_changed = cdc_line_state_callback,
         .callback_line_coding_changed = NULL,
     };
-    ESP_ERROR_CHECK(tinyusb_cdcacm_init(&acm_cfg));
+    err = tinyusb_cdcacm_init(&acm_cfg);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "tinyusb_cdcacm_init failed: %s -- USB CDC unavailable",
+                 esp_err_to_name(err));
+        /* Partial init: the driver was installed but cdcacm setup failed.
+         * tinyusb_driver_uninstall() exists in ESP-IDF and tears down the
+         * USB-OTG state cleanly.  If it returns an error we still propagate
+         * the original cdcacm_init failure -- the device is in a
+         * known-USB-down state either way and the SSH/Wi-Fi paths can
+         * proceed. */
+        esp_err_t uninstall_err = tinyusb_driver_uninstall();
+        if (uninstall_err != ESP_OK) {
+            ESP_LOGW(TAG, "tinyusb_driver_uninstall after cdcacm_init failure: %s",
+                     esp_err_to_name(uninstall_err));
+        }
+        return err;
+    }
 
     ESP_LOGI(TAG, "TinyUSB CDC ACM initialised");
     return ESP_OK;

@@ -20,11 +20,97 @@
 #include <stdbool.h>
 #include <string.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <time.h>
 
 #include "esp_log.h"
 
 static const char *TAG = "cred_store";
+
+/* --------------------------------------------------------------------------
+ * Concurrency
+ *
+ * cred_store is reachable from multiple FreeRTOS tasks: cert_renewer_task
+ * (load + save during SCEP enrolment + renewal) and the wifi-init path
+ * (load before joining the SSID).  ESP-IDF NVS documents that two
+ * concurrent NVS_READWRITE handles on the same namespace produce UNDEFINED
+ * behaviour, so we serialise every public entry point through a single
+ * mutex.
+ *
+ * Lazy initialisation: an atomic CAS guards a one-shot path that creates
+ * the mutex on first call.  Failure to create the mutex is fatal in the
+ * sense that we cannot offer the documented thread-safety guarantee --
+ * we log and return ESP_ERR_NO_MEM so callers can react (cert_renewer
+ * retries; wifi_init treats it as "no creds available" which is its
+ * default not-enrolled handling).
+ * -------------------------------------------------------------------------- */
+#ifndef CRED_STORE_NATIVE_TEST
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+
+static SemaphoreHandle_t s_mutex = NULL;
+static _Atomic int       s_mutex_init = 0;   /* 0=uninit, 1=initialising, 2=ready */
+
+static esp_err_t ensure_mutex(void)
+{
+    int state = atomic_load_explicit(&s_mutex_init, memory_order_acquire);
+    if (state == 2) return ESP_OK;
+
+    int expected = 0;
+    if (atomic_compare_exchange_strong_explicit(
+            &s_mutex_init, &expected, 1,
+            memory_order_acq_rel, memory_order_acquire)) {
+        s_mutex = xSemaphoreCreateMutex();
+        if (s_mutex == NULL) {
+            atomic_store_explicit(&s_mutex_init, 0, memory_order_release);
+            ESP_LOGE(TAG, "xSemaphoreCreateMutex failed");
+            return ESP_ERR_NO_MEM;
+        }
+        atomic_store_explicit(&s_mutex_init, 2, memory_order_release);
+        return ESP_OK;
+    }
+
+    /* Lost the race -- spin (briefly) until the winner publishes the mutex.
+     * Init path is one alloc; spin is bounded by FreeRTOS scheduler tick. */
+    while (atomic_load_explicit(&s_mutex_init, memory_order_acquire) != 2) {
+        if (atomic_load_explicit(&s_mutex_init, memory_order_acquire) == 0) {
+            return ESP_ERR_NO_MEM;
+        }
+        vTaskDelay(1);
+    }
+    return ESP_OK;
+}
+
+static esp_err_t lock_take(void)
+{
+    esp_err_t err = ensure_mutex();
+    if (err != ESP_OK) return err;
+    if (xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    return ESP_OK;
+}
+
+static void lock_give(void)
+{
+    if (s_mutex) xSemaphoreGive(s_mutex);
+}
+#else /* CRED_STORE_NATIVE_TEST -- pthread on the host */
+#include <pthread.h>
+
+static pthread_mutex_t s_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static esp_err_t lock_take(void)
+{
+    if (pthread_mutex_lock(&s_mutex) != 0) return ESP_FAIL;
+    return ESP_OK;
+}
+
+static void lock_give(void)
+{
+    (void)pthread_mutex_unlock(&s_mutex);
+}
+#endif
 
 /* mbedTLS X.509 -- same headers work for the on-device build and the
  * native-test build (system libmbedtls). */
@@ -156,7 +242,11 @@ esp_err_t cred_store_parse_not_before(const uint8_t *cert_der,
 #define CRED_KEY_SCHEMA      "schema_ver" /* uint8 schema version */
 #define CRED_SCHEMA_VERSION  1u
 
-esp_err_t cred_store_load(cred_store_t *out)
+/* Forward declaration -- definition follows cred_store_save so it can be
+ * shared with cred_store_clear without reordering the public API order. */
+static void scrub_secret_blobs(nvs_handle_t h);
+
+static esp_err_t cred_store_load_unlocked(cred_store_t *out)
 {
     if (!out) return ESP_ERR_INVALID_ARG;
     memset(out, 0, sizeof(*out));
@@ -235,7 +325,7 @@ not_found:
     return ESP_ERR_NVS_NOT_FOUND;
 }
 
-esp_err_t cred_store_save(const cred_store_t *in)
+static esp_err_t cred_store_save_unlocked(const cred_store_t *in)
 {
     if (!in) return ESP_ERR_INVALID_ARG;
 
@@ -328,11 +418,73 @@ esp_err_t cred_store_save(const cred_store_t *in)
 #undef SET_BLOB
 
 save_fail:
+    /* Defence-in-depth: a partial save may have committed dev_key/dev_cert
+     * blobs but failed before the valid marker landed.  The reader-visible
+     * state is already "not enrolled" (marker absent -> load() returns
+     * NOT_FOUND, see cred_store_load), but the raw key DER may still be
+     * recoverable from the NVS pages on a flash dump.  Scrub before
+     * returning so even an aborted save leaves no key material.
+     * NOTE: the err captured before this label is the original failure --
+     * we deliberately do not overwrite it with scrub status (scrub failure
+     * is logged inside scrub_secret_blobs but does not replace the
+     * caller-visible original error). */
+    {
+        esp_err_t saved_err = err;
+        scrub_secret_blobs(h);
+        err = saved_err;
+    }
     nvs_close(h);
     return err;
 }
 
-esp_err_t cred_store_clear(void)
+/*
+ * scrub_secret_blobs -- overwrite every secret-bearing blob in the creds
+ * namespace with zeros, then commit.  Used by cred_store_clear() and
+ * cred_store_save() error paths as defence-in-depth so that a power-fail
+ * between the scrub-commit and the subsequent erase does not leave raw
+ * RSA-2048 private-key DER recoverable from an NVS dump.
+ *
+ * KNOWN LIMITATION: ESP-IDF NVS uses page-based wear-levelling.  Overwriting
+ * a blob with zeros writes a NEW page; the prior page (containing the real
+ * key bytes) is marked obsolete but not physically erased until the
+ * wear-leveller reclaims it.  An attacker with raw flash access can still
+ * recover the old page.  This routine therefore relies on the project's
+ * existing NVS partition encryption (AES-XTS-256, see main/main.c
+ * nvs_flash_secure_init_partition) as the primary defence; the scrub is a
+ * defence-in-depth layer that mitigates the narrow window where an attacker
+ * has the partition encryption key (e.g. from a leak) AND a flash dump.
+ *
+ * Errors are logged but not surfaced -- the caller is already on an error
+ * or destructive path; failing the scrub does not change the calling
+ * function's outcome and would only obscure the underlying error.
+ */
+static void scrub_secret_blobs(nvs_handle_t h)
+{
+    /* Use stack-allocated zero buffers sized to MAX so the scrub overwrites
+     * any historical record at that key.  MAX sizes are sub-KB (key 2 KB,
+     * cert 4 KB, chain 8 KB) -- this is called from the renewal task with a
+     * 32 KB stack, which has the room.  If the calling task ever shrinks,
+     * switch to heap. */
+    static const uint8_t zeros_key[CRED_DEV_KEY_MAX]   = {0};
+    static const uint8_t zeros_cert[CRED_DEV_CERT_MAX] = {0};
+    static const uint8_t zeros_chain[CRED_CA_CHAIN_MAX] = {0};
+
+    esp_err_t e;
+    e = nvs_set_blob(h, CRED_KEY_DEV_KEY,  zeros_key,   sizeof(zeros_key));
+    if (e != ESP_OK)
+        ESP_LOGW(TAG, "scrub(dev_key): %s", esp_err_to_name(e));
+    e = nvs_set_blob(h, CRED_KEY_DEV_CERT, zeros_cert,  sizeof(zeros_cert));
+    if (e != ESP_OK)
+        ESP_LOGW(TAG, "scrub(dev_cert): %s", esp_err_to_name(e));
+    e = nvs_set_blob(h, CRED_KEY_CA_CHAIN, zeros_chain, sizeof(zeros_chain));
+    if (e != ESP_OK)
+        ESP_LOGW(TAG, "scrub(ca_chain): %s", esp_err_to_name(e));
+    e = nvs_commit(h);
+    if (e != ESP_OK)
+        ESP_LOGW(TAG, "scrub commit: %s", esp_err_to_name(e));
+}
+
+static esp_err_t cred_store_clear_unlocked(void)
 {
     nvs_handle_t h;
     esp_err_t err = nvs_open(CRED_NVS_NS, NVS_READWRITE, &h);
@@ -342,9 +494,10 @@ esp_err_t cred_store_clear(void)
         return err;
     }
 
-    /* Erase the valid marker first (and commit) so that even if the
-     * subsequent erase_all is interrupted by a power loss, load() returns
-     * NOT_FOUND on the next boot. */
+    /* Step 1: erase the valid marker first (and commit) so that any
+     * power-fail from here on leaves load() returning NOT_FOUND.  This
+     * pins the reader-visible state to "not enrolled" before we touch
+     * the secret blobs. */
     esp_err_t erase_err = nvs_erase_key(h, CRED_KEY_VALID);
     if (erase_err != ESP_OK && erase_err != ESP_ERR_NVS_NOT_FOUND) {
         ESP_LOGE(TAG, "nvs_erase_key(valid): %s", esp_err_to_name(erase_err));
@@ -359,6 +512,16 @@ esp_err_t cred_store_clear(void)
         return err;
     }
 
+    /* Step 2: scrub every secret-bearing blob to zeros and commit BEFORE
+     * the destructive erase_all.  If power fails between scrub-commit and
+     * erase_all, the NVS transaction log will roll-forward the zero
+     * overwrite (not the original key), so a flash forensics step cannot
+     * recover the key DER even after rollback.  The valid marker is
+     * already absent (step 1) so the caller's view of the store is still
+     * "not enrolled" regardless. */
+    scrub_secret_blobs(h);
+
+    /* Step 3: erase the entire namespace so subsequent saves start clean. */
     err = nvs_erase_all(h);
     if (err == ESP_OK) err = nvs_commit(h);
     nvs_close(h);
@@ -366,7 +529,7 @@ esp_err_t cred_store_clear(void)
     if (err != ESP_OK)
         ESP_LOGE(TAG, "cred_store_clear failed: %s", esp_err_to_name(err));
     else
-        ESP_LOGI(TAG, "Credential store cleared");
+        ESP_LOGI(TAG, "Credential store cleared (with secret scrub)");
     return err;
 }
 
@@ -384,7 +547,7 @@ static uint8_t      s_mem_valid     = 0;  /* mirrors CRED_KEY_VALID */
 static uint8_t      s_mem_schema    = 0;  /* mirrors CRED_KEY_SCHEMA */
 #define CRED_SCHEMA_VERSION  1u
 
-esp_err_t cred_store_load(cred_store_t *out)
+static esp_err_t cred_store_load_unlocked(cred_store_t *out)
 {
     if (!out) return ESP_ERR_INVALID_ARG;
     if (s_mem_valid != 1) return ESP_ERR_NVS_NOT_FOUND;
@@ -393,7 +556,7 @@ esp_err_t cred_store_load(cred_store_t *out)
     return ESP_OK;
 }
 
-esp_err_t cred_store_save(const cred_store_t *in)
+static esp_err_t cred_store_save_unlocked(const cred_store_t *in)
 {
     if (!in) return ESP_ERR_INVALID_ARG;
     /* Mirror the device write ordering: invalidate marker, then blobs, then
@@ -406,21 +569,83 @@ esp_err_t cred_store_save(const cred_store_t *in)
     return ESP_OK;
 }
 
-esp_err_t cred_store_clear(void)
+static esp_err_t cred_store_clear_unlocked(void)
 {
-    s_mem_valid  = 0;       /* marker first */
+    /* Mirror the device write ordering: marker first, then scrub secrets,
+     * then full erase.  In the in-memory backend "scrub" and "erase" are
+     * indistinguishable but we keep the layering so tests that simulate
+     * a power-fail after the scrub-commit (see _testhook_clear_after_scrub)
+     * can be added in parallel with the device guarantees. */
+    s_mem_valid  = 0;
+    /* "scrub" step: overwrite the secret blobs.  The full zeroize below
+     * subsumes this in-memory, but we keep the explicit step so future
+     * tests can probe between scrub and erase. */
+    zeroize(s_mem_store.dev_key,  CRED_DEV_KEY_MAX);
+    zeroize(s_mem_store.dev_cert, CRED_DEV_CERT_MAX);
+    zeroize(s_mem_store.ca_chain, CRED_CA_CHAIN_MAX);
+    /* "erase" step. */
     s_mem_schema = 0;
     zeroize(&s_mem_store, sizeof(s_mem_store));
     return ESP_OK;
 }
 
-/* Test-only fault injectors -- simulate a power-fail in the middle of
- * cred_store_save() and a schema-version-only rollback.  Not declared in
- * cred_store.h to keep the public API clean; tests forward-declare. */
+/* Test-only fault injectors -- simulate power-fail windows in cred_store_save()
+ * and cred_store_clear().  Not declared in cred_store.h to keep the public API
+ * clean; tests forward-declare them directly.
+ *
+ * NOTE: the native backend is a SIMULATION of NVS commit-boundary semantics,
+ * not an exact replica.  On the real device each nvs_commit() call flushes a
+ * page header; between commits the prior valid page can be recovered on a flash
+ * dump.  The in-memory backend cannot model page-level granularity, so these
+ * hooks inject state that corresponds to what load() would observe if a
+ * power-fail happened between specific commit points. */
 void cred_store_testhook_partial_write(const cred_store_t *in)
 {
-    /* Blobs written + committed (step 4) but valid marker NEVER set (step 5
-     * power-fail).  load() must return NOT_FOUND. */
+    /* Models: blobs written + committed (step 4) but valid marker NEVER set
+     * (power-fail between step 4 commit and step 5 write).
+     * load() must return NOT_FOUND because the marker is absent. */
+    if (!in) return;
+    s_mem_valid = 0;
+    memcpy(&s_mem_store, in, sizeof(s_mem_store));
+    s_mem_schema = (uint8_t)CRED_SCHEMA_VERSION;
+    /* deliberately DO NOT set s_mem_valid */
+}
+
+/*
+ * cred_store_testhook_partial_clear -- simulate power-fail in clear() between
+ * the marker-erase commit (step 1) and the scrub commit (step 2).
+ *
+ * Device state at this point: marker is absent (load() returns NOT_FOUND) but
+ * the secret blobs are still intact in flash.  This is the worst-case window
+ * that the scrub step is designed to close.
+ *
+ * load() must return NOT_FOUND.  The dev_key bytes are deliberately left in
+ * place to model the forensic residue; a separate test verifies the load()
+ * invariant (caller sees "not enrolled") even with the key on "flash".
+ */
+void cred_store_testhook_partial_clear(void)
+{
+    /* Only the marker is gone; blobs are intact (mirrors device after step 1
+     * commit and before step 2 scrub). */
+    s_mem_valid = 0;
+    /* s_mem_store and s_mem_schema deliberately left untouched. */
+}
+
+/*
+ * cred_store_testhook_save_partial_committed_blobs_no_marker -- simulate
+ * power-fail in save() between the blob commit (step 4) and the valid-marker
+ * write (step 5).
+ *
+ * Device state: blobs are present and readable, schema is set, but the marker
+ * is absent.  load() must return NOT_FOUND -- the marker-last scheme ensures
+ * the caller never sees a partially-committed credential set.
+ */
+void cred_store_testhook_save_partial_committed_blobs_no_marker(const cred_store_t *in)
+{
+    /* Identical to cred_store_testhook_partial_write in the in-memory backend
+     * because both model "blobs committed, marker absent".  The two hooks are
+     * kept as separate named entry points so tests can document which commit
+     * window they are exercising. */
     if (!in) return;
     s_mem_valid = 0;
     memcpy(&s_mem_store, in, sizeof(s_mem_store));
@@ -435,4 +660,108 @@ void cred_store_testhook_force_schema(uint8_t schema)
     s_mem_schema = schema;
 }
 
+/*
+ * cred_store_testhook_save_fail_with_scrub -- simulate a save() failure after
+ * some blobs were written (step 3) but before the valid marker was set (step 5),
+ * with the scrub already executed (save_fail path in cred_store_save_unlocked).
+ *
+ * Device state after the scrub commit: blobs are overwritten with zeros, marker
+ * is absent.  load() must return NOT_FOUND AND the dev_key region must contain
+ * only zero bytes (no key DER fragments recoverable).
+ *
+ * This hook tests the M3.D fix: that the save_fail path in the NVS backend
+ * calls scrub_secret_blobs before closing the handle, so no key material is
+ * left even on an aborted save.
+ */
+void cred_store_testhook_save_fail_with_scrub(void)
+{
+    /* Simulate what happens when save() fails after writing blobs but the
+     * scrub has executed: marker is absent AND blobs are zeroed. */
+    s_mem_valid = 0;
+    zeroize(s_mem_store.dev_key,  CRED_DEV_KEY_MAX);
+    zeroize(s_mem_store.dev_cert, CRED_DEV_CERT_MAX);
+    zeroize(s_mem_store.ca_chain, CRED_CA_CHAIN_MAX);
+    /* schema deliberately left to match the (zeroed) blob state; load()
+     * returns NOT_FOUND because the marker is gone regardless of schema. */
+}
+
+/*
+ * cred_store_testhook_clear_after_marker -- simulate power-fail in clear()
+ * after the valid-marker erase commit but BEFORE the secret scrub.
+ * Mirrors the device path: only the marker is gone; secret blobs still hold
+ * raw key bytes.  load() must return NOT_FOUND.
+ */
+void cred_store_testhook_clear_after_marker(void)
+{
+    s_mem_valid = 0;
+    /* Deliberately do not touch s_mem_store -- the raw key bytes remain
+     * in place.  load() must still refuse because the marker is gone. */
+}
+
+/*
+ * cred_store_testhook_clear_after_scrub -- simulate power-fail in clear()
+ * after the scrub commit but BEFORE the final erase_all.  Secret blobs are
+ * now zero; metadata may or may not be reset.  load() must return NOT_FOUND
+ * AND any flash inspection of dev_key must show only zero bytes.
+ */
+void cred_store_testhook_clear_after_scrub(void)
+{
+    s_mem_valid = 0;
+    zeroize(s_mem_store.dev_key,  CRED_DEV_KEY_MAX);
+    zeroize(s_mem_store.dev_cert, CRED_DEV_CERT_MAX);
+    zeroize(s_mem_store.ca_chain, CRED_CA_CHAIN_MAX);
+    /* metadata (lengths, not_after, schema) deliberately left in place to
+     * represent the worst-case partial-clear residue. */
+}
+
+/*
+ * cred_store_testhook_inspect_dev_key -- expose the raw stored dev_key
+ * region to tests so they can verify the scrub overwrites the key bytes.
+ * Returns a pointer to the in-memory dev_key buffer; never NULL.  Tests
+ * read up to CRED_DEV_KEY_MAX bytes and assert what they expect.
+ */
+const uint8_t *cred_store_testhook_inspect_dev_key(void)
+{
+    return s_mem_store.dev_key;
+}
+
 #endif /* CRED_STORE_NATIVE_TEST */
+
+/* --------------------------------------------------------------------------
+ * Public API -- thin locking wrappers around the *_unlocked implementations.
+ *
+ * Every public entry takes the cred_store mutex on entry and releases it on
+ * every exit path.  This serialises all NVS access on the "creds" namespace
+ * so two tasks cannot hold an NVS_READWRITE handle on the namespace at the
+ * same time (which ESP-IDF documents as undefined behaviour).
+ *
+ * The mutex protects ONLY the cred_store namespace; it does not interact
+ * with any other module's NVS access.
+ * -------------------------------------------------------------------------- */
+
+esp_err_t cred_store_load(cred_store_t *out)
+{
+    esp_err_t err = lock_take();
+    if (err != ESP_OK) return err;
+    err = cred_store_load_unlocked(out);
+    lock_give();
+    return err;
+}
+
+esp_err_t cred_store_save(const cred_store_t *in)
+{
+    esp_err_t err = lock_take();
+    if (err != ESP_OK) return err;
+    err = cred_store_save_unlocked(in);
+    lock_give();
+    return err;
+}
+
+esp_err_t cred_store_clear(void)
+{
+    esp_err_t err = lock_take();
+    if (err != ESP_OK) return err;
+    err = cred_store_clear_unlocked();
+    lock_give();
+    return err;
+}

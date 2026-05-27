@@ -11,10 +11,19 @@
  *   not_after -- uint64 epoch seconds parsed from dev_cert's NotAfter field
  *
  * The native-test build stubs out the NVS layer behind CRED_STORE_NATIVE_TEST.
- * In that mode the in-memory backend is used instead of NVS, and the wolfSSL
- * ASN.1 parser is still called (linked against the wolfssl stubs in test/stubs/).
+ * In that mode an in-memory backend is used instead of NVS.
  *
- * Key material is wiped from stack buffers with force_zero() before any return
+ * NATIVE BACKEND IS A SIMULATION, NOT AN EXACT REPLICA:
+ *   The on-device backend uses three distinct nvs_commit() calls to model
+ *   power-fail boundaries (marker erase → blob write → marker set).  The
+ *   in-memory backend cannot model page-level granularity because there is no
+ *   journal to roll forward/back.  The cred_store_testhook_* functions inject
+ *   state that corresponds to what load() would observe for each commit window,
+ *   allowing fault-injection tests to verify the load() invariants without
+ *   running on real flash.  The testhooks are not declared here (to keep the
+ *   public API clean); tests forward-declare them directly.
+ *
+ * Key material is wiped from stack buffers with zeroize() before any return
  * path, preventing dead-store optimisation from leaking secrets.
  */
 
@@ -70,6 +79,18 @@ typedef struct {
 
 /* --------------------------------------------------------------------------
  * Public API
+ *
+ * Thread safety: cred_store_load(), cred_store_save() and cred_store_clear()
+ * are mutually serialised by an internal mutex.  Concurrent calls from
+ * multiple FreeRTOS tasks are safe; each call observes a consistent
+ * snapshot of the namespace.  This is required because ESP-IDF NVS
+ * documents that two NVS_READWRITE handles open on the same namespace
+ * produce undefined behaviour, and cert_renewer_task + wifi_init can both
+ * touch the "creds" namespace after boot.
+ *
+ * The mutex is created lazily on first call; if mutex creation fails
+ * (ESP_ERR_NO_MEM at boot) the public function returns ESP_ERR_NO_MEM
+ * rather than racing.
  * -------------------------------------------------------------------------- */
 
 /*
@@ -101,6 +122,19 @@ esp_err_t cred_store_save(const cred_store_t *in);
  *
  * Called on certificate revocation or before re-enrollment.  All four keys
  * are removed; subsequent cred_store_load() will return ESP_ERR_NVS_NOT_FOUND.
+ *
+ * Power-fail safety: the implementation erases the valid marker FIRST, then
+ * commits, then scrubs the secret blobs to zeros and commits, then erases
+ * the whole namespace.  A power-fail at any point leaves load() returning
+ * NOT_FOUND.  A power-fail strictly after the scrub-commit also leaves no
+ * raw key DER recoverable from an NVS dump.
+ *
+ * KNOWN LIMITATION: ESP-IDF NVS uses page-based wear-levelling, so the
+ * scrub writes a new page rather than physically overwriting the old one.
+ * The old page is marked obsolete but may persist in flash until the
+ * wear-leveller reclaims it.  Forensic flash dumps therefore still rely on
+ * the partition encryption (AES-XTS-256, see main/main.c) as the primary
+ * confidentiality boundary; the scrub is defence-in-depth.
  */
 esp_err_t cred_store_clear(void);
 

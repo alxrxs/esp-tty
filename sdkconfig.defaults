@@ -9,14 +9,21 @@ CONFIG_SPIRAM_SPEED_80M=y
 # in many ESP-IDF components. Allocate PSRAM explicitly with heap_caps_malloc instead.
 CONFIG_SPIRAM_FETCH_INSTRUCTIONS=n
 CONFIG_SPIRAM_RODATA=n
-# Do NOT set CONFIG_SPIRAM_USE_MALLOC for the DevKit (this file's target) --
-# we allocate PSRAM explicitly via xStreamBufferCreateWithCaps /
-# heap_caps_malloc to avoid surprising spills.
+# CONFIG_SPIRAM_USE_MALLOC is NOT explicitly set here, so the IDF default of
+# y (enabled) applies with a 16384-byte threshold: any single allocation
+# >= 16 KB is automatically served from PSRAM rather than internal SRAM.
+# This is intentional for the DevKit (N16R8, 8 MB PSRAM) -- large buffers
+# (ring buffers, scrollback, TLS scratch) naturally land in PSRAM without
+# extra heap_caps_malloc calls.
 #
-# The Zero overlay (sdkconfig.zero.defaults) deliberately overrides this and
-# sets CONFIG_SPIRAM_USE_MALLOC=y + CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=256
-# to work around v0.2-silicon heap CAS spinlock crashes -- see the comment
-# block at the top of sdkconfig.zero.defaults.
+# For deterministic placement of large buffers regardless of the threshold,
+# we still prefer explicit heap_caps_malloc(MALLOC_CAP_SPIRAM) at call sites
+# -- this avoids relying on the threshold value and documents intent in code.
+#
+# The Zero overlay (sdkconfig.zero.defaults) overrides to a 256-byte threshold
+# (CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=256) to work around v0.2-silicon heap
+# CAS spinlock crashes that appear when internal RAM allocations compete with
+# PSRAM -- see the comment block at the top of sdkconfig.zero.defaults.
 
 # -- Flash (16 MB, QIO) ----------------------------------------------------
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y

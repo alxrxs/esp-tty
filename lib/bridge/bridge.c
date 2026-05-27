@@ -8,11 +8,11 @@
 
 void bridge_pump(bridge_read_fn  r, void *r_ctx,
                  bridge_write_fn w, void *w_ctx,
-                 volatile bool  *stop)
+                 _Atomic bool   *stop)
 {
     uint8_t buf[BRIDGE_BUF_SIZE];
 
-    while (!*stop) {
+    while (!atomic_load(stop)) {
         int n = r(r_ctx, buf, sizeof(buf));
         if (n <= 0) break;  /* EOF or error on read side */
 

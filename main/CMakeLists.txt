@@ -95,8 +95,10 @@ idf_component_register(
         "${CMAKE_CURRENT_LIST_DIR}/../lib/scep_proto/scep_proto.c"
         "${CMAKE_CURRENT_LIST_DIR}/../lib/cred_store/cred_store.c"
         "${CMAKE_CURRENT_LIST_DIR}/../lib/scep_transport/scep_transport.c"
+        "${CMAKE_CURRENT_LIST_DIR}/../lib/wifi_backoff/wifi_backoff.c"
     INCLUDE_DIRS
         "."
+        "${CMAKE_CURRENT_LIST_DIR}/../lib/wifi_backoff"
         "${CMAKE_CURRENT_LIST_DIR}/../lib/udp_log"
         "${CMAKE_CURRENT_LIST_DIR}/../lib/ring"
         "${CMAKE_CURRENT_LIST_DIR}/../lib/bridge"

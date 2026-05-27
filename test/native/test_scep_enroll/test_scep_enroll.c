@@ -430,6 +430,83 @@ void test_alloc_buf_scep_max_csr_der_size(void)
 }
 
 /* =========================================================================
+ * 5. M3.C structural check: scep_enroll does NOT save when not_after=0
+ *
+ * The fix for M3.C: when cred_store_parse_not_after fails, scep_enroll must
+ * NOT call cred_store_save (which would overwrite credentials with not_after=0,
+ * triggering cert_renewer to re-enroll every boot).  Instead it must return an
+ * error, leaving existing credentials intact.
+ *
+ * Verified structurally: in the source, cred_store_save must be called only
+ * AFTER a check that err == ESP_OK from cred_store_parse_not_after (i.e., the
+ * save is guarded by the not_after parse result, not unconditional).
+ * ======================================================================= */
+
+void test_scep_enroll_not_after_failure_does_not_save(void)
+{
+    const char *src = scep_enroll_src_path();
+    FILE *f = fopen(src, "r");
+    if (!f) {
+        TEST_IGNORE_MESSAGE("Cannot open main/scep_enroll.c for structural check");
+        return;
+    }
+
+    /* Read the entire file, then search for:
+     *   (a) The not_after parse error path ending in `goto done` (not cred_store_save)
+     *   (b) cred_store_save called only AFTER the err == ESP_OK check
+     *
+     * Strategy: find the line with "cred_store_parse_not_after" and the next
+     * "cred_store_save" call, and ensure there is a "goto done" between them
+     * (on a parse-failure branch) rather than an unconditional save.
+     *
+     * We look for the pattern: "goto done" appearing on a line that is between
+     * the not_after parse call and the cred_store_save call, indicating the
+     * error branch bails out before saving. */
+    int parse_not_after_line = -1;
+    int goto_done_after_parse_line = -1;
+    int cred_store_save_line = -1;
+    char line[256];
+    int lineno = 0;
+
+    while (fgets(line, sizeof(line), f)) {
+        lineno++;
+        const char *lp = line;
+        while (*lp == ' ' || *lp == '\t') lp++;
+        int is_comment = (*lp == '/' || *lp == '*');
+        if (is_comment) continue;
+
+        if (parse_not_after_line < 0 &&
+            strstr(line, "cred_store_parse_not_after"))
+            parse_not_after_line = lineno;
+
+        if (parse_not_after_line > 0 && goto_done_after_parse_line < 0 &&
+            strstr(line, "goto done") &&
+            !strstr(line, "/*") && !strstr(line, "//"))
+            goto_done_after_parse_line = lineno;
+
+        if (parse_not_after_line > 0 && cred_store_save_line < 0 &&
+            strstr(line, "cred_store_save("))
+            cred_store_save_line = lineno;
+    }
+    fclose(f);
+
+    TEST_ASSERT_GREATER_THAN_INT_MESSAGE(0, parse_not_after_line,
+        "cred_store_parse_not_after must appear in scep_enroll.c");
+    TEST_ASSERT_GREATER_THAN_INT_MESSAGE(0, goto_done_after_parse_line,
+        "A 'goto done' must appear after cred_store_parse_not_after "
+        "(the not_after=0 fix: error path must bail before saving)");
+    TEST_ASSERT_GREATER_THAN_INT_MESSAGE(0, cred_store_save_line,
+        "cred_store_save must appear in scep_enroll.c");
+
+    /* The goto done must appear BEFORE cred_store_save -- this is the M3.C
+     * invariant: parse failure exits without saving. */
+    TEST_ASSERT_LESS_THAN_INT_MESSAGE(cred_store_save_line,
+        goto_done_after_parse_line,
+        "M3.C: 'goto done' (on not_after parse failure) must appear BEFORE "
+        "cred_store_save -- scep_enroll must not save with not_after=0");
+}
+
+/* =========================================================================
  * Main
  * ======================================================================= */
 
@@ -456,6 +533,9 @@ int main(void)
     RUN_TEST(test_pk_free_on_init_only_context_does_not_crash);
     RUN_TEST(test_alloc_buf_fill_pattern_survives_free);
     RUN_TEST(test_alloc_buf_scep_max_csr_der_size);
+
+    /* M3.C: not_after=0 must not cause a save */
+    RUN_TEST(test_scep_enroll_not_after_failure_does_not_save);
 
     /* Cleanup */
     if (g_rng_init) {
