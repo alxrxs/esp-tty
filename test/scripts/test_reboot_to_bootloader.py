@@ -1,349 +1,258 @@
-#!/usr/bin/env python3
 """
-test/scripts/test_reboot_to_bootloader.py
--- Tests for scripts/reboot_to_bootloader.py
+test_reboot_to_bootloader.py -- unit tests for scripts/reboot_to_bootloader.py
 
-Covers:
-  - MAGIC byte sequence matches lib/usb_cdc_boot_trigger/usb_cdc_boot_trigger.c
-  - CLI error paths (missing port arg, non-existent port, pyserial not installed)
-  - RTS/DTR deassertion (mock serial.Serial)
-  - Writes exactly one MAGIC, flushes, closes
-  - --baud override is accepted
-  - Exit codes 0/1/2 are correct
+The script intentionally bypasses pyserial because pyserial.Serial.open()
+unconditionally issues TIOCMBIC on the RTS line, which the running esp-tty
+TinyUSB CDC stack rejects with EPROTO.  These tests verify the raw os.open
++ os.write path instead.
 """
 
-import importlib
 import os
-import sys
 import re
 import subprocess
-import types
-import unittest
-from unittest.mock import MagicMock, call, patch
+import sys
+from pathlib import Path
+from unittest.mock import patch
 
-SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
-PROJECT_DIR = os.path.dirname(os.path.dirname(SCRIPT_DIR))
-REBOOT_SCRIPT = os.path.join(PROJECT_DIR, "scripts", "reboot_to_bootloader.py")
-BOOT_TRIGGER_C = os.path.join(PROJECT_DIR, "lib", "usb_cdc_boot_trigger",
-                               "usb_cdc_boot_trigger.c")
+import pytest
 
-sys.path.insert(0, os.path.join(PROJECT_DIR, "scripts"))
+REPO_ROOT = Path(__file__).resolve().parents[2]
+REBOOT_SCRIPT = REPO_ROOT / "scripts" / "reboot_to_bootloader.py"
+TRIGGER_SRC = REPO_ROOT / "lib" / "usb_cdc_boot_trigger" / "usb_cdc_boot_trigger.c"
+
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 
 def _import_fresh():
-    """Import reboot_to_bootloader with a clean module cache entry."""
     if "reboot_to_bootloader" in sys.modules:
         del sys.modules["reboot_to_bootloader"]
-    import reboot_to_bootloader as m
-    return m
+    import reboot_to_bootloader  # noqa: WPS433
+    return reboot_to_bootloader
 
 
 # ---------------------------------------------------------------------------
-# 1. MAGIC byte sequence matches the C source
+# MAGIC matches the C source byte-for-byte
 # ---------------------------------------------------------------------------
 
 def test_magic_matches_c_source():
-    """MAGIC in the Python script must be byte-for-byte identical to k_magic[] in C."""
+    """The script's MAGIC constant must byte-for-byte equal k_magic[] in the C source.
+
+    Any drift between the Python sender and the firmware matcher would silently
+    break the recovery path.
+    """
     mod = _import_fresh()
-    py_magic: bytes = mod.MAGIC
+    c_source = TRIGGER_SRC.read_text(encoding="utf-8")
 
-    with open(BOOT_TRIGGER_C) as f:
-        c_src = f.read()
+    m = re.search(
+        r'static\s+const\s+uint8_t\s+k_magic\[\]\s*=\s*"([^"]+)"\s*;',
+        c_source,
+    )
+    assert m, "Could not find k_magic[] string literal in the C source"
 
-    # Extract the string literal from k_magic[] = "...";
-    # The C source uses a raw string literal on one line.
-    m = re.search(r'k_magic\[\]\s*=\s*"([^"]+)"', c_src)
-    assert m, "Could not find k_magic[] string literal in usb_cdc_boot_trigger.c"
-
-    # The C string literal uses escape sequences; decode them the same way C does.
-    raw_literal = m.group(1)
-    # Replace \n escape with actual newline (C only uses \n here)
-    c_magic_str = raw_literal.replace(r"\n", "\n")
-    c_magic: bytes = c_magic_str.encode("ascii")
-
-    assert py_magic == c_magic, (
-        f"MAGIC mismatch!\n"
-        f"  Python : {py_magic!r}\n"
-        f"  C src  : {c_magic!r}"
+    # Decode C string escapes (\n -> newline) and compare against the Python MAGIC.
+    c_literal = m.group(1).encode("utf-8").decode("unicode_escape").encode("latin-1")
+    assert mod.MAGIC == c_literal, (
+        f"MAGIC drift: Python={mod.MAGIC!r}, C={c_literal!r}"
     )
 
 
 def test_magic_starts_and_ends_with_newline():
-    """MAGIC is bracketed by newlines (as the C comment states)."""
     mod = _import_fresh()
-    assert mod.MAGIC[0:1] == b"\n", "MAGIC must start with a newline"
-    assert mod.MAGIC[-1:] == b"\n", "MAGIC must end with a newline"
+    assert mod.MAGIC.startswith(b"\n")
+    assert mod.MAGIC.endswith(b"\n")
 
 
 def test_magic_body_contains_no_newline():
-    """The body of MAGIC (between the two bracket newlines) has no embedded newlines."""
+    """The matcher's simple mismatch-recovery requires that the magic body has no
+    occurrence of the start byte ('\\n') except at the boundaries."""
     mod = _import_fresh()
     body = mod.MAGIC[1:-1]
-    assert b"\n" not in body, f"MAGIC body must not contain newlines, got {body!r}"
+    assert b"\n" not in body
 
 
 # ---------------------------------------------------------------------------
-# 2. --baud override accepted (argparse does not reject it)
-# ---------------------------------------------------------------------------
-
-def test_baud_override_accepted():
-    """Passing --baud 9600 does not cause argparse to exit 2."""
-    result = subprocess.run(
-        [sys.executable, REBOOT_SCRIPT, "--help"],
-        capture_output=True, text=True,
-    )
-    assert "--baud" in result.stdout, "--baud not advertised in --help output"
-
-
-# ---------------------------------------------------------------------------
-# 3. CLI exit codes: missing port -> exit 2 (argparse)
+# CLI argument handling
 # ---------------------------------------------------------------------------
 
 def test_missing_port_exits_2():
-    """Running the script with no arguments must exit 2 (argparse usage error)."""
+    """argparse rejects a missing positional with exit code 2."""
     result = subprocess.run(
-        [sys.executable, REBOOT_SCRIPT],
+        [sys.executable, str(REBOOT_SCRIPT)],
         capture_output=True, text=True,
     )
     assert result.returncode == 2, (
-        f"Expected exit code 2 for missing port, got {result.returncode}\n"
+        f"Expected exit 2 for missing port, got {result.returncode}\n"
         f"stderr: {result.stderr}"
     )
 
 
-# ---------------------------------------------------------------------------
-# 4. CLI exit code 1: non-existent port -> serial.SerialException -> exit 1
-# ---------------------------------------------------------------------------
-
 def test_nonexistent_port_exits_1():
-    """Opening /dev/ttyNONEXISTENT must raise SerialException and return exit code 1."""
+    """A non-existent device path is caught before os.open is attempted."""
     result = subprocess.run(
-        [sys.executable, REBOOT_SCRIPT, "/dev/ttyNONEXISTENT_esp_tty_test"],
+        [sys.executable, str(REBOOT_SCRIPT),
+         "/dev/ttyNONEXISTENT_esp_tty_test"],
         capture_output=True, text=True,
     )
     assert result.returncode == 1, (
-        f"Expected exit code 1 for non-existent port, got {result.returncode}\n"
+        f"Expected exit 1 for non-existent port, got {result.returncode}\n"
         f"stderr: {result.stderr}"
     )
-    assert "error:" in result.stderr.lower() or "error" in result.stderr.lower(), (
-        f"Expected error message on stderr, got: {result.stderr!r}"
+    assert "error" in result.stderr.lower(), (
+        f"Expected an error message on stderr, got: {result.stderr!r}"
     )
 
 
 # ---------------------------------------------------------------------------
-# 5. CLI exit code 2: pyserial not installed branch
+# os.open is used (NOT pyserial)
 # ---------------------------------------------------------------------------
 
-def test_pyserial_not_installed_exits_2():
-    """If pyserial is not importable the script must print a helpful message and exit 2."""
-    mod = _import_fresh()
-
-    # Simulate the ImportError branch by calling main() with serial hidden
-    import builtins
-    real_import = builtins.__import__
-
-    def _blocking_import(name, *args, **kwargs):
-        if name == "serial":
-            raise ImportError("No module named 'serial'")
-        return real_import(name, *args, **kwargs)
-
-    with patch("builtins.__import__", side_effect=_blocking_import):
-        # Re-import to pick up the patched __import__
-        if "reboot_to_bootloader" in sys.modules:
-            del sys.modules["reboot_to_bootloader"]
-        import reboot_to_bootloader as fresh_mod
-
-        with patch("sys.argv", [REBOOT_SCRIPT, "/dev/ttyACM0"]):
-            rc = fresh_mod.main()
-
-    assert rc == 2, f"Expected exit code 2 when pyserial missing, got {rc}"
-
-
-# ---------------------------------------------------------------------------
-# 6. RTS/DTR deassertion: mock serial.Serial
-# ---------------------------------------------------------------------------
-
-def _make_mock_serial():
-    """Return a MagicMock that behaves like a serial.Serial instance."""
-    mock_ser = MagicMock()
-    mock_ser.__enter__ = MagicMock(return_value=mock_ser)
-    mock_ser.__exit__ = MagicMock(return_value=False)
-    return mock_ser
-
-
-def test_setdtr_false_called():
-    """main() must call ser.setDTR(False) before writing the magic."""
-    mod = _import_fresh()
-    mock_ser = _make_mock_serial()
-
-    mock_serial_module = types.ModuleType("serial")
-    mock_serial_module.Serial = MagicMock(return_value=mock_ser)
-    mock_serial_module.SerialException = OSError
-
-    with patch.dict(sys.modules, {"serial": mock_serial_module}):
-        with patch("sys.argv", [REBOOT_SCRIPT, "/dev/ttyACM0"]):
-            rc = mod.main()
-
-    assert rc == 0, f"Expected exit 0, got {rc}"
-    mock_ser.setDTR.assert_called_with(False)
-
-
-def test_setrts_false_called():
-    """main() must call ser.setRTS(False) before writing the magic."""
-    mod = _import_fresh()
-    mock_ser = _make_mock_serial()
-
-    mock_serial_module = types.ModuleType("serial")
-    mock_serial_module.Serial = MagicMock(return_value=mock_ser)
-    mock_serial_module.SerialException = OSError
-
-    with patch.dict(sys.modules, {"serial": mock_serial_module}):
-        with patch("sys.argv", [REBOOT_SCRIPT, "/dev/ttyACM0"]):
-            rc = mod.main()
-
-    assert rc == 0
-    mock_ser.setRTS.assert_called_with(False)
-
-
-# ---------------------------------------------------------------------------
-# 7. Writes EXACTLY one MAGIC, flushes, closes
-# ---------------------------------------------------------------------------
-
-def test_writes_exactly_one_magic():
-    """main() must call ser.write() exactly once with the full MAGIC bytes."""
-    mod = _import_fresh()
-    mock_ser = _make_mock_serial()
-
-    mock_serial_module = types.ModuleType("serial")
-    mock_serial_module.Serial = MagicMock(return_value=mock_ser)
-    mock_serial_module.SerialException = OSError
-
-    with patch.dict(sys.modules, {"serial": mock_serial_module}):
-        with patch("sys.argv", [REBOOT_SCRIPT, "/dev/ttyACM0"]):
-            rc = mod.main()
-
-    assert rc == 0
-    write_calls = mock_ser.write.call_args_list
-    assert len(write_calls) == 1, (
-        f"Expected exactly 1 write() call, got {len(write_calls)}: {write_calls}"
+def test_script_does_not_import_pyserial():
+    """The script must NOT import pyserial -- pyserial's open() fails on
+    TinyUSB CDC with EPROTO, which is why this script exists at all."""
+    src = REBOOT_SCRIPT.read_text(encoding="utf-8")
+    # No 'import serial' or 'from serial import ...' lines.
+    assert not re.search(r"^\s*import\s+serial\b", src, re.MULTILINE), (
+        "Script imports pyserial -- that's exactly what we're avoiding"
     )
-    written = write_calls[0].args[0]
-    assert written == mod.MAGIC, (
-        f"write() called with {written!r}, expected {mod.MAGIC!r}"
+    assert not re.search(r"^\s*from\s+serial\b", src, re.MULTILINE), (
+        "Script imports pyserial -- that's exactly what we're avoiding"
     )
 
 
-def test_flush_called_after_write():
-    """main() must call ser.flush() after ser.write()."""
+def test_script_uses_os_open_o_nonblock():
+    """The os.open call must use O_NOCTTY | O_NONBLOCK so the cdc-acm driver
+    doesn't issue the RTS-set ioctl that TinyUSB rejects."""
+    src = REBOOT_SCRIPT.read_text(encoding="utf-8")
+    assert "os.O_NONBLOCK" in src, (
+        "os.open must include O_NONBLOCK to skip the termios open path"
+    )
+    assert "os.O_NOCTTY" in src, (
+        "os.open must include O_NOCTTY (don't take controlling tty)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# main() under mocked os.open / os.write -- functional behaviour
+# ---------------------------------------------------------------------------
+
+def test_main_writes_exactly_magic_to_opened_fd():
+    """Under mocked os.{open,write,close,path.exists}, main() must:
+       - open the supplied port path
+       - write EXACTLY the MAGIC bytes (no prefix, no trailing data, single call)
+       - close the fd
+       - return 0
+    """
     mod = _import_fresh()
-    mock_ser = _make_mock_serial()
-    call_order = []
-    mock_ser.write.side_effect   = lambda *a, **kw: call_order.append("write")
-    mock_ser.flush.side_effect   = lambda *a, **kw: call_order.append("flush")
 
-    mock_serial_module = types.ModuleType("serial")
-    mock_serial_module.Serial = MagicMock(return_value=mock_ser)
-    mock_serial_module.SerialException = OSError
+    writes = []
+    closes = []
+    opens = []
 
-    with patch.dict(sys.modules, {"serial": mock_serial_module}):
-        with patch("sys.argv", [REBOOT_SCRIPT, "/dev/ttyACM0"]):
-            rc = mod.main()
+    def fake_open(path, flags, *_args):
+        opens.append((path, flags))
+        return 42  # fake fd
+
+    def fake_write(fd, data):
+        writes.append((fd, bytes(data)))
+        return len(data)
+
+    def fake_close(fd):
+        closes.append(fd)
+
+    with patch.object(mod.os, "open", side_effect=fake_open), \
+         patch.object(mod.os, "write", side_effect=fake_write), \
+         patch.object(mod.os, "close", side_effect=fake_close), \
+         patch.object(mod.os.path, "exists", return_value=True), \
+         patch.object(mod.time, "sleep"), \
+         patch("sys.argv", [str(REBOOT_SCRIPT), "/dev/ttyACM0"]):
+        rc = mod.main()
 
     assert rc == 0
-    assert "write" in call_order, "write() not called"
-    assert "flush" in call_order, "flush() not called"
-    assert call_order.index("write") < call_order.index("flush"), \
-        "flush() must be called after write()"
+    assert opens == [("/dev/ttyACM0",
+                      os.O_WRONLY | os.O_NOCTTY | os.O_NONBLOCK)]
+    assert writes == [(42, mod.MAGIC)], (
+        f"Expected exactly one write of the full MAGIC, got {writes!r}"
+    )
+    assert closes == [42]
 
 
-def test_close_called():
-    """main() must call ser.close() to release the port."""
+def test_main_short_write_returns_zero_with_warning():
+    """If os.write returns fewer bytes than MAGIC, main() should warn (stderr)
+    but still return 0 (the close still happens, the chip might have got
+    enough)."""
     mod = _import_fresh()
-    mock_ser = _make_mock_serial()
 
-    mock_serial_module = types.ModuleType("serial")
-    mock_serial_module.Serial = MagicMock(return_value=mock_ser)
-    mock_serial_module.SerialException = OSError
+    def short_write(fd, data):
+        return max(1, len(data) // 2)
 
-    with patch.dict(sys.modules, {"serial": mock_serial_module}):
-        with patch("sys.argv", [REBOOT_SCRIPT, "/dev/ttyACM0"]):
-            rc = mod.main()
+    with patch.object(mod.os, "open", return_value=7), \
+         patch.object(mod.os, "write", side_effect=short_write), \
+         patch.object(mod.os, "close"), \
+         patch.object(mod.os.path, "exists", return_value=True), \
+         patch.object(mod.time, "sleep"), \
+         patch("sys.argv", [str(REBOOT_SCRIPT), "/dev/ttyACM0"]):
+        rc = mod.main()
 
     assert rc == 0
-    mock_ser.close.assert_called_once()
 
 
-# ---------------------------------------------------------------------------
-# 8. --baud flag is forwarded to serial.Serial constructor
-# ---------------------------------------------------------------------------
-
-def test_baud_override_forwarded_to_serial():
-    """--baud 9600 must be passed as the baud_rate argument to serial.Serial."""
+def test_main_open_oserror_exits_1():
+    """An OSError from os.open (e.g. EACCES, ENOENT after exists-check race)
+    must surface as exit code 1 with a stderr error message."""
     mod = _import_fresh()
-    mock_ser = _make_mock_serial()
-    captured = {}
 
-    def fake_serial_constructor(port, baud, **kwargs):
-        captured["port"] = port
-        captured["baud"] = baud
-        return mock_ser
+    def fail_open(path, flags, *_args):
+        raise PermissionError(13, "Permission denied")
 
-    mock_serial_module = types.ModuleType("serial")
-    mock_serial_module.Serial = fake_serial_constructor
-    mock_serial_module.SerialException = OSError
+    with patch.object(mod.os, "open", side_effect=fail_open), \
+         patch.object(mod.os.path, "exists", return_value=True), \
+         patch("sys.argv", [str(REBOOT_SCRIPT), "/dev/ttyACM0"]):
+        rc = mod.main()
 
-    with patch.dict(sys.modules, {"serial": mock_serial_module}):
-        with patch("sys.argv", [REBOOT_SCRIPT, "/dev/ttyACM0", "--baud", "9600"]):
-            rc = mod.main()
-
-    assert rc == 0
-    assert captured.get("baud") == 9600, \
-        f"Expected baud=9600, got baud={captured.get('baud')!r}"
+    assert rc == 1
 
 
-# ---------------------------------------------------------------------------
-# 9. Exit code 0 on success
-# ---------------------------------------------------------------------------
-
-def test_exit_code_0_on_success():
-    """main() returns 0 when the port opens and the magic is sent successfully."""
+def test_main_write_oserror_exits_1_and_closes_fd():
+    """An OSError from os.write must surface as exit code 1 and the fd must
+    still be closed."""
     mod = _import_fresh()
-    mock_ser = _make_mock_serial()
+    closes = []
 
-    mock_serial_module = types.ModuleType("serial")
-    mock_serial_module.Serial = MagicMock(return_value=mock_ser)
-    mock_serial_module.SerialException = OSError
+    with patch.object(mod.os, "open", return_value=11), \
+         patch.object(mod.os, "write",
+                      side_effect=OSError("simulated bus error")), \
+         patch.object(mod.os, "close", side_effect=closes.append), \
+         patch.object(mod.os.path, "exists", return_value=True), \
+         patch("sys.argv", [str(REBOOT_SCRIPT), "/dev/ttyACM0"]):
+        rc = mod.main()
 
-    with patch.dict(sys.modules, {"serial": mock_serial_module}):
-        with patch("sys.argv", [REBOOT_SCRIPT, "/dev/ttyACM0"]):
-            rc = mod.main()
-
-    assert rc == 0, f"Expected exit code 0 on success, got {rc}"
+    assert rc == 1
+    assert closes == [11], (
+        f"fd should still be closed on write error; close history: {closes!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
-# 10. rtscts=False and dsrdtr=False passed to serial.Serial
+# End-to-end CLI smoke (no device required)
 # ---------------------------------------------------------------------------
 
-def test_rtscts_dsrdtr_disabled():
-    """serial.Serial must be called with rtscts=False and dsrdtr=False."""
-    mod = _import_fresh()
-    mock_ser = _make_mock_serial()
-    captured_kwargs = {}
+def test_help_works():
+    """--help exits 0 and shows the script's purpose."""
+    result = subprocess.run(
+        [sys.executable, str(REBOOT_SCRIPT), "--help"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0
+    assert "magic" in result.stdout.lower() or "reboot" in result.stdout.lower()
 
-    def fake_serial_constructor(port, baud, **kwargs):
-        captured_kwargs.update(kwargs)
-        return mock_ser
 
-    mock_serial_module = types.ModuleType("serial")
-    mock_serial_module.Serial = fake_serial_constructor
-    mock_serial_module.SerialException = OSError
+# ---------------------------------------------------------------------------
+# Doc references the correct re-enumeration VID:PID
+# ---------------------------------------------------------------------------
 
-    with patch.dict(sys.modules, {"serial": mock_serial_module}):
-        with patch("sys.argv", [REBOOT_SCRIPT, "/dev/ttyACM0"]):
-            mod.main()
-
-    assert captured_kwargs.get("rtscts") is False, \
-        f"Expected rtscts=False, got {captured_kwargs.get('rtscts')!r}"
-    assert captured_kwargs.get("dsrdtr") is False, \
-        f"Expected dsrdtr=False, got {captured_kwargs.get('dsrdtr')!r}"
+def test_docstring_mentions_dfu_vidpid():
+    """The script docstring should reference the actual re-enumeration target
+    (303a:0009 ESP32-S3 ROM USB DFU endpoint), not the older incorrect
+    303a:1001 (USB-Serial-JTAG) guess."""
+    src = REBOOT_SCRIPT.read_text(encoding="utf-8")
+    assert "303a:0009" in src

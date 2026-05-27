@@ -15,9 +15,16 @@ lib/usb_cdc_boot_trigger/usb_cdc_boot_trigger.{h,c} for the matcher.
 Usage:
     scripts/reboot_to_bootloader.py /dev/ttyACM0
 
-After the device reboots it will re-enumerate as VID:PID 303a:1001
-(native USB-Serial-JTAG, ROM bootloader) and esptool / make flash can
-then write firmware over USB.
+After the device reboots it will re-enumerate as VID:PID 303a:0009
+(ESP32-S3 ROM USB DFU endpoint).  esptool / `pio run --target upload`
+can then write firmware over USB without any physical button presses.
+
+Implementation note: this script deliberately does NOT use pyserial.
+pyserial.Serial.open() unconditionally issues TIOCMBIC on the RTS line
+via fcntl.ioctl(); TinyUSB's CDC ACM stack in the running firmware
+rejects that control transfer with EPROTO ("Protocol error"), and the
+open() call fails before any bytes can be written.  os.open() opens the
+fd without touching termios, so the magic write reaches the device.
 
 Exits 0 on send success.  Does NOT wait for / verify the bootloader
 re-enumeration -- the kernel hot-plug handler is the reliable signal
@@ -25,6 +32,7 @@ for that.
 """
 
 import argparse
+import os
 import sys
 import time
 
@@ -38,38 +46,39 @@ def main() -> int:
     ap.add_argument("port",
                     help="Serial device of the running esp-tty firmware "
                          "(typically /dev/ttyACM0)")
-    ap.add_argument("--baud", type=int, default=115200,
-                    help="Baud rate (ignored on CDC ACM, but the kernel "
-                         "termios interface still wants a value)")
     args = ap.parse_args()
 
-    try:
-        import serial
-    except ImportError:
-        print("error: pyserial not installed.  pip install pyserial",
-              file=sys.stderr)
-        return 2
-
-    print(f"[reboot] opening {args.port} ...")
-    # rtscts/dsrdtr off so we don't trigger any auto-reset wiring on the
-    # devkit ports (Zero doesn't have one but other esp-tty boxes do).
-    try:
-        ser = serial.Serial(args.port, args.baud, timeout=1,
-                            rtscts=False, dsrdtr=False)
-    except serial.SerialException as e:
-        print(f"error: {e}", file=sys.stderr)
+    if not os.path.exists(args.port):
+        print(f"error: {args.port}: no such device", file=sys.stderr)
         return 1
 
-    # Deassert DTR/RTS for the same reason.
-    ser.setDTR(False)
-    ser.setRTS(False)
+    # Bypass pyserial.  See the docstring for why.
+    try:
+        fd = os.open(args.port, os.O_WRONLY | os.O_NOCTTY | os.O_NONBLOCK)
+    except OSError as exc:
+        print(f"error: open {args.port}: {exc}", file=sys.stderr)
+        return 1
 
-    print(f"[reboot] writing {len(MAGIC)} magic bytes ...")
-    ser.write(MAGIC)
-    ser.flush()
-    time.sleep(0.05)  # give the device a beat to process before close
-    ser.close()
-    print("[reboot] sent.  Device should re-enumerate as 303a:1001 "
+    try:
+        n = os.write(fd, MAGIC)
+        if n != len(MAGIC):
+            print(f"warn: short write ({n} of {len(MAGIC)} bytes)",
+                  file=sys.stderr)
+        else:
+            print(f"[reboot] wrote {n} magic bytes to {args.port}")
+        # Give the kernel driver a beat to push the URB to the device
+        # before we close the fd.
+        time.sleep(0.1)
+    except OSError as exc:
+        print(f"error: write: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+    print("[reboot] sent.  Device should re-enumerate as 303a:0009 (DFU) "
           "(ROM bootloader) within ~1s.")
     return 0
 

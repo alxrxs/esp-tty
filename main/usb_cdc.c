@@ -30,7 +30,23 @@
 #include "tinyusb_cdc_acm.h"
 #include "tinyusb_default_config.h"
 #include "esp_system.h"        /* esp_restart */
-#include "soc/rtc_cntl_reg.h"  /* RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT */
+#include "esp_rom_sys.h"       /* esp_rom_delay_us */
+#include "freertos/FreeRTOS.h" /* portDISABLE_INTERRUPTS */
+/* Two cooperating mechanisms are required for software-triggered DFU on
+ * ESP32-S3 USB-OTG (TinyUSB) builds:
+ *   1) RTC_CNTL_FORCE_DOWNLOAD_BOOT in RTC_CNTL_OPTION1_REG -- forces
+ *      the boot ROM to enter download mode regardless of GPIO0.
+ *   2) chip_usb_set_persist_flags(USBDC_BOOT_DFU) -- tells the ROM USB
+ *      stack to route the USB peripheral to USB-Serial-JTAG (DFU)
+ *      rather than continuing to drive the persisted OTG endpoint.
+ * Using only (1) keeps the chip in OTG mode (host still sees our
+ * TinyUSB descriptor); using only (2) doesn't trigger download mode.
+ * Both are needed.  Reference: esp-idf
+ * components/esp_usb_cdc_rom_console/usb_console.c
+ * esp_usb_console_before_restart() and esp-idf issue #9826. */
+#include "esp32s3/rom/usb/chip_usb_dw_wrapper.h"
+#include "esp32s3/rom/usb/usb_persist.h"
+#include "soc/rtc_cntl_reg.h"
 
 static const char *TAG = "usb_cdc";
 
@@ -40,21 +56,74 @@ static const char *TAG = "usb_cdc";
 static usb_cdc_boot_trigger_t s_boot_trigger;
 
 /* on-match callback: reboot the chip into the ROM serial bootloader
- * without needing the BOOT button.  Writes the option1 force-download
- * bit and resets; the ROM checks that bit on cold/warm reset and stays
- * in download mode until cleared (esp_restart() preserves RTC scratch
- * across the reset).
+ * without needing the BOOT button.
  *
- * Intentionally does not return -- esp_restart() never returns.  The
- * surrounding drain loop is structured so scrollback + ring receive
- * the triggering bytes BEFORE we get here. */
+ * Mechanism: set USBDC_BOOT_DFU in the ROM USB-persist flags, then
+ * esp_restart().  The ROM bootloader honours this flag on the next
+ * boot and enters DFU (download) mode via the USB-Serial-JTAG
+ * controller, re-enumerating as VID:PID 303a:1001 on the host.
+ *
+ * Why USBDC_BOOT_DFU and not RTC_CNTL_FORCE_DOWNLOAD_BOOT:
+ *   On ESP32-S3 builds that use USB-OTG (TinyUSB), the OTG peripheral
+ *   persists across esp_restart() so the host doesn't see a USB
+ *   disconnect.  RTC_CNTL_FORCE_DOWNLOAD_BOOT causes the chip to
+ *   enter download mode at the CPU/boot-strap level, but the USB
+ *   peripheral is still owned by TinyUSB-OTG, not USB-Serial-JTAG,
+ *   so the host never sees the bootloader's 303a:1001 endpoint.
+ *   USBDC_BOOT_DFU is checked by the ROM USB stack and routes the
+ *   USB pins back to the ROM USB-Serial-JTAG controller cleanly.
+ *   Reference: esp-idf issue #9826, arduino-esp32 usb_persist_restart().
+ *
+ * Intentionally does not return -- esp_restart() never returns. */
+/* Shutdown handler invoked from inside esp_restart() AFTER other
+ * cleanup (including the TinyUSB driver teardown above).  This is the
+ * last write the chip does before the actual reset, so the value the
+ * ROM reads on next boot is exactly what we put here.  Mirrors the
+ * IDF-internal esp_usb_console_before_restart() pattern. */
+static void boot_trigger_shutdown_handler(void)
+{
+    chip_usb_set_persist_flags(USBDC_BOOT_DFU);
+    REG_WRITE(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT);
+}
+
+/* Background task that performs the actual TinyUSB teardown + reset.
+ * Run from a fresh FreeRTOS task (NOT from the TinyUSB CDC callback)
+ * because tinyusb_driver_uninstall() waits on the TinyUSB task itself
+ * and deadlocks if invoked from inside a TinyUSB-owned callback. */
+static void boot_trigger_reset_task(void *arg)
+{
+    (void)arg;
+    /* Brief delay so the spawning callback can return cleanly and any
+     * lingering USB IN traffic gets flushed before we tear it down. */
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    /* Register the persist-flag setter so it fires LAST during the
+     * esp_restart() shutdown-handler sequence -- after TinyUSB has
+     * been torn down, so the OTG teardown doesn't reset our flag. */
+    esp_register_shutdown_handler(boot_trigger_shutdown_handler);
+
+    /* Tear down TinyUSB so the USB-OTG peripheral releases the USB
+     * pins.  Without this, the ROM bootloader boots into download
+     * mode but the OTG state lingers on the host side -- the host
+     * keeps seeing our (now-stale) TinyUSB descriptor instead of the
+     * ROM's 303a:1001 USB-Serial-JTAG endpoint.  This is the
+     * documented companion to USBDC_BOOT_DFU (esp-idf issue #9826). */
+    (void)tinyusb_driver_uninstall();
+
+    esp_restart();
+    /* unreachable */
+    vTaskDelete(NULL);
+}
+
 static void on_boot_trigger_match(void *ctx)
 {
     (void)ctx;
     ESP_LOGW(TAG, "USB CDC boot trigger magic detected -- "
-                  "rebooting into ROM serial bootloader");
-    REG_WRITE(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT);
-    esp_restart();
+                  "rebooting into ROM serial bootloader (DFU mode)");
+    /* Spawn a background task -- the heavy work (driver_uninstall,
+     * esp_restart) must NOT run inside this TinyUSB-owned callback. */
+    (void)xTaskCreate(boot_trigger_reset_task, "boot_trig", 4096,
+                      NULL, configMAX_PRIORITIES - 2, NULL);
 }
 
 /* Custom USB device descriptor. Overrides sdkconfig at runtime via

@@ -42,3 +42,7 @@ dependencies.lock
 __pycache__/
 *.pyc
 .claude/
+main/certs/.dell_backup/
+main/certs/**
+!main/certs/*.example
+!main/certs/README.md
