@@ -13,11 +13,18 @@
  * any network path: a network-reachable "reboot to download mode" is an
  * unauthenticated brick primitive and not worth the convenience.
  *
- * On match, main/usb_cdc.c writes the ESP32-S3
- * RTC_CNTL_FORCE_DOWNLOAD_BOOT option1 bit and calls esp_restart().
- * The ROM bootloader honours that bit on the next reset and stays in
- * USB-Serial-JTAG download mode regardless of GPIO0 state -- the
- * BOOT button is not required.
+ * On match, the USB CDC RX handler posts a flag to a deferred FreeRTOS
+ * task.  That task registers a shutdown handler via esp_register_shutdown_handler(),
+ * calls tinyusb_driver_uninstall() to cleanly tear down the USB stack, then
+ * calls esp_restart().  The shutdown handler (not the task itself) writes the
+ * persistence flags: chip_usb_set_persist_flags(USBDC_BOOT_DFU) AND the
+ * RTC_CNTL_OPTION1_REG / RTC_CNTL_FORCE_DOWNLOAD_BOOT bit.  This two-step
+ * ordering is required because esp_restart() flushes shutdown handlers before
+ * resetting the chip; writing the flag inside a shutdown handler guarantees it
+ * survives the reset even though the USB stack has already been torn down.
+ * See esp-idf issue #9826 for the persistence-flag rationale.  The ROM
+ * bootloader honours the flag on the next reset and stays in USB-Serial-JTAG
+ * download mode regardless of GPIO0 state -- the BOOT button is not required.
  *
  * Stream guarantees
  * -----------------

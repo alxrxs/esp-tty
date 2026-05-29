@@ -44,6 +44,8 @@ See `scripts/README.md` for the full documentation of
 | Subdirectory | Patch file | Description |
 |---|---|---|
 | `wolfssl__wolfssl/` | `0001-rename-thread_local-enum-value-to-avoid-C11-keyword-conflict.patch` | Renames a `thread_local` enum value in wolfcrypt to avoid a C11 keyword conflict under `-std=c11`. |
+| `wolfssl__wolfssl/` | `0002-adapt-esp32-aes-sha-to-idf6-periph-clock-api.patch` | Replaces `periph_module_enable(PERIPH_AES_MODULE / PERIPH_SHA_MODULE)` with `esp_crypto_aes/sha_enable_periph_clk()` and adds `esp_security` to `PRIV_REQUIRES`; required after IDF 6.0 removed `hal/clk_gate_ll.h` from the public include path. Justified by audit finding a5eb0df9b3350be88; applies to IDF 6.x only. |
+| `wolfssl__wolfssl/` | `0003-sha-clock-refcount.patch` | Wraps `esp_crypto_sha_enable_periph_clk()` with an `_Atomic int` refcount to restore the IDF 5.x `periph_module_enable/disable` refcounting semantics lost in IDF 6.0 -- prevents the `lockDepth`-driven unroll loop from gating the SHA clock while a concurrent SHA context still depends on it. Justified by audit finding a5eb0df9b3350be88; applies to IDF 6.x only. |
 | `wolfssl__wolfssh/` | `0001-expose-resize-cb-setters-without-NO_FILESYSTEM.patch` | Moves two terminal-resize callback setters out of a `!NO_FILESYSTEM` guard so they link correctly on the bare-metal ESP32-S3. |
 
 Full context for each patch -- including the problem, the fix, upstream status,

@@ -661,6 +661,32 @@ void cred_store_testhook_force_schema(uint8_t schema)
 }
 
 /*
+ * cred_store_testhook_schema_absent -- simulate an older firmware that wrote
+ * the credential blobs and valid marker WITHOUT writing a schema_ver key.
+ *
+ * On the NVS device this is modelled by s_mem_schema == 0 (the zero value
+ * cred_store_clear() sets), while s_mem_valid == 1 and blobs are populated.
+ * This differs from testhook_force_schema(0) only in documentation intent:
+ * force_schema tests "wrong value present"; schema_absent tests "key never
+ * written" -- both map to s_mem_schema == 0 in the in-memory backend because
+ * the NVS "key absent" and "key present with value 0" cases are
+ * indistinguishable in the load() check (err != ESP_OK || schema != CRED_SCHEMA_VERSION).
+ * The test exercises the identical code path that the device-side NVS backend
+ * takes when nvs_get_u8(h, CRED_KEY_SCHEMA, &schema) returns ESP_ERR_NVS_NOT_FOUND.
+ */
+void cred_store_testhook_schema_absent(const cred_store_t *in)
+{
+    if (!in) return;
+    /* Write the valid marker and blobs as an old firmware would, but do NOT
+     * set s_mem_schema (leave it at 0 / its post-clear value). */
+    s_mem_valid = 0;
+    memcpy(&s_mem_store, in, sizeof(s_mem_store));
+    /* Deliberately do NOT set s_mem_schema -- simulates old firmware that
+     * wrote blobs before the schema_ver key existed. */
+    s_mem_valid = 1;
+}
+
+/*
  * cred_store_testhook_save_fail_with_scrub -- simulate a save() failure after
  * some blobs were written (step 3) but before the valid marker was set (step 5),
  * with the scrub already executed (save_fail path in cred_store_save_unlocked).

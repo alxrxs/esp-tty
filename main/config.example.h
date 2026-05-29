@@ -140,12 +140,25 @@
  * the one-time enrollment password from the NDES web UI; max 255 chars
  * (PKCS#9 challengePassword limit). Tested against Microsoft NDES in
  * legacy CryptoAPI/CSP mode (RSA-2048 only).
+ *
+ * BEST PRACTICE — per-device challenge passwords:
+ *   Microsoft NDES challenge passwords are single-use enrollment tokens.
+ *   Each device config MUST use its own unique password obtained from
+ *   the NDES web UI (/certsrv/mscep/mscep.dll?operation=GetCACaps or the
+ *   admin portal). Reusing the same password across multiple device configs
+ *   weakens defence in depth: if any one device config file leaks, the
+ *   shared token is exposed for re-use against the CA for other devices.
+ *
+ *   The cert already stored in NVS is not affected by rotating the
+ *   challenge password; rotation only matters before the next re-enrollment.
+ *   See: https://learn.microsoft.com/en-us/previous-versions/windows/
+ *     it-pro/windows-server-2012-R2-and-2012/hh831498(v=ws.11)
  * -------------------------------------------------------------------------- */
 /*
 #define WIFI_ENTERPRISE_SSID     "your-wpa3-enterprise-ssid"
 #define EAP_IDENTITY             "anonymous@example.org"
 #define SCEP_URL                 "https://scep.example.com/certsrv/mscep/mscep.dll"
-#define SCEP_CHALLENGE_PASSWORD  "replace-with-your-static-challenge"
+#define SCEP_CHALLENGE_PASSWORD  "replace-with-a-unique-per-device-challenge"
 */
 
 /* Subject DN for the SCEP-issued certificate.

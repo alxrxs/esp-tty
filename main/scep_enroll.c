@@ -388,6 +388,10 @@ esp_err_t scep_enroll(const char *scep_url,
     /* ------------------------------------------------------------------ */
     /* Step 9: PKIOperation (POST)                                         */
     /* ------------------------------------------------------------------ */
+    /* Initialise to NULL so the done: block's defensive psram_free(p7_resp) is
+     * always a safe no-op if we never reach the psram_alloc inside
+     * scep_http_pkioperation() (e.g. a future goto done added before this
+     * point). */
     uint8_t *p7_resp     = NULL;
     size_t   p7_resp_len = 0;
 
@@ -423,6 +427,7 @@ esp_err_t scep_enroll(const char *scep_url,
         ESP_LOGE(TAG, "mbedtls_pk_parse_key failed: -0x%04x", (unsigned)(-ret));
         mbedtls_pk_free(&dec_key);
         psram_free(p7_resp);
+        p7_resp = NULL;
         goto done;
     }
 
@@ -439,7 +444,7 @@ esp_err_t scep_enroll(const char *scep_url,
 
     mbedtls_pk_free(&dec_key);
     psram_free(p7_resp);
-    p7_resp = NULL;
+    p7_resp = NULL;   /* NULL after explicit free: done: block is a safe net */
 
     if (prc != 0) {
         ESP_LOGE(TAG, "scep_parse_certrep structural error: %d", prc);
@@ -615,7 +620,15 @@ done:
      * ra_cert_copy, ca_cert_copy, self_cert_der, csr_der, spki_der, p7_req
      * are guarded below without if() wrappers for that reason.
      * dev_key_der and issued_cert_der are guarded with if() because they
-     * carry a zeroize step that must not run on a NULL pointer. */
+     * carry a zeroize step that must not run on a NULL pointer.
+     *
+     * p7_resp is psram_alloc'd inside scep_http_pkioperation(); the two
+     * explicit frees above each set it to NULL so this call is a no-op on
+     * the normal paths and a true safety net if a future goto done is added
+     * before the explicit frees.
+     * ca_p7 is psram_alloc'd by scep_http_get_cacert(); freed explicitly in
+     * the GetCACert error paths above and in the done: block below. */
+    psram_free(p7_resp);
 
     /* mbedtls_pk_free is safe to call even if the key was never set up
      * (mbedtls_pk_init + mbedtls_pk_free with no intervening setup is a no-op).
@@ -630,9 +643,7 @@ done:
     mbedtls_ctr_drbg_free(&ctr_drbg);
     mbedtls_entropy_free(&entropy);
 #endif
-    if (ca_p7) {
-        psram_free(ca_p7);
-    }
+    psram_free(ca_p7);   /* NULL-initialised; safe no-op when not allocated */
     if (dev_key_der) {
         zeroize(dev_key_der, CRED_DEV_KEY_MAX);
         heap_caps_free(dev_key_der);

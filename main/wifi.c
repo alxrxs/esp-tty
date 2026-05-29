@@ -56,7 +56,7 @@
  *   BOOTSTRAP_STATIC_IPV6_DNS_SECONDARY.
  *
  * Compile-time credentials come from main/config.h (gitignored).
- * Copy config.h.example -> config.h and fill in your values.
+ * Copy config.example.h -> config.h and fill in your values.
  */
 
 #include <stdatomic.h>
@@ -1052,7 +1052,12 @@ static void reconnect_timer_schedule(uint32_t delay_ms)
          * silently stop retrying. */
         ESP_LOGW(TAG, "reconnect_timer_schedule: timer not created -- "
                       "calling esp_wifi_connect immediately");
-        esp_wifi_connect();
+        {
+            esp_err_t _err = esp_wifi_connect();
+            if (_err != ESP_OK) {
+                ESP_LOGW(TAG, "esp_wifi_connect: %s", esp_err_to_name(_err));
+            }
+        }
         return;
     }
     /* Stop first to cancel any pending fire, then set the new period and
@@ -1111,7 +1116,13 @@ static void wifi_event_handler(void *arg,
                 ssid_str = (const char *)cur.sta.ssid;
             }
             ESP_LOGI(TAG, "STA started, connecting to \"%s\" ...", ssid_str);
-            esp_wifi_connect();
+            {
+                esp_err_t _err = esp_wifi_connect();
+                if (_err != ESP_OK) {
+                    ESP_LOGW(TAG, "esp_wifi_connect (STA_START): %s",
+                             esp_err_to_name(_err));
+                }
+            }
 
         } else if (event_id == WIFI_EVENT_STA_CONNECTED) {
             /* Cancel any pending deferred reconnect: L2 is back up, so a
@@ -1585,7 +1596,7 @@ esp_err_t wifi_init_sta(void)
      *
      *    PSK-only fields (.password, .sae_pwe_h2e) are omitted in enterprise
      *    mode; the EAP credentials are set via esp_eap_client_* below.
-     *    See config.h.example for how to switch between the two modes.
+     *    See config.example.h for how to switch between the two modes.
      */
 #ifndef WIFI_USE_ENTERPRISE
     /* -- WPA2/WPA3-Personal (PSK) ---------------------------------------- */
@@ -1722,8 +1733,9 @@ esp_err_t wifi_init_sta(void)
 #endif
 
     /* EAP-TLS only: with just cert+key configured (no username/password),
-     * the IDF 5.4.1 supplicant auto-selects EAP-TLS.  An explicit
-     * method-restriction API existed in older IDFs but was removed. */
+     * the IDF 6.x supplicant auto-selects EAP-TLS.  An explicit method can
+     * also be forced via esp_eap_client_set_eap_methods(ESP_EAP_TYPE_TLS),
+     * but auto-selection works correctly here so we leave it unrestricted. */
     ESP_ERROR_CHECK(esp_wifi_sta_enterprise_enable());
 #endif /* WIFI_USE_ENTERPRISE */
 
@@ -2014,14 +2026,26 @@ static esp_err_t wifi_mode_psk(const char *ssid,
     if (!(bits & WIFI_CONNECTED_BIT)) {
         ESP_LOGE(TAG, "[smart] PSK connect to \"%s\" failed", ssid);
         s_psk_bootstrap_active = false;
-        esp_wifi_stop();
+        {
+            esp_err_t _err = esp_wifi_stop();
+            if (_err != ESP_OK) {
+                ESP_LOGW(TAG, "[smart] esp_wifi_stop (PSK fail): %s",
+                         esp_err_to_name(_err));
+            }
+        }
         return ESP_FAIL;
     }
 
     ESP_LOGI(TAG, "[smart] PSK connected to \"%s\"", ssid);
     esp_err_t result = on_ip ? on_ip() : ESP_OK;
 
-    esp_wifi_stop();
+    {
+        esp_err_t _err = esp_wifi_stop();
+        if (_err != ESP_OK) {
+            ESP_LOGW(TAG, "[smart] esp_wifi_stop (PSK teardown): %s",
+                     esp_err_to_name(_err));
+        }
+    }
     s_psk_bootstrap_active = false;
     return result;
 }
@@ -2399,8 +2423,9 @@ static esp_err_t smart_configure_eaptls(const cred_store_t *creds)
 #endif
     }
 
-    /* EAP-TLS only: with just cert+key configured the IDF supplicant
-     * auto-selects EAP-TLS (no method-restriction API in IDF 5.4.1). */
+    /* EAP-TLS only: with just cert+key configured the IDF 6.x supplicant
+     * auto-selects EAP-TLS.  esp_eap_client_set_eap_methods() is available
+     * but unnecessary here -- auto-selection is correct for this config. */
     {
         esp_err_t err = esp_wifi_sta_enterprise_enable();
         if (err != ESP_OK) {
@@ -2511,7 +2536,13 @@ static esp_err_t wifi_mode_enterprise(const char         *ssid,
     }
 
     ESP_LOGE(TAG, "[smart] enterprise connect to \"%s\" failed/timed out", ssid);
-    esp_wifi_stop();
+    {
+        esp_err_t _err = esp_wifi_stop();
+        if (_err != ESP_OK) {
+            ESP_LOGW(TAG, "[smart] esp_wifi_stop (EAP fail): %s",
+                     esp_err_to_name(_err));
+        }
+    }
     esp_wifi_sta_enterprise_disable();
     return ESP_FAIL;
 }

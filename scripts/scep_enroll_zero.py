@@ -26,14 +26,20 @@ def _fixed_filter(self, required_key_usage, not_required_key_usage, ca_only=Fals
     return out
 CACertificates._filter = _fixed_filter
 
-# Another PyScep bug: verify() calls RSA-shaped .verify(sig, data, padding, hash)
-# on the EC issuer key, which only takes 3 args.  We already trust the bundle
-# via our REQUESTS_CA_BUNDLE-validated TLS connection, so verification is
-# redundant.  Catch only the specific TypeError from the EC key arity mismatch
-# and re-raise anything else.
-# TODO: remove this workaround once upstream PyScep fixes EC key verification
-# (tracked at https://github.com/falk-werner/pyscep/issues/XX -- TypeError on
-# EC issuer: verify() takes 3 positional arguments but 4 were given).
+# PyScep 0.0.14 bug: CACertificates.verify() (responses.py lines 74 and 85)
+# calls the cryptography-library .verify(sig, tbs, padding, hash_alg) with 4
+# positional args, which is the RSA/PKCS1v15 signature.  EC public keys only
+# accept 3 positional args: .verify(sig, tbs, hash_alg) -- there is no padding
+# argument.  When the issuing CA uses an EC key the call raises:
+#   TypeError: verify() takes 3 positional arguments but 4 were given
+#
+# We already trust the CA bundle via REQUESTS_CA_BUNDLE-validated TLS, so the
+# additional in-band signature check is redundant.  Catch only the specific
+# TypeError from the EC arity mismatch and re-raise anything else.
+#
+# No upstream issue exists for this in bikram990/PyScep (checked 2026-05-29).
+# If a fix is released in a future PyScep version, remove this monkey-patch
+# and update the version pin in requirements.txt.
 _orig_verify = getattr(CACertificates, "verify", None)
 def _fixed_verify(self):
     if _orig_verify is None:

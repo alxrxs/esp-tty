@@ -572,6 +572,7 @@ static void test_not_after_uint64_max_preserved(void)
  * -------------------------------------------------------------------------- */
 extern void cred_store_testhook_partial_write(const cred_store_t *in);
 extern void cred_store_testhook_force_schema(uint8_t schema);
+extern void cred_store_testhook_schema_absent(const cred_store_t *in);
 extern void cred_store_testhook_partial_clear(void);
 extern void cred_store_testhook_save_partial_committed_blobs_no_marker(const cred_store_t *in);
 extern void cred_store_testhook_save_fail_with_scrub(void);
@@ -643,6 +644,48 @@ static void test_schema_version_zero_returns_not_found(void)
     TEST_ASSERT_EQUAL_INT(ESP_OK, cred_store_save(&in));
 
     cred_store_testhook_force_schema(0);
+    cred_store_t out;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_NVS_NOT_FOUND, cred_store_load(&out));
+}
+
+/* --------------------------------------------------------------------------
+ * L3.C schema_ver-absent test
+ *
+ * Simulates an older firmware that wrote the valid marker and blobs but
+ * never wrote the schema_ver key (the key did not exist in that firmware
+ * version).  cred_store_load() must return ESP_ERR_NVS_NOT_FOUND so that
+ * newer firmware forces a fresh re-enrollment rather than mis-parsing blobs
+ * whose layout may differ from CRED_SCHEMA_VERSION.
+ *
+ * This test exercises the ABSENT-key path (schema_ver never written),
+ * in contrast to test_schema_version_mismatch_returns_not_found() which
+ * tests the WRONG-VALUE path (key present but != CRED_SCHEMA_VERSION).
+ * On the device-side NVS backend these are distinct code paths:
+ *   absent -> nvs_get_u8 returns ESP_ERR_NVS_NOT_FOUND (err != ESP_OK)
+ *   wrong  -> nvs_get_u8 returns ESP_OK but schema != CRED_SCHEMA_VERSION
+ * The in-memory backend represents both as s_mem_schema == 0; the single
+ * load() condition "err != ESP_OK || schema != CRED_SCHEMA_VERSION" covers
+ * both cases identically, which is the correct behaviour.
+ * -------------------------------------------------------------------------- */
+static void test_schema_absent_returns_not_found(void)
+{
+    /* Build a cred_store_t representing an older firmware's saved state:
+     * blobs populated, valid marker set, but schema_ver never written. */
+    cred_store_t in;
+    memset(&in, 0, sizeof(in));
+    in.dev_key_len  = 4;
+    in.dev_key[0] = 0xDE; in.dev_key[1] = 0xAD;
+    in.dev_key[2] = 0xBE; in.dev_key[3] = 0xEF;
+    in.dev_cert_len = fixture_cert_der_len;
+    memcpy(in.dev_cert, fixture_cert_der, fixture_cert_der_len);
+    in.ca_chain_len = 1; in.ca_chain[0] = 0xCA;
+    in.not_after = FIXTURE_NOT_AFTER_EPOCH;
+
+    /* Inject the "schema_ver absent" state: valid marker present, blobs
+     * present, but schema_ver key was never written (s_mem_schema == 0). */
+    cred_store_testhook_schema_absent(&in);
+
+    /* Newer firmware must refuse to load -- re-enrollment required. */
     cred_store_t out;
     TEST_ASSERT_EQUAL_INT(ESP_ERR_NVS_NOT_FOUND, cred_store_load(&out));
 }
@@ -961,6 +1004,8 @@ int main(void)
     RUN_TEST(test_atomicity_full_save_loads_ok);
     RUN_TEST(test_schema_version_mismatch_returns_not_found);
     RUN_TEST(test_schema_version_zero_returns_not_found);
+    /* L3.C schema_ver-absent (key never written by older firmware) */
+    RUN_TEST(test_schema_absent_returns_not_found);
     /* C2.C scrub on clear / save-fail */
     RUN_TEST(test_clear_full_scrubs_dev_key);
     RUN_TEST(test_clear_powerfail_after_marker_load_returns_not_found);
