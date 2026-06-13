@@ -211,6 +211,126 @@ sudo systemctl daemon-reload
 sudo systemctl restart serial-getty@ttyACM1.service
 ```
 
+## Flashing
+
+The project supports four ways to put a firmware image on a device.
+Use this table to pick one:
+
+| Procedure | When to use |
+|---|---|
+| `make flash [devname] [model]` | Device cable is plugged into your local workstation |
+| `make flash-online <devname> [model]` | Device cable is plugged into a remote SSH-reachable host |
+| `make ota <devname\|host> [model]` | Device is running and reachable over Wi-Fi |
+| `scripts/reboot_to_bootloader.py` | Recovery: drop a wedged-but-running device into ROM USB DFU so `dfu-util` or `esptool` can take over |
+
+### Decision matrix
+
+| I have...                                                | ...and I want to flash via...                | Use |
+|---|---|---|
+| Local USB cable, device boots production firmware         | USB                                           | `make flash <dev>` -- esptool drives DTR/RTS via the CH340 (DevKitC) or the BOOT+EN buttons (Zero) |
+| Local USB cable, device boots a `*_debug` build           | USB                                           | `make flash <dev> s3debug` / `s3zerodebug` -- esptool over the native USB-Serial-JTAG (303a:1001) |
+| Local USB cable, device firmware is wedged (no Wi-Fi, BOOT inaccessible) | USB recovery                                  | `scripts/reboot_to_bootloader.py /dev/ttyACM0` then `make flash` |
+| SSH access to a host that holds the USB cable             | Remote USB                                    | `make flash-online <dev>` (config carries `// MAKE-FLASH-HOST:`) |
+| Device on the production Wi-Fi, OTA key in agent          | Wi-Fi                                         | `make ota <dev>` |
+| Need to flash a *new* device for the first time           | USB                                           | `make flash <dev>` -- OTA cannot bootstrap an unprovisioned device |
+
+### Pipeline diagrams
+
+```
+make flash       :  pio run -> esptool -> CH340 UART (DevKitC) ........... -> ROM serial bootloader
+                                       \-> USB-Serial-JTAG 303a:1001 (Zero/debug, BOOT+EN dance)
+
+make flash-online:  pio run -> tar+ssh -> remote host -> { dfu-util via 303a:0009  (non-debug, magic over CDC)
+                                                          esptool   via 303a:1001  (_debug envs)        }
+
+make ota         :  pio run -> ota_send.py -> SSH (ota@dev) -> X25519+AES-GCM -> inactive OTA slot
+                                                            -> otadata flip + reboot + self-test + rollback-on-fail
+```
+
+### USB VID:PID by chip state
+
+| VID:PID | State / what produces it | Used by |
+|---|---|---|
+| `1a86:55d3` | CH340 USB-UART on DevKitC-1 (always present on that board) | `make flash` (default) |
+| `303a:0009` | ESP32-S3 ROM USB DFU endpoint (entered after boot-trigger magic, or BOOT+EN held through power-up) | `make flash-online` non-debug path (`dfu-util`) |
+| `303a:1001` | ESP32-S3 USB-Serial-JTAG controller (ROM bootloader after BOOT+EN dance, or any `*_debug` running firmware) | `make flash` on Zero / debug envs, `make flash-online` debug path |
+| `303a:xxxx` / `303a:4001` | TinyUSB CDC ACM running app -- `USB_PID` value from `config.h` (`xxxx` in the deployed configs, `4001` in `config.example.h`) | The SSH<->serial bridge data path; also where `reboot_to_bootloader.py` writes the magic |
+
+### Per-device config markers
+
+`main/config.<dev>.h` declares its flashing/OTA targets in two `//`
+comment markers near the top of the file:
+
+```c
+// MAKE-OTA-IP: 10.57.16.42
+// MAKE-FLASH-HOST: pi@workshop.lan
+#pragma once
+#define WIFI_SSID "..."
+```
+
+- `MAKE-OTA-IP` -- consumed by `make ota <dev>`.  IPv4 / IPv6 / DNS name; any
+  string `ssh` can resolve.
+- `MAKE-FLASH-HOST` -- consumed by `make flash-online <dev>`.  An SSH target
+  on the remote host that physically owns the USB cable -- not the device's
+  Wi-Fi IP.  Override at the command line with `FLASH_HOST=user@host`.
+
+Either marker can be omitted if the corresponding procedure is not used
+for that device.  `config.example.h` shows both.
+
+### make flash-online
+
+Build locally, then write through a USB cable that sits on a different
+machine -- useful for devices deployed far from your workstation:
+
+```
+make flash-online <devname>            # uses MAKE-FLASH-HOST from config
+make flash-online <devname> s3zero     # override env
+make flash-online <devname> FLASH_HOST=pi@host.lan REMOTE_PORT=/dev/ttyACM1
+```
+
+For non-debug envs the local build also produces `firmware.dfu` (via
+ESP-IDF's `mkdfu.py`).  After `tar | ssh` lands the artifacts in
+`/tmp/esp-tty-flash-online/` on the remote host,
+`scripts/flash_online_remote.sh` either:
+
+- runs `esptool ... write-flash` over `303a:1001` (`*_debug` envs), or
+- writes the CDC RX boot-trigger magic to the remote's `/dev/ttyACM*`,
+  waits up to 6 s for `303a:0009` (ROM USB DFU) to enumerate, then runs
+  `dfu-util -d 0x303a:0x0009 -a 0 -R -D firmware.dfu` (non-debug envs).
+
+The boot-trigger magic only works against non-debug builds.  Debug builds
+do not initialise TinyUSB, so the matcher in
+`lib/usb_cdc_boot_trigger/` is never fed -- which is fine because debug
+builds expose USB-Serial-JTAG directly and esptool's reset works.
+
+The remote host needs `dfu-util`, `usbutils` (for `lsusb`), and `esptool`
+installed; on Debian: `apt install dfu-util usbutils && pip install
+esptool`.  SSH key auth (agent or `~/.ssh/config`) handles login.
+
+### Recovery procedures
+
+- **Firmware is up but Wi-Fi/OTA is broken**, BOOT button inaccessible:
+  run `scripts/reboot_to_bootloader.py /dev/ttyACM0` locally (or
+  `make flash-online <dev>` if remote).  Both rely on the CDC boot-trigger
+  magic, which only works for non-debug builds.  For a debug build, the
+  device is already at `303a:1001` -- jump straight to `make flash`.
+
+- **Device is in ROM DFU (`303a:0009`) and `dfu-util` will not detach**
+  (e.g. stale udev state): physically tap the EN/RESET button on the
+  devkit, or for the Zero hold BOOT and tap RESET to re-enter the ROM
+  bootloader on the USB-Serial-JTAG endpoint, then `make flash`.
+
+- **New firmware crashes on boot**: the OTA rollback path takes over
+  automatically after `OTA_ROLLBACK_DELAY_MS`.  If both slots are
+  bad, the only recovery is USB flash via `make flash` or
+  `make flash-online`.
+
+- **Wi-Fi is up but the deployment site is far**: `make flash-online`
+  via a Raspberry Pi on the same LAN as the device, USB-cabled to it.
+
+See [`scripts/README.md`](scripts/README.md) for the underlying
+helpers, and [`Makefile`](Makefile) for the canonical list of targets.
+
 ## Wi-Fi modes
 
 Each mode is selected by which macros you define in `config.h`. The

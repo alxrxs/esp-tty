@@ -11,6 +11,8 @@ loudly rather than silently corrupt state.
 | `apply_managed_patches_cmake.py` | CMake configure step | Applies `patches/` to `managed_components/` |
 | `apply_managed_patches.py` | (not wired; reference only) | Alternate SCons entry point for the same patch logic |
 | `detect_upload_port.sh` | `make flash` / `make monitor` | Finds the CH340 USB-UART bridge by VID for flashing |
+| `flash_online_remote.sh` | `make flash-online`, on the remote host | Picks dfu-util vs esptool by env name; drives the USB cable on a far-away machine |
+| `reboot_to_bootloader.py` | Developer, manual recovery | Sends the CDC RX magic that drops a running non-debug firmware into ROM USB DFU |
 | `ota_send.py` | Developer, each OTA release | Streams an encrypted firmware image to a running device over SSH |
 | `test_mdns_build_matrix.sh` | Developer (manual) | Builds the firmware with `MDNS_ENABLE` off then on and checks symbol presence in the ELF |
 | `test_ntp_build_matrix.sh` | Developer (manual) | Builds twice over `NTP_ENABLE` and checks `esp_netif_sntp_init` symbol presence |
@@ -73,6 +75,54 @@ USB-Serial-JTAG controller (`303a:1001`).  On the Zero this requires the
 BOOT+RESET dance before running `make flash`.  On the DevKitC-1 in debug-console
 mode the CH340 (`1a86`) is still detected first (higher priority) and is the
 correct port to drive `esptool` against.
+
+## flash_online_remote.sh
+
+Runs on the SSH-reachable host that owns a device's USB cable.  Invoked by
+`make flash-online <devname>` (in the project Makefile) after the build
+artifacts have been tarred over.  Branches on the env name:
+
+- `*_debug` envs -- the running firmware does not initialise TinyUSB, so the
+  USB-Serial-JTAG controller (303a:1001) keeps the pins.  esptool's standard
+  `--before default-reset` works directly; the script writes bootloader,
+  partitions, ota_data_initial, and firmware in one pass.
+
+- Non-debug envs -- the running firmware exposes TinyUSB CDC.  esptool's
+  pyserial-based RTS reset hits EPROTO on TinyUSB and cannot be used.  The
+  script instead writes the USB-CDC boot-trigger magic (see
+  `reboot_to_bootloader.py` and `lib/usb_cdc_boot_trigger/`) to the remote
+  serial port, waits up to 6 s for the chip to re-enumerate as 303a:0009
+  (ROM USB DFU), then drives `dfu-util -d 0x303a:0x0009 -a 0 -R` against the
+  `.dfu` image built locally by `mkdfu.py`.  `dfu-util`'s "can't detach"
+  return code on the post-download reset is treated as success when its
+  stdout contains both `Download done.` and `Resetting USB` -- those two
+  strings are the actual completion signal.
+
+Requires on the remote host: `dfu-util`, `esptool`, `lsusb` (from
+`usbutils`), plus permission to access `/dev/ttyACM*` and the ROM DFU
+endpoint (typically: add the user to `dialup`/`plugdev` and ship a udev rule
+for VID 303a, or run via sudo).  Debian: `apt install dfu-util usbutils &&
+pip install esptool`.
+
+## reboot_to_bootloader.py
+
+Standalone recovery helper: sends the USB-CDC magic byte sequence to a
+local `/dev/ttyACM*` that is a running esp-tty non-debug firmware.  Use
+when Wi-Fi/OTA is unreachable and the BOOT button is physically out of
+reach: the magic forces the firmware to reboot into the ROM USB DFU
+endpoint (303a:0009), at which point `dfu-util` (or `esptool`) can write a
+fresh image without any button presses.
+
+The script deliberately bypasses pyserial and writes via `os.open` /
+`os.write`, because pyserial's `Serial.open()` always issues an RTS-line
+ioctl that TinyUSB's CDC ACM stack rejects with EPROTO -- the open call
+would fail before any bytes reach the device.
+
+Only useful against non-debug builds: `USB_DEBUG_CONSOLE_ONLY` builds skip
+`usb_cdc_init`, so the magic-matcher in
+`lib/usb_cdc_boot_trigger/usb_cdc_boot_trigger.c` is never fed.  In a
+debug build the chip already enumerates as 303a:1001 and esptool can reset
+it directly -- no magic needed.
 
 ## ota_send.py
 

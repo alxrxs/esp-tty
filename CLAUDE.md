@@ -12,6 +12,12 @@ device is which depends on what the chip is currently doing.
 | `ttyACM0` | `1a86:55d3` | CH340 USB-UART wired to ESP32-S3 UART0 (the boot-ROM and `ESP_LOG*` console) | always |
 | `ttyACM1` | `303a:1001` | ESP32-S3 native USB Serial-JTAG (download/bootloader interface) | only while the bootloader is running, or while no app has claimed native USB |
 | `ttyACM1` | `303a:4001` | esp-tty's TinyUSB CDC endpoint (the SSH-bridge data path the Linux host uses) | once `main.c` calls `tinyusb_driver_install` |
+| `ttyACM1` | `303a:0009` | ESP32-S3 ROM USB DFU endpoint -- entered after the USB-CDC boot-trigger magic, or after BOOT+EN held through power-up | only after `scripts/reboot_to_bootloader.py`, `make flash-online` non-debug path, or manual BOOT+EN; `dfu-util` is the only tool that talks to this PID |
+
+`USB_PID` is configurable in `config.h`; the deployed configs in this
+tree use `0xXXXX`, the example template uses `0x4001`.  Either way the
+running TinyUSB endpoint is what `reboot_to_bootloader.py` and the
+non-debug `make flash-online` path write the magic to.
 
 ttyACM0 (CH340) is the **only port that carries the ESP-IDF boot log
 across all chip states**. ttyACM1 swaps identity between `1001` (JTAG)
