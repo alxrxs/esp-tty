@@ -10,10 +10,11 @@ loudly rather than silently corrupt state.
 | `gen_eap_certs_asm.py` | PlatformIO `post:` hook | Pre-generates EAP-TLS cert `.S` assembly files |
 | `apply_managed_patches_cmake.py` | CMake configure step | Applies `patches/` to `managed_components/` |
 | `apply_managed_patches.py` | (not wired; reference only) | Alternate SCons entry point for the same patch logic |
-| `detect_upload_port.sh` | `make flash` / `make monitor` | Finds the CH340 USB-UART bridge by VID for flashing |
-| `flash_online_remote.sh` | `make flash-online`, on the remote host | Picks dfu-util vs esptool by env name; drives the USB cable on a far-away machine |
-| `reboot_to_bootloader.py` | Developer, manual recovery | Sends the CDC RX magic that drops a running non-debug firmware into ROM USB DFU |
+| `clean_ds_store.py` | PlatformIO `pre:` hook (all envs) | Strips stray macOS `.DS_Store` files from `managed_components/` before the build |
+| `detect_upload_port.sh` | `make flash` (resolves `PORT`) | Finds the CH340 USB-UART bridge by VID for flashing |
+| `reboot_to_bootloader.py` | `make flash-online` non-debug path; manual recovery | Sends the CDC RX magic that drops a running non-debug firmware into ROM USB DFU |
 | `ota_send.py` | Developer, each OTA release | Streams an encrypted firmware image to a running device over SSH |
+| `scep_enroll_zero.py` | Developer (manual) -- Zero provisioning | Host-side SCEP enrollment (PyScep vs. NDES) that writes `main/certs/{ca.pem,client.crt,client.key}` for build-time embedding |
 | `test_mdns_build_matrix.sh` | Developer (manual) | Builds the firmware with `MDNS_ENABLE` off then on and checks symbol presence in the ELF |
 | `test_ntp_build_matrix.sh` | Developer (manual) | Builds twice over `NTP_ENABLE` and checks `esp_netif_sntp_init` symbol presence |
 | `test_ssh_keepalive_build_matrix.sh` | Developer (manual) | Builds three times over `SSH_KEEPALIVE_INTERVAL_SEC` (default / 0 / 5) and checks `wolfSSH_global_request` symbol presence |
@@ -64,7 +65,7 @@ Alternative SCons-side entry point for the same patching logic.  Not wired into
 ## detect_upload_port.sh
 
 Called by the `Makefile` (`PORT ?= $(shell scripts/detect_upload_port.sh)`) to
-resolve the correct serial device for `make flash` and `make monitor`.  Filters
+resolve the correct serial device for `make flash`.  Filters
 USB devices by the CH340/CH343 vendor ID (`0x1a86`) so the flashing port is
 picked out even when the ESP32-S3's own native USB CDC enumerates with the same
 filename pattern.
@@ -75,34 +76,6 @@ USB-Serial-JTAG controller (`303a:1001`).  On the Zero this requires the
 BOOT+RESET dance before running `make flash`.  On the DevKitC-1 in debug-console
 mode the CH340 (`1a86`) is still detected first (higher priority) and is the
 correct port to drive `esptool` against.
-
-## flash_online_remote.sh
-
-Runs on the SSH-reachable host that owns a device's USB cable.  Invoked by
-`make flash-online <devname>` (in the project Makefile) after the build
-artifacts have been tarred over.  Branches on the env name:
-
-- `*_debug` envs -- the running firmware does not initialise TinyUSB, so the
-  USB-Serial-JTAG controller (303a:1001) keeps the pins.  esptool's standard
-  `--before default-reset` works directly; the script writes bootloader,
-  partitions, ota_data_initial, and firmware in one pass.
-
-- Non-debug envs -- the running firmware exposes TinyUSB CDC.  esptool's
-  pyserial-based RTS reset hits EPROTO on TinyUSB and cannot be used.  The
-  script instead writes the USB-CDC boot-trigger magic (see
-  `reboot_to_bootloader.py` and `lib/usb_cdc_boot_trigger/`) to the remote
-  serial port, waits up to 6 s for the chip to re-enumerate as 303a:0009
-  (ROM USB DFU), then drives `dfu-util -d 0x303a:0x0009 -a 0 -R` against the
-  `.dfu` image built locally by `mkdfu.py`.  `dfu-util`'s "can't detach"
-  return code on the post-download reset is treated as success when its
-  stdout contains both `Download done.` and `Resetting USB` -- those two
-  strings are the actual completion signal.
-
-Requires on the remote host: `dfu-util`, `esptool`, `lsusb` (from
-`usbutils`), plus permission to access `/dev/ttyACM*` and the ROM DFU
-endpoint (typically: add the user to `dialup`/`plugdev` and ship a udev rule
-for VID 303a, or run via sudo).  Debian: `apt install dfu-util usbutils &&
-pip install esptool`.
 
 ## reboot_to_bootloader.py
 
@@ -164,6 +137,20 @@ Test hooks (used by the test plan in CLAUDE.md):
 - `--truncate N` announces the full plaintext length but only sends `N` bytes
   of ciphertext, then closes the channel; verifies the device handles
   truncated transfers without partially flashing the new slot.
+
+## scep_enroll_zero.py
+
+Host-side SCEP enrollment helper for provisioning a Mode B+ device whose
+board is too small to run the SCEP state machine at runtime (e.g. the
+ESP32-S3-Zero).  It drives a full enrollment against real Microsoft NDES
+from the developer's machine using PyScep, then writes the issued
+`ca.pem`, `client.crt`, and `client.key` into `main/certs/` so the next
+build embeds them directly -- no runtime SCEP, no on-device cert storage.
+
+Manual and developer-run (not wired into the build).  The script also
+monkey-patches two bugs in PyScep 0.0.14 -- a `_filter` CA-selection bug
+and an EC-key signature-verification arity mismatch; see the comments at
+the top of the file for details.
 
 ## Build-flag matrix scripts
 
