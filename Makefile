@@ -265,13 +265,28 @@ flash-online:
 	# For non-debug envs, build a .dfu image alongside the .bin files.
 	# mkdfu.py resolves JSON file paths relative to the JSON file's dir,
 	# so cd into the build dir; resolve $(PYTHON) to absolute first.
+	#
+	# Locate mkdfu.py via PlatformIO's own packages dir (honours
+	# PLATFORMIO_CORE_DIR / XDG layout / non-root installs) rather than
+	# assuming /root/.platformio.
 	@case "$(ENV)" in *_debug) ;; *) \
-	  PY="$$(realpath $(PYTHON))"; \
-	  MKDFU="$$(find /root/.platformio/packages -maxdepth 3 -name mkdfu.py -path '*framework-espidf*' 2>/dev/null | head -1)"; \
-	  test -n "$$MKDFU" || { echo "could not find mkdfu.py in framework-espidf"; exit 1; }; \
-	  cd .pio/build/$(ENV) && \
-	  printf '{"flash_files":{"0x0":"bootloader.bin","0x8000":"partitions.bin","0x10000":"ota_data_initial.bin","0x20000":"firmware.bin"}}' > _dfu.json && \
-	  "$$PY" "$$MKDFU" write --json _dfu.json -o firmware.dfu --pid 0x0009 ;; esac
+	  BUILD_DIR=".pio/build/$(ENV)"; \
+	  if [ -f "$$BUILD_DIR/firmware.dfu" ] && \
+	     [ "$$BUILD_DIR/firmware.dfu" -nt "$$BUILD_DIR/firmware.bin" ] && \
+	     [ "$$BUILD_DIR/firmware.dfu" -nt "$$BUILD_DIR/bootloader.bin" ] && \
+	     [ "$$BUILD_DIR/firmware.dfu" -nt "$$BUILD_DIR/partitions.bin" ] && \
+	     [ "$$BUILD_DIR/firmware.dfu" -nt "$$BUILD_DIR/ota_data_initial.bin" ]; then \
+	    echo ">> firmware.dfu up to date, skipping mkdfu.py"; \
+	  else \
+	    PIO_PKG_DIR="$$($(PYTHON) -c 'from platformio.project.config import ProjectConfig; print(ProjectConfig().get_optional_dir("packages"))' 2>/dev/null)"; \
+	    test -n "$$PIO_PKG_DIR" || PIO_PKG_DIR="$$HOME/.platformio/packages"; \
+	    MKDFU="$$(find "$$PIO_PKG_DIR" -maxdepth 3 -name mkdfu.py -path '*framework-espidf*' 2>/dev/null | head -1)"; \
+	    test -n "$$MKDFU" || { echo "could not find mkdfu.py under $$PIO_PKG_DIR"; exit 1; }; \
+	    PY_ABS="$$(realpath $(PYTHON))"; \
+	    cd "$$BUILD_DIR" && \
+	    printf '{"flash_files":{"0x0":"bootloader.bin","0x8000":"partitions.bin","0x10000":"ota_data_initial.bin","0x20000":"firmware.bin"}}' > _dfu.json && \
+	    "$$PY_ABS" "$$MKDFU" write --json _dfu.json -o firmware.dfu --pid 0x0009; \
+	  fi ;; esac
 	# Push artifacts + helper to the remote in one tar stream, then run it.
 	@set -e; \
 	files="bootloader.bin partitions.bin ota_data_initial.bin firmware.bin"; \

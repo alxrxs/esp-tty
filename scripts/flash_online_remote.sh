@@ -55,6 +55,28 @@ case "$ENV" in
       echo "[flash-online] error: $PORT does not exist on this host" >&2
       exit 2
     fi
+    # Sanity-check that $PORT actually belongs to the running esp-tty
+    # TinyUSB endpoint -- not e.g. a CH340 USB-UART that happens to be
+    # /dev/ttyACM0 on this host.  The CDC RX boot-trigger matcher only
+    # runs in the ESP32-S3 firmware, so writing the magic to a CH340
+    # bridge would simply forward the bytes to the target's UART and
+    # never reboot the chip.
+    #
+    # udev's stable by-id symlinks encode the VID:PID; resolve $PORT to
+    # its real device node and walk up to the USB device's idVendor.
+    real_port=$(readlink -f "$PORT" 2>/dev/null || echo "$PORT")
+    syspath=$(udevadm info -q path -n "$real_port" 2>/dev/null || true)
+    if [ -n "$syspath" ]; then
+        vid=$(udevadm info -a -p "$syspath" 2>/dev/null \
+              | awk -F'==' '/ATTRS{idVendor}/ {gsub(/"/,"",$2); print $2; exit}')
+        if [ -n "$vid" ] && [ "$vid" != "303a" ]; then
+            echo "[flash-online] error: $PORT has USB VID $vid, expected 303a" >&2
+            echo "[flash-online]   (looks like a USB-UART bridge, not the" >&2
+            echo "[flash-online]    ESP32-S3 TinyUSB CDC).  Re-run with" >&2
+            echo "[flash-online]    REMOTE_PORT=/dev/serial/by-id/usb-*_303a_*" >&2
+            exit 2
+        fi
+    fi
     stty -F "$PORT" raw -echo -hupcl 115200
     # \n + body + \n -- printf builds the bytes directly, no $'...' needed.
     printf '\n%s\n' "$MAGIC_BODY" > "$PORT"
@@ -74,8 +96,11 @@ case "$ENV" in
     # because by then the chip is gone -- which is precisely the success
     # signal we wanted.  Treat the combination "Download done." + "Resetting
     # USB" as success regardless of dfu-util's own exit code.
+    #
+    # LC_ALL=C pins dfu-util's stdout to English so the grep below works
+    # on remote hosts with a localised locale (e.g. de_DE: "Fertig.").
     set +e
-    dfu_out=$(dfu-util -d 0x303a:0x0009 -a 0 -R \
+    dfu_out=$(LC_ALL=C dfu-util -d 0x303a:0x0009 -a 0 -R \
                        -D "$BIN_DIR/firmware.dfu" 2>&1)
     dfu_rc=$?
     set -e
