@@ -1,11 +1,26 @@
 # esp-tty -- convenience Makefile around PlatformIO
 #
 # Targets:
-#   make build  [DEVNAME] [MODEL]   Compile firmware (no upload)
-#   make flash  [DEVNAME] [MODEL]   Compile + flash over USB
-#   make ota    <DEVNAME|HOST> [MODEL]  Compile + upload over Wi-Fi (SSH, X25519+AES-GCM)
-#   make clean  [MODEL]             Wipe .pio/build/<env>/ to force cmake reconfigure
-#                                   (no MODEL = clean every board env)
+#   make build        [DEVNAME] [MODEL]   Compile firmware (no upload)
+#   make flash        [DEVNAME] [MODEL]   Compile + flash over local USB
+#   make flash-online  <DEVNAME> [MODEL]  Compile + flash via a REMOTE host's
+#                                         USB cable.  The per-device config
+#                                         must carry
+#                                             // MAKE-FLASH-HOST: <ssh-host>
+#                                         (or pass FLASH_HOST=user@host on
+#                                         the command line).  For non-debug
+#                                         envs this uses the USB-CDC boot-
+#                                         trigger magic to enter ROM DFU
+#                                         (303a:0009) and dfu-util writes +
+#                                         resets -- all software-only, no
+#                                         physical BOOT+EN required.  For
+#                                         *_debug envs the remote host runs
+#                                         esptool over USB-Serial-JTAG.
+#   make ota   <DEVNAME|HOST> [MODEL]     Compile + upload over Wi-Fi
+#                                         (SSH, X25519+AES-GCM)
+#   make clean  [MODEL]                   Wipe .pio/build/<env>/ to force
+#                                         cmake reconfigure (no MODEL = clean
+#                                         every board env)
 #
 # Per-device configs (multi-ESP32 setups):
 #   Keep one main/config.<DEVNAME>.h per device. Each one starts with the
@@ -100,7 +115,7 @@ ENV_OF_s3zero         := esp32s3_zero
 ENV_OF_s3debug        := esp32s3_debug
 ENV_OF_s3zerodebug    := esp32s3_zero_debug
 
-POSITIONALS := $(filter-out ota flash build clean test test-py,$(MAKECMDGOALS))
+POSITIONALS := $(filter-out ota flash flash-online build clean test test-py,$(MAKECMDGOALS))
 
 # Pick the model positional (whichever positional matches KNOWN_MODELS).
 MODEL_ARG := $(strip $(foreach p,$(POSITIONALS),$(if $(filter $(p),$(KNOWN_MODELS)),$(p),)))
@@ -148,7 +163,16 @@ OTA_TARGET := $(strip $(if $(DEV_FILE),\
   $(shell sed -nE 's|^[[:space:]]*//[[:space:]]*MAKE-OTA-IP:[[:space:]]*([^[:space:]]+).*|\1|p' $(DEV_FILE) | head -n1),\
   $(DEV_ARG)))
 
-.PHONY: flash build ota test test-py clean
+# flash-online destination: parsed from MAKE-FLASH-HOST in the matched config
+# file, or FLASH_HOST=... on the command line wins.  This is the SSH-reachable
+# machine that owns the device's USB cable (not the device's own Wi-Fi IP).
+FLASH_HOST ?= $(strip $(if $(DEV_FILE),\
+  $(shell sed -nE 's|^[[:space:]]*//[[:space:]]*MAKE-FLASH-HOST:[[:space:]]*([^[:space:]]+).*|\1|p' $(DEV_FILE) | head -n1),))
+
+# Remote serial port (default /dev/ttyACM0 on the flash host).
+REMOTE_PORT ?= /dev/ttyACM0
+
+.PHONY: flash flash-online build ota test test-py clean
 
 # If two positionals are given but neither is a known model, the second one
 # is a typo -- error rather than silently swallow it via the catch-all below.
@@ -211,6 +235,55 @@ flash:
 	fi
 	$(PIO) run -e $(ENV) --target upload $(UPLOAD_FLAGS)
 
+# flash-online: build locally, then flash via a REMOTE host's USB cable.
+#
+# For non-debug envs the chip is running TinyUSB-CDC (303a:xxxx) which
+# blocks esptool's pyserial-based RTS reset with EPROTO; we instead use
+# the boot-trigger magic on the CDC RX stream to land the chip in ROM
+# USB DFU mode (303a:0009) and let dfu-util write + reset with -R.
+# For *_debug envs the chip exposes the native USB-Serial-JTAG already,
+# so esptool works directly on the remote host.
+#
+# Either way the local machine never sees the cable; everything is driven
+# over SSH against the host named in `// MAKE-FLASH-HOST: <ssh-host>`
+# (or FLASH_HOST=user@host on the command line).
+flash-online:
+	@if [ -z "$(DEV_ARG)" ] || [ -z "$(DEV_FILE)" ]; then \
+	    echo "Usage: make flash-online <devname> [<model>]" >&2; \
+	    echo "  devname must match main/config.<devname>.h" >&2; \
+	    exit 1; \
+	fi
+	@if [ -z "$(FLASH_HOST)" ]; then \
+	    echo "$(DEV_FILE) is missing '// MAKE-FLASH-HOST: <ssh-host>' marker." >&2; \
+	    echo "(or pass FLASH_HOST=user@host on the command line)" >&2; \
+	    exit 1; \
+	fi
+	@echo ">> selecting $(DEV_FILE)  (symlink main/config.h -> config.$(DEV_ARG).h)"
+	@echo ">> flash host: $(FLASH_HOST), remote port: $(REMOTE_PORT), env: $(ENV)"
+	@ln -sfn config.$(DEV_ARG).h main/config.h
+	$(PIO) run -e $(ENV)
+	# For non-debug envs, build a .dfu image alongside the .bin files.
+	# mkdfu.py resolves JSON file paths relative to the JSON file's dir,
+	# so cd into the build dir; resolve $(PYTHON) to absolute first.
+	@case "$(ENV)" in *_debug) ;; *) \
+	  PY="$$(realpath $(PYTHON))"; \
+	  MKDFU="$$(find /root/.platformio/packages -maxdepth 3 -name mkdfu.py -path '*framework-espidf*' 2>/dev/null | head -1)"; \
+	  test -n "$$MKDFU" || { echo "could not find mkdfu.py in framework-espidf"; exit 1; }; \
+	  cd .pio/build/$(ENV) && \
+	  printf '{"flash_files":{"0x0":"bootloader.bin","0x8000":"partitions.bin","0x10000":"ota_data_initial.bin","0x20000":"firmware.bin"}}' > _dfu.json && \
+	  "$$PY" "$$MKDFU" write --json _dfu.json -o firmware.dfu --pid 0x0009 ;; esac
+	# Push artifacts + helper to the remote in one tar stream, then run it.
+	@set -e; \
+	files="bootloader.bin partitions.bin ota_data_initial.bin firmware.bin"; \
+	case "$(ENV)" in *_debug) ;; *) files="$$files firmware.dfu" ;; esac; \
+	echo ">> tar+ssh artifacts to $(FLASH_HOST):/tmp/esp-tty-flash-online/"; \
+	ssh "$(FLASH_HOST)" "rm -rf /tmp/esp-tty-flash-online && mkdir -p /tmp/esp-tty-flash-online"; \
+	tar -C .pio/build/$(ENV) -czf - $$files | \
+	    ssh "$(FLASH_HOST)" "tar -C /tmp/esp-tty-flash-online -xzf -"; \
+	scp scripts/flash_online_remote.sh "$(FLASH_HOST):/tmp/esp-tty-flash-online/"; \
+	ssh "$(FLASH_HOST)" \
+	    "sh /tmp/esp-tty-flash-online/flash_online_remote.sh $(ENV) /tmp/esp-tty-flash-online $(REMOTE_PORT)"
+
 # OTA: stream the freshly built firmware to the device's `ota@` user.
 # Encryption is negotiated inside the SSH session via X25519 + AES-256-GCM
 # (see main/ota_session.c and scripts/ota_send.py); no pre-shared key files
@@ -235,7 +308,7 @@ ota:
 # Catch-all to swallow positional arguments so make doesn't try to build
 # them as targets.  Scoped to the targets that accept positionals --
 # otherwise `make typo` would silently succeed instead of erroring.
-ifneq (,$(filter ota flash build clean,$(MAKECMDGOALS)))
+ifneq (,$(filter ota flash flash-online build clean,$(MAKECMDGOALS)))
 %:
 	@:
 endif
