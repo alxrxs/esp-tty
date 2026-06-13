@@ -165,11 +165,13 @@ OTA_TARGET := $(strip $(if $(DEV_FILE),\
   $(DEV_ARG)))
 
 # flash-online uses the running TinyUSB CDC endpoint to deliver the
-# boot-trigger magic.  Detection: any /dev/serial/by-id/usb-*_303a_*
-# node that is NOT the 1001 (USB-Serial-JTAG) or 0009 (ROM DFU) variant.
+# boot-trigger magic.  scripts/detect_trigger_port.sh asks the kernel for the
+# actual USB VID:PID and returns the 0x303A node that is NOT the ROM
+# USB-Serial-JTAG (0x1001) or ROM DFU (0x0009) -- i.e. the running app's CDC.
+# (A /dev/serial/by-id/ name glob can't be used: the firmware sets custom USB
+# string descriptors, so its by-id node carries no VID:PID substring to match.)
 # Override at the command line with TRIG_PORT=/dev/ttyACMn.
-TRIG_PORT ?= $(shell ls /dev/serial/by-id/usb-*_303a_* 2>/dev/null \
-                     | grep -vE '_303a_(1001|0009)_' | head -n1)
+TRIG_PORT ?= $(shell scripts/detect_trigger_port.sh)
 
 .PHONY: flash flash-online build ota test test-py clean
 
@@ -264,6 +266,10 @@ flash-online:
 	# so cd into the build dir; resolve $(PYTHON) to absolute first.
 	# Locate mkdfu.py via PlatformIO's packages dir (honours
 	# PLATFORMIO_CORE_DIR / XDG layout / non-root installs).
+	# Pass -fs with the env's real flash size (mkdfu defaults to 2MB, which
+	# bounds the ROM DFU flashchip geometry below the Zero's 4MB ota_0/ota_1
+	# region -- writes past 0x200000 would fail/wrap).  Read it from the
+	# generated sdkconfig.<env> (4MB Zero, 16MB DevKit) before the cd.
 	@BUILD_DIR=".pio/build/$(ENV)"; \
 	if [ -f "$$BUILD_DIR/firmware.dfu" ] && \
 	   [ "$$BUILD_DIR/firmware.dfu" -nt "$$BUILD_DIR/firmware.bin" ] && \
@@ -277,14 +283,17 @@ flash-online:
 	  MKDFU="$$(find "$$PIO_PKG_DIR" -maxdepth 3 -name mkdfu.py -path '*framework-espidf*' 2>/dev/null | head -1)"; \
 	  test -n "$$MKDFU" || { echo "could not find mkdfu.py under $$PIO_PKG_DIR"; exit 1; }; \
 	  PY_ABS="$$(realpath $(PYTHON))"; \
+	  FLASH_SIZE="$$(sed -nE 's/^CONFIG_ESPTOOLPY_FLASHSIZE="([^"]+)"/\1/p' sdkconfig.$(ENV))"; \
+	  test -n "$$FLASH_SIZE" || { echo "could not read CONFIG_ESPTOOLPY_FLASHSIZE from sdkconfig.$(ENV)" >&2; exit 1; }; \
+	  echo ">> DFU flash geometry: $$FLASH_SIZE (from sdkconfig.$(ENV))"; \
 	  cd "$$BUILD_DIR" && \
 	  printf '{"flash_files":{"0x0":"bootloader.bin","0x8000":"partitions.bin","0x10000":"ota_data_initial.bin","0x20000":"firmware.bin"}}' > _dfu.json && \
-	  "$$PY_ABS" "$$MKDFU" write --json _dfu.json -o firmware.dfu --pid 0x0009; \
+	  "$$PY_ABS" "$$MKDFU" write --json _dfu.json -o firmware.dfu --pid 0x0009 -fs "$$FLASH_SIZE"; \
 	fi
 	# Send boot-trigger magic to the running TinyUSB CDC endpoint.
 	@if [ -z "$(TRIG_PORT)" ]; then \
 	    echo "could not find the TinyUSB CDC endpoint." >&2; \
-	    echo "looked for: /dev/serial/by-id/usb-*_303a_* (excluding 1001/0009)" >&2; \
+	    echo "looked for a running 303a:* CDC endpoint (excluding ROM 1001/0009)" >&2; \
 	    echo "override with TRIG_PORT=/dev/ttyACMn" >&2; \
 	    exit 1; \
 	fi
