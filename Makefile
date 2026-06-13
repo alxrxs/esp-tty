@@ -3,19 +3,20 @@
 # Targets:
 #   make build        [DEVNAME] [MODEL]   Compile firmware (no upload)
 #   make flash        [DEVNAME] [MODEL]   Compile + flash over local USB
-#   make flash-online  <DEVNAME> [MODEL]  Compile + flash via a REMOTE host's
-#                                         USB cable.  The per-device config
-#                                         must carry
-#                                             // MAKE-FLASH-HOST: <ssh-host>
-#                                         (or pass FLASH_HOST=user@host on
-#                                         the command line).  For non-debug
-#                                         envs this uses the USB-CDC boot-
-#                                         trigger magic to enter ROM DFU
-#                                         (303a:0009) and dfu-util writes +
-#                                         resets -- all software-only, no
-#                                         physical BOOT+EN required.  For
-#                                         *_debug envs the remote host runs
-#                                         esptool over USB-Serial-JTAG.
+#   make flash-online  [DEVNAME] [MODEL]  Compile + flash over local USB
+#                                         using the USB-CDC boot-trigger
+#                                         magic + dfu-util.  Software-only:
+#                                         no physical BOOT+EN press, no
+#                                         pyserial-RTS reset (which fails
+#                                         against the running TinyUSB CDC
+#                                         with EPROTO).  Sends the magic on
+#                                         the running TinyUSB endpoint to
+#                                         drop the chip into ROM DFU
+#                                         (303a:0009), then dfu-util writes
+#                                         the image and resets.  Non-debug
+#                                         envs only -- for *_debug envs the
+#                                         standard `make flash` already
+#                                         works (no TinyUSB in the way).
 #   make ota   <DEVNAME|HOST> [MODEL]     Compile + upload over Wi-Fi
 #                                         (SSH, X25519+AES-GCM)
 #   make clean  [MODEL]                   Wipe .pio/build/<env>/ to force
@@ -163,14 +164,12 @@ OTA_TARGET := $(strip $(if $(DEV_FILE),\
   $(shell sed -nE 's|^[[:space:]]*//[[:space:]]*MAKE-OTA-IP:[[:space:]]*([^[:space:]]+).*|\1|p' $(DEV_FILE) | head -n1),\
   $(DEV_ARG)))
 
-# flash-online destination: parsed from MAKE-FLASH-HOST in the matched config
-# file, or FLASH_HOST=... on the command line wins.  This is the SSH-reachable
-# machine that owns the device's USB cable (not the device's own Wi-Fi IP).
-FLASH_HOST ?= $(strip $(if $(DEV_FILE),\
-  $(shell sed -nE 's|^[[:space:]]*//[[:space:]]*MAKE-FLASH-HOST:[[:space:]]*([^[:space:]]+).*|\1|p' $(DEV_FILE) | head -n1),))
-
-# Remote serial port (default /dev/ttyACM0 on the flash host).
-REMOTE_PORT ?= /dev/ttyACM0
+# flash-online uses the running TinyUSB CDC endpoint to deliver the
+# boot-trigger magic.  Detection: any /dev/serial/by-id/usb-*_303a_*
+# node that is NOT the 1001 (USB-Serial-JTAG) or 0009 (ROM DFU) variant.
+# Override at the command line with TRIG_PORT=/dev/ttyACMn.
+TRIG_PORT ?= $(shell ls /dev/serial/by-id/usb-*_303a_* 2>/dev/null \
+                     | grep -vE '_303a_(1001|0009)_' | head -n1)
 
 .PHONY: flash flash-online build ota test test-py clean
 
@@ -235,69 +234,86 @@ flash:
 	fi
 	$(PIO) run -e $(ENV) --target upload $(UPLOAD_FLAGS)
 
-# flash-online: build locally, then flash via a REMOTE host's USB cable.
+# flash-online: local DFU flash, no BOOT+EN press required.
 #
-# For non-debug envs the chip is running TinyUSB-CDC (303a:xxxx) which
-# blocks esptool's pyserial-based RTS reset with EPROTO; we instead use
-# the boot-trigger magic on the CDC RX stream to land the chip in ROM
-# USB DFU mode (303a:0009) and let dfu-util write + reset with -R.
-# For *_debug envs the chip exposes the native USB-Serial-JTAG already,
-# so esptool works directly on the remote host.
+# The running app's TinyUSB CDC stack rejects esptool's pyserial RTS reset
+# (EPROTO), so `make flash` against a running non-debug build fails.  This
+# target sidesteps that: it sends the USB-CDC boot-trigger magic on the
+# CDC RX stream, which the firmware's matcher converts into a clean reboot
+# into ROM USB DFU (303a:0009).  dfu-util -R then writes flash + resets.
+# Entirely software-driven -- no buttons, no SSH.
 #
-# Either way the local machine never sees the cable; everything is driven
-# over SSH against the host named in `// MAKE-FLASH-HOST: <ssh-host>`
-# (or FLASH_HOST=user@host on the command line).
+# Non-debug envs only.  For *_debug envs there is no TinyUSB CDC to
+# capture the cable, so `make flash` already works -- use that.
 flash-online:
-	@if [ -z "$(DEV_ARG)" ] || [ -z "$(DEV_FILE)" ]; then \
-	    echo "Usage: make flash-online <devname> [<model>]" >&2; \
-	    echo "  devname must match main/config.<devname>.h" >&2; \
+	@case "$(ENV)" in *_debug) \
+	    echo "flash-online is non-debug-only (env=$(ENV) has no TinyUSB CDC)." >&2; \
+	    echo "Use 'make flash $(DEV_ARG) $(MODEL_ARG)' instead." >&2; \
+	    exit 1 ;; esac
+	@if [ -n "$(DEV_ARG)" ] && [ -z "$(DEV_FILE)" ]; then \
+	    echo "make flash-online $(DEV_ARG): no main/config.$(DEV_ARG).h found." >&2; \
 	    exit 1; \
 	fi
-	@if [ -z "$(FLASH_HOST)" ]; then \
-	    echo "$(DEV_FILE) is missing '// MAKE-FLASH-HOST: <ssh-host>' marker." >&2; \
-	    echo "(or pass FLASH_HOST=user@host on the command line)" >&2; \
-	    exit 1; \
+	@if [ -n "$(DEV_FILE)" ]; then \
+	    echo ">> selecting $(DEV_FILE)  (symlink main/config.h -> config.$(DEV_ARG).h)"; \
+	    ln -sfn config.$(DEV_ARG).h main/config.h; \
 	fi
-	@echo ">> selecting $(DEV_FILE)  (symlink main/config.h -> config.$(DEV_ARG).h)"
-	@echo ">> flash host: $(FLASH_HOST), remote port: $(REMOTE_PORT), env: $(ENV)"
-	@ln -sfn config.$(DEV_ARG).h main/config.h
 	$(PIO) run -e $(ENV)
-	# For non-debug envs, build a .dfu image alongside the .bin files.
+	# Build firmware.dfu alongside the .bin files (if not already current).
 	# mkdfu.py resolves JSON file paths relative to the JSON file's dir,
 	# so cd into the build dir; resolve $(PYTHON) to absolute first.
-	#
-	# Locate mkdfu.py via PlatformIO's own packages dir (honours
-	# PLATFORMIO_CORE_DIR / XDG layout / non-root installs) rather than
-	# assuming /root/.platformio.
-	@case "$(ENV)" in *_debug) ;; *) \
-	  BUILD_DIR=".pio/build/$(ENV)"; \
-	  if [ -f "$$BUILD_DIR/firmware.dfu" ] && \
-	     [ "$$BUILD_DIR/firmware.dfu" -nt "$$BUILD_DIR/firmware.bin" ] && \
-	     [ "$$BUILD_DIR/firmware.dfu" -nt "$$BUILD_DIR/bootloader.bin" ] && \
-	     [ "$$BUILD_DIR/firmware.dfu" -nt "$$BUILD_DIR/partitions.bin" ] && \
-	     [ "$$BUILD_DIR/firmware.dfu" -nt "$$BUILD_DIR/ota_data_initial.bin" ]; then \
-	    echo ">> firmware.dfu up to date, skipping mkdfu.py"; \
-	  else \
-	    PIO_PKG_DIR="$$($(PYTHON) -c 'from platformio.project.config import ProjectConfig; print(ProjectConfig().get_optional_dir("packages"))' 2>/dev/null)"; \
-	    test -n "$$PIO_PKG_DIR" || PIO_PKG_DIR="$$HOME/.platformio/packages"; \
-	    MKDFU="$$(find "$$PIO_PKG_DIR" -maxdepth 3 -name mkdfu.py -path '*framework-espidf*' 2>/dev/null | head -1)"; \
-	    test -n "$$MKDFU" || { echo "could not find mkdfu.py under $$PIO_PKG_DIR"; exit 1; }; \
-	    PY_ABS="$$(realpath $(PYTHON))"; \
-	    cd "$$BUILD_DIR" && \
-	    printf '{"flash_files":{"0x0":"bootloader.bin","0x8000":"partitions.bin","0x10000":"ota_data_initial.bin","0x20000":"firmware.bin"}}' > _dfu.json && \
-	    "$$PY_ABS" "$$MKDFU" write --json _dfu.json -o firmware.dfu --pid 0x0009; \
-	  fi ;; esac
-	# Push artifacts + helper to the remote in one tar stream, then run it.
-	@set -e; \
-	files="bootloader.bin partitions.bin ota_data_initial.bin firmware.bin"; \
-	case "$(ENV)" in *_debug) ;; *) files="$$files firmware.dfu" ;; esac; \
-	echo ">> tar+ssh artifacts to $(FLASH_HOST):/tmp/esp-tty-flash-online/"; \
-	ssh "$(FLASH_HOST)" "rm -rf /tmp/esp-tty-flash-online && mkdir -p /tmp/esp-tty-flash-online"; \
-	tar -C .pio/build/$(ENV) -czf - $$files | \
-	    ssh "$(FLASH_HOST)" "tar -C /tmp/esp-tty-flash-online -xzf -"; \
-	scp scripts/flash_online_remote.sh "$(FLASH_HOST):/tmp/esp-tty-flash-online/"; \
-	ssh "$(FLASH_HOST)" \
-	    "sh /tmp/esp-tty-flash-online/flash_online_remote.sh $(ENV) /tmp/esp-tty-flash-online $(REMOTE_PORT)"
+	# Locate mkdfu.py via PlatformIO's packages dir (honours
+	# PLATFORMIO_CORE_DIR / XDG layout / non-root installs).
+	@BUILD_DIR=".pio/build/$(ENV)"; \
+	if [ -f "$$BUILD_DIR/firmware.dfu" ] && \
+	   [ "$$BUILD_DIR/firmware.dfu" -nt "$$BUILD_DIR/firmware.bin" ] && \
+	   [ "$$BUILD_DIR/firmware.dfu" -nt "$$BUILD_DIR/bootloader.bin" ] && \
+	   [ "$$BUILD_DIR/firmware.dfu" -nt "$$BUILD_DIR/partitions.bin" ] && \
+	   [ "$$BUILD_DIR/firmware.dfu" -nt "$$BUILD_DIR/ota_data_initial.bin" ]; then \
+	  echo ">> firmware.dfu up to date, skipping mkdfu.py"; \
+	else \
+	  PIO_PKG_DIR="$$($(PYTHON) -c 'from platformio.project.config import ProjectConfig; print(ProjectConfig().get_optional_dir("packages"))' 2>/dev/null)"; \
+	  test -n "$$PIO_PKG_DIR" || PIO_PKG_DIR="$$HOME/.platformio/packages"; \
+	  MKDFU="$$(find "$$PIO_PKG_DIR" -maxdepth 3 -name mkdfu.py -path '*framework-espidf*' 2>/dev/null | head -1)"; \
+	  test -n "$$MKDFU" || { echo "could not find mkdfu.py under $$PIO_PKG_DIR"; exit 1; }; \
+	  PY_ABS="$$(realpath $(PYTHON))"; \
+	  cd "$$BUILD_DIR" && \
+	  printf '{"flash_files":{"0x0":"bootloader.bin","0x8000":"partitions.bin","0x10000":"ota_data_initial.bin","0x20000":"firmware.bin"}}' > _dfu.json && \
+	  "$$PY_ABS" "$$MKDFU" write --json _dfu.json -o firmware.dfu --pid 0x0009; \
+	fi
+	# Send boot-trigger magic to the running TinyUSB CDC endpoint.
+	@if [ -z "$(TRIG_PORT)" ]; then \
+	    echo "could not find the TinyUSB CDC endpoint." >&2; \
+	    echo "looked for: /dev/serial/by-id/usb-*_303a_* (excluding 1001/0009)" >&2; \
+	    echo "override with TRIG_PORT=/dev/ttyACMn" >&2; \
+	    exit 1; \
+	fi
+	@echo ">> sending boot-trigger magic to $(TRIG_PORT)"
+	$(PYTHON) scripts/reboot_to_bootloader.py $(TRIG_PORT)
+	# Wait up to 6s for the ROM DFU endpoint to enumerate, then dfu-util -R.
+	@echo ">> waiting for 303a:0009 (ROM DFU)..."
+	@for i in $$(seq 1 30); do \
+	    if lsusb -d 303a:0009 >/dev/null 2>&1; then break; fi; \
+	    sleep 0.2; \
+	done
+	@lsusb -d 303a:0009 >/dev/null 2>&1 || { \
+	    echo "303a:0009 (ROM DFU) did not appear within 6s" >&2; exit 2; }
+	# dfu-util commonly reports "can't detach" on the post-download reset
+	# because by then the chip is gone -- which is the success signal we
+	# wanted.  Treat "Download done." + "Resetting USB" as success.
+	# LC_ALL=C pins dfu-util output to English so the grep works under
+	# localised locales (e.g. de_DE: "Fertig.").
+	@set +e; \
+	dfu_out=$$(LC_ALL=C dfu-util -d 0x303a:0x0009 -a 0 -R \
+	                   -D ".pio/build/$(ENV)/firmware.dfu" 2>&1); \
+	dfu_rc=$$?; \
+	echo "$$dfu_out" | tail -5; \
+	if echo "$$dfu_out" | grep -q 'Download done\.' && \
+	   echo "$$dfu_out" | grep -q 'Resetting USB'; then \
+	    echo ">> dfu-util write+reset complete (rc=$$dfu_rc treated as OK)"; \
+	    exit 0; \
+	fi; \
+	echo "dfu-util failed (rc=$$dfu_rc)" >&2; exit $$dfu_rc
 
 # OTA: stream the freshly built firmware to the device's `ota@` user.
 # Encryption is negotiated inside the SSH session via X25519 + AES-256-GCM

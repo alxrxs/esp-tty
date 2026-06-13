@@ -1,23 +1,12 @@
 // MAKE-OTA-IP: 192.168.1.42
-// MAKE-FLASH-HOST: user@host.example
 /*
- * Marker lines read by the Makefile.
+ * Marker line read by the Makefile.
  *
  *   MAKE-OTA-IP   -- target for `make ota <devname>`.  Set to the
  *                    device's IP or hostname on its production network.
  *                    Required by `make ota`; the marker MUST be on the
  *                    first line for legibility but the parser only
  *                    requires the prefix `// MAKE-OTA-IP:`.
- *
- *   MAKE-FLASH-HOST -- target for `make flash-online <devname>`.  Set
- *                    to an SSH-reachable host (e.g. `pi@server.lan`)
- *                    that owns the device's USB cable.  Optional: omit
- *                    if this device is only ever flashed locally, or
- *                    override on the command line with
- *                    `make flash-online <dev> FLASH_HOST=user@host`.
- *
- * Either marker can be commented out and re-added later without
- * affecting the other.
  */
 
 /*
