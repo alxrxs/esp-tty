@@ -752,6 +752,22 @@ void wifi_signal_eap_creds_rotated(void)
     atomic_store(&s_eap_creds_just_rotated, true);
 }
 
+/* Self-initiated-teardown signal (single-shot, edge-triggered).
+ *
+ * The smart-EAP / PSK-bootstrap transitions call esp_wifi_stop() on
+ * ourselves, which surfaces as WIFI_EVENT_STA_DISCONNECTED with reason
+ * WIFI_REASON_ASSOC_LEAVE (8); the orchestrator then starts a fresh session,
+ * so auto-reconnecting there would race it.  But reason 8 is ALSO sent by
+ * APs/controllers on their own (failover, AP reboot, transient blip), and
+ * those MUST reconnect or the device stays offline until a power-cycle.
+ *
+ * Set this flag immediately before each self-induced esp_wifi_stop(); the
+ * disconnect handler consumes it via atomic_exchange and only treats reason 8
+ * as a planned teardown when it was set.  Previously the handler assumed ALL
+ * reason-8 disconnects were planned and cancelled reconnection unconditionally
+ * -- so an AP-initiated reason 8 left the device permanently offline. */
+static _Atomic bool s_self_teardown_expected = false;
+
 static void ntp_sync_cb(struct timeval *tv)
 {
     (void)tv;
@@ -1267,10 +1283,20 @@ static void wifi_event_handler(void *arg,
             bool rotated_expected = atomic_exchange(
                 &s_eap_creds_just_rotated, false);
 
-            /* Reason 8 (ASSOC_LEAVE) is the disconnect that fires when we
-             * call esp_wifi_stop() ourselves to transition between PSK
-             * bootstrap and enterprise.  The next wifi_mode_* call will
-             * start a fresh session; auto-reconnect here would race it. */
+            /* Consume unconditionally (like rotated_expected) so a self-
+             * teardown that surfaces with a non-ASSOC_LEAVE reason cannot
+             * leak the flag into a later, unrelated reason-8 disconnect. */
+            bool self_teardown = atomic_exchange(
+                &s_self_teardown_expected, false);
+
+            /* Reason 8 (ASSOC_LEAVE) fires both when WE tear down
+             * (esp_wifi_stop() for PSK<->enterprise transitions, or
+             * esp_wifi_disconnect() for cert renewal) AND when an AP or
+             * controller deauths us with that reason (failover, AP reboot,
+             * transient blip).  Only the self-induced cases are planned
+             * teardowns we must not auto-reconnect on; AP-induced ones MUST
+             * reconnect or the device stays offline until a power-cycle.
+             * Distinguish via the single-shot flags consumed above. */
             if (ev->reason == WIFI_REASON_ASSOC_LEAVE) {
                 if (rotated_expected) {
                     /* cert_renewer rotated creds and called
@@ -1289,10 +1315,20 @@ static void wifi_event_handler(void *arg,
                     }
                     goto disc_done;
                 }
-                ESP_LOGI(TAG, "disconnected (reason %d -- planned teardown)",
-                         ev->reason);
-                reconnect_timer_cancel();
-                goto disc_done;
+                if (self_teardown) {
+                    /* Our own esp_wifi_stop() during a PSK<->enterprise
+                     * transition; the orchestrator starts a fresh session
+                     * next, so auto-reconnect here would race it. */
+                    ESP_LOGI(TAG, "disconnected (reason %d -- planned teardown)",
+                             ev->reason);
+                    reconnect_timer_cancel();
+                    goto disc_done;
+                }
+                /* Neither flag set: the AP/controller sent reason 8 on its
+                 * own.  Fall through to the normal backoff-reconnect path
+                 * below instead of giving up permanently. */
+                ESP_LOGW(TAG, "disconnected (reason %d -- AP-initiated "
+                              "ASSOC_LEAVE, reconnecting)", ev->reason);
             }
 
             /* Classify the disconnect reason: security-relevant failures
@@ -2026,6 +2062,8 @@ static esp_err_t wifi_mode_psk(const char *ssid,
     if (!(bits & WIFI_CONNECTED_BIT)) {
         ESP_LOGE(TAG, "[smart] PSK connect to \"%s\" failed", ssid);
         s_psk_bootstrap_active = false;
+        /* Self-induced stop -> mark the resulting reason-8 as planned. */
+        atomic_store(&s_self_teardown_expected, true);
         {
             esp_err_t _err = esp_wifi_stop();
             if (_err != ESP_OK) {
@@ -2039,6 +2077,8 @@ static esp_err_t wifi_mode_psk(const char *ssid,
     ESP_LOGI(TAG, "[smart] PSK connected to \"%s\"", ssid);
     esp_err_t result = on_ip ? on_ip() : ESP_OK;
 
+    /* Self-induced stop -> mark the resulting reason-8 as planned. */
+    atomic_store(&s_self_teardown_expected, true);
     {
         esp_err_t _err = esp_wifi_stop();
         if (_err != ESP_OK) {
@@ -2536,6 +2576,8 @@ static esp_err_t wifi_mode_enterprise(const char         *ssid,
     }
 
     ESP_LOGE(TAG, "[smart] enterprise connect to \"%s\" failed/timed out", ssid);
+    /* Self-induced stop -> mark the resulting reason-8 as planned. */
+    atomic_store(&s_self_teardown_expected, true);
     {
         esp_err_t _err = esp_wifi_stop();
         if (_err != ESP_OK) {
