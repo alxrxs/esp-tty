@@ -41,6 +41,9 @@
 void setUp(void)    {}
 void tearDown(void) {}
 
+/* Defined in test_certrep_parse.c (same Unity suite / directory). */
+void certrep_register_tests(void);
+
 /* =========================================================================
  * Global RNG (initialised once per process -- CTR-DRBG is not thread-safe
  * but tests run sequentially)
@@ -1443,6 +1446,10 @@ int main(void)
     RUN_TEST(test_parse_certrep_all_zeros_returns_error);
     RUN_TEST(test_parse_getcacert_single_byte_returns_error);
     RUN_TEST(test_parse_getcacert_empty_sequence_returns_error);
+
+    /* Behavioural CertRep parsing tests (test_certrep_parse.c) -- builds real
+     * signed+enveloped CertReps and exercises the audit-fix reject paths. */
+    certrep_register_tests();
 
     /* Cleanup global RNG */
     if (g_rng_init) {

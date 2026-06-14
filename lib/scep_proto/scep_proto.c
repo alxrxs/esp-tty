@@ -1270,8 +1270,11 @@ static int find_scep_attr(const uint8_t *signer_info_val, size_t si_len,
     /* digestAlgorithm */
     if (asn_skip(&p, end) != 0) return -1;
 
-    /* signedAttrs [0] IMPLICIT */
-    if (p >= end || (*p & 0x1f) != 0) return -1;
+    /* signedAttrs [0] IMPLICIT -- must be context-class, tag number 0 (0xA0).
+     * Checking only the low 5 bits ((*p & 0x1f) == 0) would also accept a
+     * universal EOC (0x00) or other class-0 tags; require context class
+     * (top two bits == 10) explicitly. */
+    if (p >= end || (*p & 0xc0) != 0x80 || (*p & 0x1f) != 0) return -1;
     const uint8_t *sa_val;
     size_t sa_len;
     if (asn_read(&p, end, NULL, &sa_val, &sa_len) != 0) return -1;
@@ -1449,8 +1452,10 @@ static int si_extract_sa_and_sig(const uint8_t  *si_val, size_t si_len,
     /* digestAlgorithm AlgorithmIdentifier SEQUENCE */
     if (asn_skip(&p, end) != 0) return -1;
 
-    /* signedAttrs [0] IMPLICIT -- tag is 0xA0; capture full TLV */
-    if (p >= end || (*p & 0x1f) != 0) return -1; /* must be context[0] */
+    /* signedAttrs [0] IMPLICIT -- tag is 0xA0; capture full TLV.
+     * Require context class (top two bits == 10) AND tag number 0; the old
+     * (*p & 0x1f)==0 test alone also accepted universal EOC (0x00). */
+    if (p >= end || (*p & 0xc0) != 0x80 || (*p & 0x1f) != 0) return -1; /* must be context[0] */
     *sa_raw = p; /* remember start of TLV */
     const uint8_t *sa_content_ptr;
     size_t sa_content_sz;
@@ -1527,6 +1532,22 @@ int scep_parse_certrep(const uint8_t      *p7,
      *
      * Only after successful verification do we proceed to EnvelopedData
      * decryption.
+     *
+     * TRUST-BOUNDARY NOTE (audit finding F7): the signer cert taken from
+     * certificates[0] is verified only for SELF-CONSISTENCY -- the signedAttrs
+     * signature must validate against the public key embedded in that very
+     * cert.  It is NOT independently chained to the CA/RA trust anchor learned
+     * from GetCACert, because this function does not receive that anchor (doing
+     * so would require a new parameter threaded through main/scep_enroll.c,
+     * which is out of scope for the parser).  The trust boundary that prevents
+     * a forged signer cert is therefore the TLS-pinned transport
+     * (lib/scep_transport: esp_http_client is configured with the embedded CA
+     * PEM and full certificate verification, skip_cert_common_name_check =
+     * false).  An attacker who cannot terminate the pinned TLS session cannot
+     * deliver a CertRep at all; one who can is already inside the trust
+     * boundary.  If the SCEP-layer signature is ever required to stand on its
+     * own (defence in depth independent of TLS), pass the GetCACert RA-signing
+     * cert in and assert the signer chains to / equals it here.
      * ------------------------------------------------------------------ */
     {
         /* Step 1: parse signer cert from certificates[0] in outer SignedData */
@@ -1603,9 +1624,17 @@ int scep_parse_certrep(const uint8_t      *p7,
         /* Signature verified -- safe to continue processing. */
     }
 
-    /* Extract transactionID */
+    /* Extract transactionID.
+     *
+     * RFC 8894 §3.2.1.1 mandates the transactionID signed attribute in every
+     * pkiMessage.  Treat its absence as fatal: a response with no
+     * transactionID cannot be matched against the request we issued, so
+     * silently accepting it would let an attacker (or a confused CA) splice
+     * an unrelated CertRep into our transaction.  Always perform the strcmp. */
     const uint8_t *av; size_t al;
-    if (find_scep_attr(si_val, si_len, OID_TXID, sizeof(OID_TXID), &av, &al) == 0) {
+    if (find_scep_attr(si_val, si_len, OID_TXID, sizeof(OID_TXID), &av, &al) != 0)
+        return -1; /* transactionID absent -> reject */
+    {
         char got_txid[SCEP_TRANSACTION_ID_HEX_LEN + 1] = {0};
         get_printable_string(av, al, got_txid, sizeof(got_txid));
         if (strcmp(got_txid, expected_transaction_id) != 0) return -1;
@@ -1686,15 +1715,19 @@ int scep_parse_certrep(const uint8_t      *p7,
         }
     }
 
-    /* Parse EnvelopedData SEQUENCE */
+    /* Parse EnvelopedData SEQUENCE.
+     *
+     * The EnvelopedData MUST be a constructed SEQUENCE.  Previously a parse
+     * failure here fell back to treating the unparsed bytes as the
+     * EnvelopedData body, which let a malformed (e.g. EOC- or wrong-tagged)
+     * structure slip through to the recipientInfos walk on attacker-shaped
+     * input.  Treat a missing/incorrect SEQUENCE as fatal. */
     const uint8_t *edv;
     size_t edl;
     if (asn_expect(&ed_p, ed_end,
                    MBEDTLS_ASN1_CONSTRUCTED | MBEDTLS_ASN1_SEQUENCE,
-                   &edv, &edl) != 0) {
-        /* Maybe ed_p already points into EnvelopedData body */
-        edv = ed_p; edl = (size_t)(ed_end - ed_p);
-    }
+                   &edv, &edl) != 0)
+        return -1;
     const uint8_t *edp = edv;
     const uint8_t *ede = edv + edl;
 
@@ -1854,13 +1887,21 @@ int scep_parse_certrep(const uint8_t      *p7,
         mbedtls_rsa_set_padding(rsa, MBEDTLS_RSA_PKCS_V15, MBEDTLS_MD_NONE);
     }
 
+    /* From here on the CEK (and the RSA-decrypt output buffer that contains
+     * it) is live key material on the stack.  Every error path below MUST
+     * route through `cek_cleanup:`, which zeroizes `cek` (and frees the inner
+     * plaintext buffer) before returning -- otherwise a parse failure would
+     * leave the AES content-encryption key sitting on the stack.  `inner_buf`
+     * is declared here so the single cleanup label can free it safely. */
+    uint8_t *inner_buf = NULL;
+
     uint8_t cek[CEK_LEN + 256]; /* oversized to avoid OUTPUT_TOO_LARGE on OAEP */
     size_t  cek_out_len = sizeof(cek);
     ret = mbedtls_rsa_pkcs1_decrypt(rsa, f_rng, p_rng,
                                     &cek_out_len, enc_key_der, cek, sizeof(cek));
-    if (ret != 0) return ret;
+    if (ret != 0) goto cek_cleanup;
     /* Accept AES-128 (16 B) or AES-256 (32 B) CEK */
-    if (cek_out_len != 16 && cek_out_len != 32) return -1;
+    if (cek_out_len != 16 && cek_out_len != 32) { ret = -1; goto cek_cleanup; }
     size_t cek_actual_len = cek_out_len;
 
     /* EncryptedContentInfo */
@@ -1868,12 +1909,12 @@ int scep_parse_certrep(const uint8_t      *p7,
     size_t eci_len;
     if (asn_expect(&edp, ede,
                    MBEDTLS_ASN1_CONSTRUCTED | MBEDTLS_ASN1_SEQUENCE,
-                   &eci_val, &eci_len) != 0) return -1;
+                   &eci_val, &eci_len) != 0) { ret = -1; goto cek_cleanup; }
     const uint8_t *ep = eci_val;
     const uint8_t *ee = eci_val + eci_len;
 
     /* contentType OID -- skip */
-    if (asn_skip(&ep, ee) != 0) return -1;
+    if (asn_skip(&ep, ee) != 0) { ret = -1; goto cek_cleanup; }
 
     /* contentEncryptionAlgorithm: get IV from params */
     uint8_t iv[IV_LEN];
@@ -1882,29 +1923,36 @@ int scep_parse_certrep(const uint8_t      *p7,
         size_t alg_len;
         if (asn_expect(&ep, ee,
                        MBEDTLS_ASN1_CONSTRUCTED | MBEDTLS_ASN1_SEQUENCE,
-                       &alg_val, &alg_len) != 0) return -1;
+                       &alg_val, &alg_len) != 0) { ret = -1; goto cek_cleanup; }
         const uint8_t *ap2 = alg_val;
         const uint8_t *ae2 = alg_val + alg_len;
-        if (asn_skip(&ap2, ae2) != 0) return -1; /* OID */
+        if (asn_skip(&ap2, ae2) != 0) { ret = -1; goto cek_cleanup; } /* OID */
         /* IV OCTET STRING */
         const uint8_t *iv_val;
         size_t iv_len_actual;
         if (asn_expect(&ap2, ae2, MBEDTLS_ASN1_OCTET_STRING,
-                       &iv_val, &iv_len_actual) != 0) return -1;
-        if (iv_len_actual != IV_LEN) return -1;
+                       &iv_val, &iv_len_actual) != 0) { ret = -1; goto cek_cleanup; }
+        if (iv_len_actual != IV_LEN) { ret = -1; goto cek_cleanup; }
         memcpy(iv, iv_val, IV_LEN);
     }
 
-    /* encryptedContent [0] IMPLICIT */
-    if (ep >= ee || (*ep & 0x1f) != 0) return -1;
+    /* encryptedContent [0] IMPLICIT -- require context class (top two bits
+     * == 10); the bare (*ep & 0x1f)==0 test alone also accepts EOC (0x00). */
+    if (ep >= ee || (*ep & 0xc0) != 0x80 || (*ep & 0x1f) != 0) { ret = -1; goto cek_cleanup; }
     const uint8_t *enc_content;
     size_t enc_content_len;
-    if (asn_read(&ep, ee, NULL, &enc_content, &enc_content_len) != 0) return -1;
+    if (asn_read(&ep, ee, NULL, &enc_content, &enc_content_len) != 0) { ret = -1; goto cek_cleanup; }
+
+    /* AES-CBC requires the ciphertext to be a whole number of 16-byte blocks;
+     * mbedtls_aes_crypt_cbc() asserts on a non-aligned length, so reject
+     * malformed (non-block-aligned, including zero-length) encryptedContent
+     * here rather than feeding it to the cipher. */
+    if (enc_content_len == 0 || (enc_content_len % IV_LEN) != 0) { ret = -1; goto cek_cleanup; }
 
     /* Decrypt AES-CBC (key size from RSA decrypt: 128 or 256 bit) */
-    if (enc_content_len > SCEP_MAX_CERT_DER + 512) return -1;
-    uint8_t *inner_buf = malloc(enc_content_len);
-    if (!inner_buf) return -1;
+    if (enc_content_len > SCEP_MAX_CERT_DER + 512) { ret = -1; goto cek_cleanup; }
+    inner_buf = malloc(enc_content_len);
+    if (!inner_buf) { ret = -1; goto cek_cleanup; }
 
     {
         mbedtls_aes_context aes;
@@ -1918,50 +1966,56 @@ int scep_parse_certrep(const uint8_t      *p7,
                                         enc_content, inner_buf);
         mbedtls_aes_free(&aes);
     }
-    /* Wipe CEK */
-    volatile uint8_t *vc = cek;
-    for (size_t i = 0; i < sizeof(cek); i++) vc[i] = 0;
+    if (ret != 0) goto cek_cleanup;
 
-    if (ret != 0) { free(inner_buf); return ret; }
+    /* Remove PKCS#7 padding (enc_content_len is non-zero, checked above) */
+    {
+        uint8_t pad = inner_buf[enc_content_len - 1];
+        if (pad == 0 || pad > 16 || pad > enc_content_len) { ret = -1; goto cek_cleanup; }
+        size_t inner_len = enc_content_len - pad;
 
-    /* Remove PKCS#7 padding */
-    if (enc_content_len == 0) { free(inner_buf); return -1; }
-    uint8_t pad = inner_buf[enc_content_len - 1];
-    if (pad == 0 || pad > 16 || pad > enc_content_len) { free(inner_buf); return -1; }
-    size_t inner_len = enc_content_len - pad;
+        /* inner_buf[0..inner_len-1] is the degenerate SignedData DER */
+        /* Parse it to extract the cert */
+        const uint8_t *inner_encap, *inner_si, *inner_certs;
+        size_t inner_encap_len, inner_si_len, inner_certs_len;
+        ret = parse_outer_signed_data(inner_buf, inner_len,
+                                      &inner_encap, &inner_encap_len,
+                                      &inner_si,    &inner_si_len,
+                                      &inner_certs, &inner_certs_len);
+        if (ret != 0) goto cek_cleanup;
 
-    /* inner_buf[0..inner_len-1] is the degenerate SignedData DER */
-    /* Parse it to extract the cert */
-    const uint8_t *inner_encap, *inner_si, *inner_certs;
-    size_t inner_encap_len, inner_si_len, inner_certs_len;
-    ret = parse_outer_signed_data(inner_buf, inner_len,
-                                  &inner_encap, &inner_encap_len,
-                                  &inner_si,    &inner_si_len,
-                                  &inner_certs, &inner_certs_len);
-    if (ret != 0) { free(inner_buf); return ret; }
+        /* Extract the cert from inner_certs (which is [0] IMPLICIT content) */
+        if (!inner_certs || inner_certs_len == 0) { ret = -1; goto cek_cleanup; }
 
-    /* Extract the cert from inner_certs (which is [0] IMPLICIT content) */
-    if (!inner_certs || inner_certs_len == 0) { free(inner_buf); return -1; }
+        const uint8_t *cert_der = inner_certs;
+        const uint8_t *cert_end = inner_certs + inner_certs_len;
+        const uint8_t *cv;
+        size_t cl;
+        if (asn_expect(&cert_der, cert_end,
+                       MBEDTLS_ASN1_CONSTRUCTED | MBEDTLS_ASN1_SEQUENCE,
+                       &cv, &cl) != 0) { ret = -1; goto cek_cleanup; }
+        /* Rewind to include the SEQUENCE tag+len */
+        size_t cert_total = (size_t)(cert_der - inner_certs);
+        const uint8_t *cert_start = inner_certs;
 
-    const uint8_t *cert_der = inner_certs;
-    const uint8_t *cert_end = inner_certs + inner_certs_len;
-    const uint8_t *cv;
-    size_t cl;
-    if (asn_expect(&cert_der, cert_end,
-                   MBEDTLS_ASN1_CONSTRUCTED | MBEDTLS_ASN1_SEQUENCE,
-                   &cv, &cl) != 0) { free(inner_buf); return -1; }
-    /* Rewind to include the SEQUENCE tag+len */
-    size_t cert_total = (size_t)(cert_der - inner_certs);
-    const uint8_t *cert_start = inner_certs;
-
-    if (out_cert_der && out_cert_len) {
-        if (cert_total > *out_cert_len) { free(inner_buf); return -2; }
-        memcpy(out_cert_der, cert_start, cert_total);
-        *out_cert_len = cert_total;
+        if (out_cert_der && out_cert_len) {
+            if (cert_total > *out_cert_len) { ret = -2; goto cek_cleanup; }
+            memcpy(out_cert_der, cert_start, cert_total);
+            *out_cert_len = cert_total;
+        }
+        ret = 0;
     }
 
+cek_cleanup:
+    /* Zeroize the CEK (and the rest of the RSA-decrypt output buffer) on
+     * EVERY exit path -- success or failure -- so no key material survives
+     * on the stack. */
+    {
+        volatile uint8_t *vc = cek;
+        for (size_t i = 0; i < sizeof(cek); i++) vc[i] = 0;
+    }
     free(inner_buf);
-    return 0;
+    return ret;
 }
 
 /* -----------------------------------------------------------------------
@@ -2112,8 +2166,14 @@ int scep_parse_pkimessage_pkcsreq_for_test(const uint8_t             *p7,
     if (find_scep_attr(si_val, si_len, OID_TXID, sizeof(OID_TXID), &av, &al) == 0)
         get_printable_string(av, al, out->transaction_id, sizeof(out->transaction_id));
     if (find_scep_attr(si_val, si_len, OID_SENDER_NONCE, sizeof(OID_SENDER_NONCE), &av, &al) == 0) {
-        if (al >= 2 && av[0] == 0x04)
-            memcpy(out->sender_nonce, av + 2, al - 2 < SCEP_NONCE_LEN ? al - 2 : SCEP_NONCE_LEN);
+        /* The attribute value is SET { OCTET STRING }; parse the OCTET STRING
+         * via asn_read so the inner length is honoured rather than assuming a
+         * single-byte length (the previous av+2 / al-2 raw indexing). */
+        const uint8_t *np = av;
+        const uint8_t *ne = av + al;
+        const uint8_t *nv; size_t nl;
+        if (asn_expect(&np, ne, MBEDTLS_ASN1_OCTET_STRING, &nv, &nl) == 0)
+            memcpy(out->sender_nonce, nv, nl < SCEP_NONCE_LEN ? nl : SCEP_NONCE_LEN);
     }
 
     /* Decrypt inner EnvelopedData */
@@ -2201,6 +2261,10 @@ int scep_parse_pkimessage_pkcsreq_for_test(const uint8_t             *p7,
     ret = mbedtls_rsa_pkcs1_decrypt(rsa, f_rng, p_rng, &cek_len,
                                     enc_key_der, cek, sizeof(cek));
     if (ret != 0) return ret;
+    /* Only AES-128 (16 B) or AES-256 (32 B) CEKs are valid; rejecting any
+     * other length also means cek_len*8 below is always the *real* key size,
+     * so we never feed mbedtls_aes_setkey_dec uninitialised stack bytes. */
+    if (cek_len != 16 && cek_len != 32) return -1;
 
     const uint8_t *eci_val; size_t eci_len;
     if (asn_expect(&edp, ede, MBEDTLS_ASN1_CONSTRUCTED | MBEDTLS_ASN1_SEQUENCE,
@@ -2224,13 +2288,18 @@ int scep_parse_pkimessage_pkcsreq_for_test(const uint8_t             *p7,
 
     size_t dec_len = ec_len;
     if (dec_len > sizeof(out->csr_der)) return -1;
+    /* AES-CBC needs a whole number of 16-byte blocks. */
+    if (dec_len == 0 || (dec_len % IV_LEN) != 0) return -1;
     {
         mbedtls_aes_context aes;
         mbedtls_aes_init(&aes);
         uint8_t iv2[IV_LEN]; memcpy(iv2, iv, IV_LEN);
         uint8_t tmp_dec[SCEP_MAX_CSR_DER + 16];
         if (dec_len > sizeof(tmp_dec)) { mbedtls_aes_free(&aes); return -1; }
-        ret = mbedtls_aes_setkey_dec(&aes, cek, 256);
+        /* Use the actual decrypted CEK length (cek_len validated to 16 or 32
+         * above), not a hardcoded 256 bits, so an AES-128 CEK is keyed
+         * correctly and we never read past the valid key bytes. */
+        ret = mbedtls_aes_setkey_dec(&aes, cek, (unsigned int)(cek_len * 8));
         if (ret == 0)
             ret = mbedtls_aes_crypt_cbc(&aes, MBEDTLS_AES_DECRYPT, dec_len, iv2,
                                         ec_val, tmp_dec);
