@@ -65,21 +65,38 @@ case "$(uname -s)" in
         '
         ;;
     Linux)
-        # udev creates stable /dev/serial/by-id/ symlinks.
-        # CH340 = "1a86" (DevKitC-1) -- check first.
-        for path in /dev/serial/by-id/usb-1a86_*; do
-            [ -e "$path" ] || continue
-            echo "$path"
-            exit
+        # Match by USB VID:PID via sysfs, not by /dev/serial/by-id/ name.
+        # by-id names are built from the device's string descriptors, so a
+        # bridge that reports a manufacturer/product string (e.g. some CH343
+        # parts as "QinHeng Electronics") would dodge a "usb-1a86_*" glob.
+        # Same reasoning as scripts/detect_trigger_port.sh.
+        #
+        # Priority 1: CH340/CH343 USB-UART bridge (VID 1a86), any PID.
+        # Priority 2: ESP32-S3 ROM USB-Serial-JTAG bootloader (303a:1001),
+        #             i.e. a Zero held in BOOT+RESET download mode.
+        # The running app's own CDC (303a:<other>, e.g. xxxx/4001) is NOT a
+        # flashing port and is deliberately not matched.
+        _vidpid() {  # print "vid:pid" (lowercase hex) for /dev/tty* arg, else nothing
+            _sys="/sys/class/tty/${1#/dev/}/device"
+            [ -e "$_sys" ] || return
+            _node=$(readlink -f "$_sys")
+            while [ -n "$_node" ] && [ "$_node" != "/" ]; do
+                if [ -r "$_node/idVendor" ] && [ -r "$_node/idProduct" ]; then
+                    echo "$(cat "$_node/idVendor"):$(cat "$_node/idProduct")"
+                    return
+                fi
+                _node=$(dirname "$_node")
+            done
+        }
+        # Pass 1: CH340/CH343 (VID 1a86, any PID).
+        for dev in /dev/ttyACM* /dev/ttyUSB*; do
+            [ -e "$dev" ] || continue
+            case "$(_vidpid "$dev")" in 1a86:*) echo "$dev"; exit 0 ;; esac
         done
-        # Fallback: ESP32-S3 native USB bootloader (Zero in BOOT+RESET mode).
-        # udev names this "usb-Espressif_USB_JTAG_serial_debug_unit_*" or
-        # "usb-303a_1001_*" depending on the kernel/udev version.
-        for path in /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_* \
-                    /dev/serial/by-id/usb-303a_1001_*; do
-            [ -e "$path" ] || continue
-            echo "$path"
-            exit
+        # Pass 2: ESP32-S3 ROM USB-Serial-JTAG bootloader (303a:1001).
+        for dev in /dev/ttyACM* /dev/ttyUSB*; do
+            [ -e "$dev" ] || continue
+            case "$(_vidpid "$dev")" in 303a:1001) echo "$dev"; exit 0 ;; esac
         done
         ;;
     *)

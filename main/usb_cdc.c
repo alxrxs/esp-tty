@@ -36,12 +36,13 @@
  * ESP32-S3 USB-OTG (TinyUSB) builds:
  *   1) RTC_CNTL_FORCE_DOWNLOAD_BOOT in RTC_CNTL_OPTION1_REG -- forces
  *      the boot ROM to enter download mode regardless of GPIO0.
- *   2) chip_usb_set_persist_flags(USBDC_BOOT_DFU) -- tells the ROM USB
- *      stack to route the USB peripheral to USB-Serial-JTAG (DFU)
- *      rather than continuing to drive the persisted OTG endpoint.
- * Using only (1) keeps the chip in OTG mode (host still sees our
- * TinyUSB descriptor); using only (2) doesn't trigger download mode.
- * Both are needed.  Reference: esp-idf
+ *   2) chip_usb_set_persist_flags(USBDC_BOOT_DFU) -- marks this reset as
+ *      a DFU request so the ROM brings the USB-OTG peripheral up as the
+ *      ROM USB DFU interface (303a:0009) instead of the default download
+ *      channel (USB-Serial-JTAG, 303a:1001).
+ * Using only (1) enters download mode but on the default USB-Serial-JTAG
+ * channel, not DFU; using only (2) doesn't trigger download mode.
+ * Both are needed for 303a:0009.  Reference: esp-idf
  * components/esp_usb_cdc_rom_console/usb_console.c
  * esp_usb_console_before_restart() and esp-idf issue #9826. */
 #include "esp32s3/rom/usb/chip_usb_dw_wrapper.h"
@@ -72,15 +73,15 @@ static _Atomic bool s_boot_triggered = false;
  * arduino-esp32 usb_persist_restart()).
  *
  * Why both flags are needed:
- *   USBDC_BOOT_DFU alone: the ROM USB stack routes the USB pins to
- *     USB-Serial-JTAG (303a:1001), but the chip does not enter download
- *     mode unless the GPIO0/boot-strap condition is also satisfied.
- *   RTC_CNTL_FORCE_DOWNLOAD_BOOT alone: the CPU enters download mode
- *     but the USB peripheral may still be in OTG mode, so the host
- *     never sees the 303a:1001 endpoint -- it still sees the stale
- *     TinyUSB descriptor.
- *   Both together: the ROM enters download mode AND routes USB to the
- *     USB-Serial-JTAG controller, so the host sees VID:PID 303a:1001. */
+ *   USBDC_BOOT_DFU alone: marks the reset as a DFU request, but the chip
+ *     does not enter download mode unless FORCE_DOWNLOAD_BOOT (or the
+ *     GPIO0/boot-strap condition) is also satisfied.
+ *   RTC_CNTL_FORCE_DOWNLOAD_BOOT alone: the CPU enters download mode but
+ *     the USB peripheral may still be in OTG mode, so the host never sees
+ *     the ROM DFU endpoint -- it still sees the stale TinyUSB descriptor.
+ *   Both together: the ROM enters download mode AND brings up USB-OTG
+ *     DFU, so the host sees VID:PID 303a:0009 -- the endpoint dfu-util
+ *     writes to (see `make flash-online`). */
 static void boot_trigger_shutdown_handler(void)
 {
     chip_usb_set_persist_flags(USBDC_BOOT_DFU);
@@ -121,8 +122,8 @@ static void boot_trigger_reset_task(void *arg)
      * pins.  Without this, the ROM bootloader boots into download
      * mode but the OTG state lingers on the host side -- the host
      * keeps seeing our (now-stale) TinyUSB descriptor instead of the
-     * ROM's 303a:1001 USB-Serial-JTAG endpoint.  This is the
-     * documented companion to USBDC_BOOT_DFU (esp-idf issue #9826). */
+     * ROM's 303a:0009 USB-OTG DFU endpoint.  This is the documented
+     * companion to USBDC_BOOT_DFU (esp-idf issue #9826). */
     (void)tinyusb_driver_uninstall();
 
     esp_restart();
