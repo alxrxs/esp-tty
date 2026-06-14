@@ -25,6 +25,31 @@
  * SSH layer already provides mutual authentication via OTA_AUTHORIZED_PUBKEY;
  * the inner key exchange just adds an independent encryption layer with no
  * pre-shared key material baked into the firmware.
+ *
+ * -------------------------------------------------------------------------
+ * TODO(OTA-F3, deferred -- wire-protocol v3): bind the framing into the GCM AAD
+ * -------------------------------------------------------------------------
+ * In v2 the AAD is empty, so the 4-byte plaintext_len and the 12-byte IV that
+ * prefix the ciphertext are NOT authenticated by the GCM tag.  An attacker who
+ * can tamper with the SSH stream (defence-in-depth scenario only -- the SSH
+ * channel is already mutually authenticated and integrity-protected, so this is
+ * not currently exploitable) could alter plaintext_len or the IV; the tag check
+ * would then fail, but the framing fields themselves carry no cryptographic
+ * binding to the payload.
+ *
+ * Proposed v3 hardening: feed the exact on-wire header bytes as GCM AAD so the
+ * tag covers length + IV as well as ciphertext:
+ *
+ *     aad = [4B plaintext_len LE] || [12B IV]      // 16 bytes, the header as sent
+ *     ... wc_AesGcmDecrypt(&aes, ct, ct, n, iv, 12, tag, 16, aad, sizeof(aad));
+ *
+ * and bump HKDF_SALT to "esp-tty-ota-v3" + OTA_PROTO_VERSION to 0x03 so a v2
+ * sender and a v3 device cannot silently interoperate with mismatched AAD.
+ *
+ * This is DEFERRED: it is a breaking wire-protocol change that requires the
+ * matching encoder change in scripts/ota_send.py (owned by another agent).
+ * Implementing it on only one side would brick every OTA upload.  Do not change
+ * the AAD here without landing the sender change in the same release.
  */
 
 #include "ota_session.h"
@@ -328,6 +353,31 @@ esp_err_t ota_session_handler(WOLFSSH *ssh)
         goto out;
     }
 
+    /* OTA-F2 (hardening note, evaluated -- kept as-is):
+     * This is an in-place decrypt (out == in == ciphertext).  In the default
+     * wolfSSL build (WC_AES_GCM_DEC_AUTH_EARLY NOT defined), wc_AesGcmDecrypt
+     * writes the full plaintext into the buffer BEFORE the GCM tag is verified;
+     * on a tag mismatch unauthenticated plaintext therefore lingers in PSRAM
+     * for the moment between decrypt and the rc != 0 branch below.
+     *
+     * This is acceptable here because the two relevant mitigations are already
+     * in place:
+     *   1. Nothing is written to flash on tag failure -- esp_ota_begin() is
+     *      only reached after rc == 0 (see step 8 below).
+     *   2. The buffer is zeroize()d on the error path (the out: label) before
+     *      heap_caps_free(), so the unauthenticated bytes do not outlive the
+     *      session.
+     *
+     * The streaming verify-before-output API (wc_AesGcmDecryptInit/Update/
+     * Final) and the WC_AES_GCM_DEC_AUTH_EARLY one-shot variant would both
+     * remove the transient window, but each requires a GLOBAL wolfSSL build
+     * flag (WOLFSSL_AESGCM_STREAM / WC_AES_GCM_DEC_AUTH_EARLY) in
+     * components/wolfssl/include/user_settings.h.  That same wolfSSL config
+     * also drives the live SSH AES-256-GCM data-channel cipher (the path just
+     * used to flash production devices), so flipping it is a cross-cutting
+     * change with regression surface well beyond this file.  Per the audit
+     * mandate it is DEFERRED rather than applied here; the mitigations above
+     * keep the current code safe in the meantime. */
     rc = wc_AesGcmDecrypt(&aes,
                           ciphertext, ciphertext, plaintext_len,
                           iv, OTA_IV_LEN,

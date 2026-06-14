@@ -26,11 +26,43 @@ void test_valid_returns_noop(void)
 }
 
 /* NEW image -- bootloader has not yet received mark-valid; treat same as
- * PENDING_VERIFY to prevent unexpected rollback if the app crashes later. */
+ * PENDING_VERIFY to prevent unexpected rollback if the app crashes later.
+ *
+ * OTA-F5 regression: this is the factory-image safety net documented in
+ * rollback_decision.c.  A factory-flashed slot has no otadata, so ESP-IDF can
+ * report ESP_OTA_IMG_NEW instead of ESP_OTA_IMG_PENDING_VERIFY; the decision
+ * must still be MARK_VALID.  The README must match this behaviour (it previously
+ * claimed MARK_VALID was returned ONLY for PENDING_VERIFY). */
 void test_new_returns_mark_valid(void)
 {
     TEST_ASSERT_EQUAL_INT(ROLLBACK_DECISION_MARK_VALID,
                           rollback_decide(ESP_OTA_IMG_NEW));
+}
+
+/* OTA-F5 contract lock: exactly two states map to MARK_VALID (NEW and
+ * PENDING_VERIFY); every other defined state maps to NOOP.  If a future change
+ * adds or removes a MARK_VALID state without updating the README, this fails. */
+void test_exactly_two_mark_valid_states(void)
+{
+    const esp_ota_img_states_t all_states[] = {
+        ESP_OTA_IMG_NEW,
+        ESP_OTA_IMG_PENDING_VERIFY,
+        ESP_OTA_IMG_VALID,
+        ESP_OTA_IMG_INVALID,
+        ESP_OTA_IMG_ABORTED,
+        ESP_OTA_IMG_UNDEFINED,
+    };
+    int mark_valid_count = 0;
+    for (int i = 0; i < (int)(sizeof(all_states)/sizeof(all_states[0])); i++) {
+        if (rollback_decide(all_states[i]) == ROLLBACK_DECISION_MARK_VALID)
+            mark_valid_count++;
+    }
+    TEST_ASSERT_EQUAL_INT(2, mark_valid_count);
+    /* And confirm WHICH two they are. */
+    TEST_ASSERT_EQUAL_INT(ROLLBACK_DECISION_MARK_VALID,
+                          rollback_decide(ESP_OTA_IMG_NEW));
+    TEST_ASSERT_EQUAL_INT(ROLLBACK_DECISION_MARK_VALID,
+                          rollback_decide(ESP_OTA_IMG_PENDING_VERIFY));
 }
 
 /* INVALID -> no-op (shouldn't happen at runtime but must be safe) */
@@ -150,6 +182,7 @@ int main(void)
     RUN_TEST(test_pending_verify_returns_mark_valid);
     RUN_TEST(test_valid_returns_noop);
     RUN_TEST(test_new_returns_mark_valid);
+    RUN_TEST(test_exactly_two_mark_valid_states);
     RUN_TEST(test_invalid_returns_noop);
     RUN_TEST(test_aborted_returns_noop);
     RUN_TEST(test_undefined_returns_noop);

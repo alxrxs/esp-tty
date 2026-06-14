@@ -42,6 +42,7 @@
 #include "cred_store.h"
 #include "scep_enroll.h"
 #include "wifi.h"     /* smart_eap_apply_creds() */
+#include "zeroize.h"  /* secure wipe of RSA-2048 dev_key before free */
 
 static const char *TAG = "cert_renew";
 
@@ -93,6 +94,9 @@ static void cert_renewer_task(void *arg)
                                                   MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
     if (!creds_p || !new_creds_p) {
         ESP_LOGE(TAG, "failed to allocate cred_store_t -- exiting renewal task");
+        /* No zeroize needed here: the buffers come straight from calloc and
+         * have never been populated with key material (cred_store_load has not
+         * run yet).  heap_caps_free is NULL-safe. */
         heap_caps_free(creds_p);
         heap_caps_free(new_creds_p);
         atomic_store(&s_task_running, false);
@@ -101,8 +105,11 @@ static void cert_renewer_task(void *arg)
     }
 
     for (;;) {
-        /* -- 1. Load current credentials from NVS. */
-        memset(creds_p, 0, sizeof(*creds_p));
+        /* -- 1. Load current credentials from NVS.
+         * zeroize() (not memset) wipes any RSA-2048 dev_key left from a prior
+         * loop iteration; memset on a struct about to be overwritten can be
+         * dead-store-eliminated, leaking the previous key material. */
+        zeroize(creds_p, sizeof(*creds_p));
         esp_err_t load_err = cred_store_load(creds_p);
 
         if (load_err == ESP_ERR_NVS_NOT_FOUND) {
@@ -201,8 +208,10 @@ static void cert_renewer_task(void *arg)
                       "reloading creds and reconfiguring EAP supplicant",
                  (unsigned)elapsed_ms);
 
-        /* -- 4. Reload freshly written credentials. */
-        memset(new_creds_p, 0, sizeof(*new_creds_p));
+        /* -- 4. Reload freshly written credentials.
+         * zeroize() (not memset) so any RSA-2048 dev_key from a prior reload
+         * is securely wiped and not dead-store-eliminated before the overwrite. */
+        zeroize(new_creds_p, sizeof(*new_creds_p));
         esp_err_t reload_err = cred_store_load(new_creds_p);
         if (reload_err != ESP_OK) {
             ESP_LOGE(TAG, "cred_store_load after successful enrollment "
@@ -265,6 +274,13 @@ static void cert_renewer_task(void *arg)
     }
 
 task_done:
+    /* creds_p / new_creds_p each hold an RSA-2048 dev_key (PKCS#8 DER).
+     * Wipe with zeroize() before releasing so the private key is not left
+     * in freed internal RAM for a later allocation to read back.  zeroize()
+     * (not memset) is mandatory here: the buffer is freed immediately after,
+     * so a plain memset would be a dead store the compiler may elide. */
+    zeroize(creds_p, sizeof(*creds_p));
+    zeroize(new_creds_p, sizeof(*new_creds_p));
     heap_caps_free(creds_p);
     heap_caps_free(new_creds_p);
     atomic_store(&s_task_running, false);
