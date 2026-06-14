@@ -523,6 +523,154 @@ void test_accum_append_zero_len_ignored(void)
     TEST_ASSERT_EQUAL_UINT32(0, g_acc_seq); /* nothing flushed */
 }
 
+/* ==========================================================================
+ * Deinit-ordering harness -- mirrors the udp_log_deinit() / flush_task_fn
+ * teardown join (S-F3).
+ * ==========================================================================
+ *
+ * The real code (udp_log.c) cannot be compiled natively (FreeRTOS + lwIP),
+ * so -- like the harnesses above -- we model the ordering invariant inline.
+ *
+ * Invariant under test: udp_log_deinit() must JOIN the flush task before it
+ * frees the objects the task references (s_acc_mutex, s_sock).  Concretely:
+ *
+ *   flush_task_fn:  ... drop s_acc_mutex ... give(s_flush_done) ... delete
+ *   udp_log_deinit: s_running=false; take(s_flush_done); close(fd); del(mutex)
+ *
+ * If deinit ever freed the mutex/socket BEFORE the join completes, the task
+ * (blocked on the mutex / mid-sendto) would touch freed objects -> UAF.
+ *
+ * We model the timeline with an ordered event log and a one-slot "done"
+ * flag that stands in for s_flush_done.  The harness verifies:
+ *   - mutex/socket are freed only AFTER the task signalled done
+ *   - on the timeout path, nothing the task references is freed
+ * ========================================================================== */
+
+/* Stand-in for s_flush_done: 0 = not signalled, 1 = task signalled exit. */
+static int  g_di_done_flag      = 0;
+/* Stand-in for s_running. */
+static int  g_di_running        = 0;
+/* Resource liveness: 1 while the mutex/socket are still allocated. */
+static int  g_di_mutex_alive    = 0;
+static int  g_di_socket_alive   = 0;
+/* Records whether the task was still "using" the mutex when it was freed. */
+static int  g_di_uaf_detected   = 0;
+/* Did the task self-signal before deinit freed resources? */
+static int  g_di_task_signalled_before_free = 0;
+
+static void di_reset(void)
+{
+    g_di_done_flag    = 0;
+    g_di_running      = 1;
+    g_di_mutex_alive  = 1;
+    g_di_socket_alive = 1;
+    g_di_uaf_detected = 0;
+    g_di_task_signalled_before_free = 0;
+}
+
+/* Mirrors flush_task_fn's exit path: after observing !running and dropping
+ * the mutex, give done, then self-delete.  Returns after "self-delete". */
+static void di_flush_task_run_to_exit(void)
+{
+    /* Loop body would run while running; we model the exit transition. */
+    while (g_di_running) {
+        /* take mutex, maybe flush, give mutex -- all require the mutex to be
+         * alive.  If deinit freed it while we were here, that's a UAF. */
+        if (!g_di_mutex_alive) { g_di_uaf_detected = 1; return; }
+        break;  /* one modelled iteration, then re-check running below */
+    }
+    /* running cleared: drop mutex (already given), signal done, self-delete. */
+    g_di_done_flag = 1;  /* give(s_flush_done) AFTER releasing the mutex */
+}
+
+/* Mirrors udp_log_deinit(): clear running, JOIN on done, THEN free. */
+static int di_deinit(int join_succeeds)
+{
+    g_di_running = 0;
+
+    /* Let the flush task run to its exit (cooperative model). */
+    di_flush_task_run_to_exit();
+
+    /* Join: only proceed to free if the task signalled done. */
+    if (join_succeeds && g_di_done_flag) {
+        g_di_task_signalled_before_free = 1;
+        /* Safe to free now. */
+        g_di_socket_alive = 0;
+        g_di_mutex_alive  = 0;
+        return 1;   /* clean teardown */
+    }
+
+    if (!g_di_done_flag) {
+        /* Timeout path: must NOT free what the task might still touch. */
+        return 0;
+    }
+    return 1;
+}
+
+/* Models udp_log_deinit() when the flush task never signals (join times
+ * out): clear running, the task is stuck so done stays 0, and deinit must
+ * leave the mutex/socket allocated rather than risk a UAF. */
+static int di_deinit_no_signal(void)
+{
+    g_di_running = 0;
+    /* Task is modelled as stuck: it does NOT run to its exit, so done stays
+     * 0.  (We deliberately skip di_flush_task_run_to_exit() here.) */
+    if (g_di_done_flag) {           /* join would succeed -- not this case */
+        g_di_task_signalled_before_free = 1;
+        g_di_socket_alive = 0;
+        g_di_mutex_alive  = 0;
+        return 1;
+    }
+    /* Timeout: leave resources alive. */
+    return 0;
+}
+
+/* Deinit joins (waits for the task's done-signal) before freeing the
+ * mutex/socket -- the core S-F3 invariant. */
+void test_deinit_joins_before_free(void)
+{
+    di_reset();
+    int rc = di_deinit(/*join_succeeds=*/1);
+
+    TEST_ASSERT_EQUAL_INT(1, rc);                 /* clean teardown */
+    TEST_ASSERT_EQUAL_INT(1, g_di_task_signalled_before_free);
+    TEST_ASSERT_EQUAL_INT(0, g_di_uaf_detected);  /* no use-after-free */
+    TEST_ASSERT_EQUAL_INT(0, g_di_mutex_alive);   /* freed AFTER join */
+    TEST_ASSERT_EQUAL_INT(0, g_di_socket_alive);
+}
+
+/* The flush task signals done only AFTER it has stopped using the mutex --
+ * so the freed-flag is never set before the done-flag. */
+void test_deinit_done_signalled_after_mutex_released(void)
+{
+    di_reset();
+    /* Run only the task half: it must set done with the mutex still alive
+     * (it released the lock but the object is not yet freed by deinit). */
+    g_di_running = 0;
+    di_flush_task_run_to_exit();
+    TEST_ASSERT_EQUAL_INT(1, g_di_done_flag);
+    TEST_ASSERT_EQUAL_INT(0, g_di_uaf_detected);
+    /* deinit hasn't freed anything yet. */
+    TEST_ASSERT_EQUAL_INT(1, g_di_mutex_alive);
+}
+
+/* Timeout path: if the join never completes, deinit must NOT free the
+ * mutex/socket (leak-but-safe), avoiding a use-after-free. */
+void test_deinit_timeout_does_not_free(void)
+{
+    di_reset();
+    /* Simulate a task that never signals: keep running so the modelled
+     * exit path doesn't set done, and force join failure. */
+    g_di_done_flag = 0;
+    int rc = di_deinit_no_signal();
+
+    TEST_ASSERT_EQUAL_INT(0, rc);                 /* timeout reported */
+    TEST_ASSERT_EQUAL_INT(0, g_di_task_signalled_before_free);
+    /* Crucially: resources NOT freed -> no UAF against the live task. */
+    TEST_ASSERT_EQUAL_INT(1, g_di_mutex_alive);
+    TEST_ASSERT_EQUAL_INT(1, g_di_socket_alive);
+}
+
 /* --------------------------------------------------------------------------
  * Test runner
  * -------------------------------------------------------------------------- */
@@ -556,6 +704,11 @@ int main(void)
     RUN_TEST(test_accum_sequence_large_count);
     RUN_TEST(test_accum_fd_goes_down_mid_stream);
     RUN_TEST(test_accum_append_zero_len_ignored);
+
+    /* Deinit-ordering join (S-F3) */
+    RUN_TEST(test_deinit_joins_before_free);
+    RUN_TEST(test_deinit_done_signalled_after_mutex_released);
+    RUN_TEST(test_deinit_timeout_does_not_free);
 
     return UNITY_END();
 }

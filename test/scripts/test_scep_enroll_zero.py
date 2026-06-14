@@ -869,10 +869,21 @@ class TestEnvVarOverrideMatrix:
         assert sig.parameters["output_dir"].default is _m._ENV_DEFAULT
 
     def test_scep_output_dir_unset_is_project_main_certs(self):
-        """Test 33: SCEP_OUTPUT_DIR unset → default contains 'main/certs' in source."""
-        import inspect
-        src = inspect.getsource(_m.do_enroll)
-        assert "main/certs" in src
+        """Test 33: SCEP_OUTPUT_DIR unset → default is the repo-relative
+        main/certs (resolved from __file__, not a hardcoded absolute path).
+
+        S-F4 moved the literal out of do_enroll() into the module-level
+        _CERTS_DIR constant; assert the constant points at <repo>/main/certs.
+        """
+        assert hasattr(_m, "_CERTS_DIR"), "_CERTS_DIR constant missing (S-F4)"
+        assert _m._CERTS_DIR.replace(os.sep, "/").endswith("main/certs"), \
+            f"_CERTS_DIR={_m._CERTS_DIR!r} should end with main/certs"
+        # And it must be derived relative to the script, not hardcoded.
+        expected = os.path.normpath(
+            os.path.abspath(os.path.join(_PROJECT_DIR, "main", "certs"))
+        )
+        assert os.path.normpath(os.path.abspath(_m._CERTS_DIR)) == expected, \
+            f"_CERTS_DIR={_m._CERTS_DIR!r} should resolve to {expected!r}"
 
     def test_all_four_env_vars_set_together(self):
         """Test 34: all four env var sentinels are _ENV_DEFAULT in function signature."""

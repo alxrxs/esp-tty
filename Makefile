@@ -211,11 +211,16 @@ endif
 # Pure-Python tests for scripts/: no hardware, no network, no SSH.
 # Covers scripts/apply_managed_patches_cmake.py and the OTA wire protocol
 # (scripts/ota_send.py via test/scripts/test_ota_send_unit.py +
-# test/scripts/test_ota_protocol_e2e.py).
+# test/scripts/test_ota_protocol_e2e.py), plus the build-tooling audit
+# fixes: clean_ds_store.py (S-F2), scep_enroll_zero.py path portability
+# (S-F4), and the mDNS build-matrix sentinel cleanup (S-F1).
 test-py:
 	$(PYTHON) -m pytest test/scripts/test_ota_send_unit.py \
 	                    test/scripts/test_ota_protocol_e2e.py \
-	                    test/scripts/test_scep_protocol_e2e.py -v
+	                    test/scripts/test_scep_protocol_e2e.py \
+	                    test/scripts/test_clean_ds_store.py \
+	                    test/scripts/test_scep_enroll_zero_paths.py \
+	                    test/scripts/test_mdns_matrix_cleanup.py -v
 	$(PYTHON) test/scripts/test_apply_patches.py
 
 # Aggregate: native (PlatformIO Unity) + python script tests.
@@ -298,7 +303,7 @@ flash-online:
 	    exit 1; \
 	fi
 	@echo ">> sending boot-trigger magic to $(TRIG_PORT)"
-	$(PYTHON) scripts/reboot_to_bootloader.py $(TRIG_PORT)
+	$(PYTHON) scripts/reboot_to_bootloader.py "$(TRIG_PORT)"
 	# Wait up to 6s for the ROM DFU endpoint to enumerate, then dfu-util -R.
 	@echo ">> waiting for 303a:0009 (ROM DFU)..."
 	@for i in $$(seq 1 30); do \
@@ -357,7 +362,7 @@ ota:
 	    ln -sfn config.$(DEV_ARG).h main/config.h; \
 	fi
 	$(PIO) run -e $(ENV)
-	$(PYTHON) scripts/ota_send.py $(OTA_TARGET) $(FIRMWARE_BIN)
+	$(PYTHON) scripts/ota_send.py "$(OTA_TARGET)" "$(FIRMWARE_BIN)"
 
 # Catch-all to swallow positional arguments so make doesn't try to build
 # them as targets.  Scoped to the targets that accept positionals --

@@ -33,8 +33,28 @@ fail()  { printf '[FAIL]  %s\n' "$*" >&2; exit 1; }
 
 cleanup() {
     if grep -qF "$MDNS_SENTINEL" "$CONFIG_H" 2>/dev/null; then
-        sed -i "/$MDNS_SENTINEL/d" "$CONFIG_H"
-        info "config.h restored"
+        # The sentinel contains '/' (it's a C comment), so it can't be used
+        # as a sed address delimiter.  Filter the line out with grep -vF
+        # (fixed-string, sentinel-as-needle) into a temp file, then move it
+        # back -- this restores config.h to exactly its pre-injection state.
+        #
+        # NOTE: grep -vF exits 1 when it emits NO lines (e.g. config.h held
+        # only the injected line), so we must NOT chain `&&` off it -- that
+        # would skip the mv and leave the sentinel in place.  Capture grep's
+        # status explicitly and treat 0 (matches kept) and 1 (none kept) as
+        # success; only a real error (>=2) aborts the restore.
+        tmp="$(mktemp "${CONFIG_H}.XXXXXX")"
+        # `set -e` would abort on grep's exit-1 (no lines kept), so capture
+        # the status without letting it trip the errexit trap.
+        grep_rc=0
+        grep -vF "$MDNS_SENTINEL" "$CONFIG_H" > "$tmp" || grep_rc=$?
+        if [ "$grep_rc" -le 1 ]; then
+            mv "$tmp" "$CONFIG_H"
+            info "config.h restored"
+        else
+            rm -f "$tmp"
+            fail "cleanup: grep failed (rc=$grep_rc) restoring $CONFIG_H"
+        fi
     fi
 }
 trap cleanup EXIT INT TERM
@@ -75,7 +95,16 @@ check_symbols "mDNS-off" no "$ELF_PATH"
 # ---- build 2: mDNS on (inject MDNS_ENABLE into config.h) ------------------
 
 info "Build 2/2: mDNS ON (MDNS_ENABLE injected into config.h)"
-printf '\n#define MDNS_ENABLE 1  %s\n' "$MDNS_SENTINEL" >> "$CONFIG_H"
+# Inject exactly one sentinel-tagged line so cleanup (grep -vF on the
+# sentinel) restores config.h byte-for-byte.  No leading blank line: a
+# blank line carries no sentinel and would survive the grep filter.
+# Guard against a config.h without a trailing newline (the append would
+# otherwise splice onto the last existing line) by adding a separator \n
+# only in that case.
+if [ -s "$CONFIG_H" ] && [ "$(tail -c1 "$CONFIG_H")" != "" ]; then
+    printf '\n' >> "$CONFIG_H"
+fi
+printf '#define MDNS_ENABLE 1  %s\n' "$MDNS_SENTINEL" >> "$CONFIG_H"
 
 pio run -e esp32s3 -d "$PROJECT_DIR"
 check_symbols "mDNS-on" yes "$ELF_PATH"

@@ -180,9 +180,16 @@ static void rollback_timer_cb(TimerHandle_t xTimer)
                      OTA_ROLLBACK_DELAY_MS);
             s_rollback_retried = true;
             if (xTimer != NULL) {
-                xTimerChangePeriod(xTimer,
-                                   pdMS_TO_TICKS(OTA_ROLLBACK_DELAY_MS), 0);
-                xTimerStart(xTimer, 0);
+                /* xTimerChangePeriod also (re)starts a dormant one-shot
+                 * timer, so a separate xTimerStart would be redundant.
+                 * Block ticks = 0: this runs in the timer service task, so
+                 * it must never block on its own command queue. */
+                if (xTimerChangePeriod(xTimer,
+                                       pdMS_TO_TICKS(OTA_ROLLBACK_DELAY_MS),
+                                       0) != pdPASS) {
+                    ESP_LOGE("main", "rollback retry: xTimerChangePeriod "
+                                     "failed (command queue full)");
+                }
             }
             return;
         }

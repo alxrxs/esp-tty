@@ -188,6 +188,13 @@ static char s_wire[UDP_LOG_SEQ_HDR_MAX + UDP_LOG_DGRAM_MAX];
 static TaskHandle_t s_flush_task = NULL;
 static _Atomic bool s_running   = false;
 
+/* Binary semaphore the flush task gives right before it self-deletes, so
+ * udp_log_deinit() can join (wait for the task to have actually stopped
+ * touching s_acc_mutex / s_sock) before deleting them.  Without this join
+ * deinit could free the mutex while the flush task is still blocked on it
+ * (use-after-free).  Created in udp_log_init, deleted in udp_log_deinit. */
+static SemaphoreHandle_t s_flush_done = NULL;
+
 /* True after udp_log_init() installs the hook. */
 static _Atomic bool s_installed = false;
 
@@ -373,7 +380,14 @@ static void flush_task_fn(void *arg)
         xSemaphoreGive(s_acc_mutex);
     }
 
+    /* Loop has observed s_running == false and we are no longer holding
+     * s_acc_mutex; signal udp_log_deinit() that it is now safe to delete the
+     * mutex/socket, then self-delete.  The give must happen AFTER the final
+     * xSemaphoreGive above so deinit never frees the mutex mid-acquire. */
     s_flush_task = NULL;
+    if (s_flush_done) {
+        xSemaphoreGive(s_flush_done);
+    }
     vTaskDelete(NULL);
 }
 
@@ -389,9 +403,11 @@ esp_err_t udp_log_init(void)
 
     s_init_mutex = xSemaphoreCreateMutex();
     s_acc_mutex  = xSemaphoreCreateMutex();
-    if (!s_init_mutex || !s_acc_mutex) {
+    s_flush_done = xSemaphoreCreateBinary();
+    if (!s_init_mutex || !s_acc_mutex || !s_flush_done) {
         if (s_init_mutex) { vSemaphoreDelete(s_init_mutex); s_init_mutex = NULL; }
         if (s_acc_mutex)  { vSemaphoreDelete(s_acc_mutex);  s_acc_mutex  = NULL; }
+        if (s_flush_done) { vSemaphoreDelete(s_flush_done); s_flush_done = NULL; }
         atomic_store(&s_installed, false);
         return ESP_FAIL;
     }
@@ -402,8 +418,10 @@ esp_err_t udp_log_init(void)
         atomic_store(&s_running, false);
         vSemaphoreDelete(s_init_mutex);
         vSemaphoreDelete(s_acc_mutex);
+        vSemaphoreDelete(s_flush_done);
         s_init_mutex = NULL;
         s_acc_mutex  = NULL;
+        s_flush_done = NULL;
         atomic_store(&s_installed, false);
         return ESP_FAIL;
     }
@@ -418,12 +436,47 @@ void udp_log_deinit(void)
      * nothing to tear down. */
     if (!atomic_exchange(&s_installed, false)) return;
 
+    /* Restore the previous vprintf first so no new log lines reach the hook
+     * (and thus stop touching s_acc_mutex / s_sock) once we start tearing
+     * down.  esp_log_set_vprintf is itself serialised by the logging lock. */
     esp_log_set_vprintf(s_prev_vprintf);
     s_prev_vprintf = NULL;
 
-    /* Tell the flush task to exit; it will self-delete on the next tick. */
+    /* Tell the flush task to exit, then JOIN it before freeing anything it
+     * touches.  The task blocks on s_acc_mutex with portMAX_DELAY and may be
+     * mid-flush; deleting the mutex/socket out from under it would be a
+     * use-after-free.  It gives s_flush_done once it has dropped the mutex
+     * and is about to self-delete.
+     *
+     * Bounded wait: the task wakes every UDP_LOG_POLL_MS and only ever holds
+     * the mutex briefly, so a few poll cycles is the realistic worst case.
+     * We allow generous slack and proceed (with a warning) on the unexpected
+     * timeout rather than blocking the caller forever. */
     atomic_store(&s_running, false);
 
+    if (s_flush_done) {
+        const TickType_t join_to =
+            pdMS_TO_TICKS(UDP_LOG_POLL_MS * 4 + UDP_LOG_FLUSH_TIMEOUT_MS + 100);
+        if (xSemaphoreTake(s_flush_done, join_to) != pdTRUE) {
+            /* The previous vprintf is already restored via s_prev_vprintf,
+             * so ESP_LOGW here is safe (it will not re-enter this module). */
+            ESP_LOGW("udp_log",
+                     "deinit: flush task did not signal exit within timeout; "
+                     "leaking mutex/socket to avoid use-after-free");
+            /* Do NOT delete the mutex/socket -- the task may still be using
+             * them.  Drop our handles so we don't double-free on a later
+             * init/deinit cycle; the orphaned objects are a small bounded
+             * leak, strictly safer than a UAF. */
+            s_flush_done = NULL;
+            s_init_mutex = NULL;
+            s_acc_mutex  = NULL;
+            return;
+        }
+        vSemaphoreDelete(s_flush_done);
+        s_flush_done = NULL;
+    }
+
+    /* The flush task has exited; safe to free everything it referenced. */
     int fd = atomic_exchange(&s_sock, -1);
     if (fd >= 0) {
         close(fd);

@@ -11,6 +11,11 @@ from scep.Client.client import Client
 from scep.Client.signingrequest import SigningRequest
 from scep.Client.responses import CACertificates
 
+# Resolve paths relative to this script's location so the tool works on any
+# machine, not just the one it was authored on.  scripts/ -> ../main/certs.
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_CERTS_DIR  = os.path.normpath(os.path.join(_SCRIPT_DIR, "..", "main", "certs"))
+
 # PyScep 0.0.14 bug: CACertificates._filter compares cert.is_ca (None for
 # non-CA certs) against ca_only (False), and None != False is True in Python,
 # so non-CA certs get incorrectly rejected.  Patch _filter to coerce.
@@ -104,8 +109,7 @@ def do_enroll(scep_url=_ENV_DEFAULT,
         password = password.strip()
 
     if output_dir is _ENV_DEFAULT:
-        output_dir = os.environ.get("SCEP_OUTPUT_DIR",
-                                    "/root/esp-tty/main/certs").strip()
+        output_dir = os.environ.get("SCEP_OUTPUT_DIR", _CERTS_DIR).strip()
     else:
         output_dir = output_dir.strip()
 
@@ -146,8 +150,12 @@ def do_enroll(scep_url=_ENV_DEFAULT,
 
     # Trust our embedded CA bundle for the SCEP server's TLS connection.
     # Moved here (from module level) so callers can set env vars after import.
-    os.environ.setdefault("REQUESTS_CA_BUNDLE",
-                          "/root/esp-tty/main/certs/scep_ca.pem")
+    # Only point REQUESTS_CA_BUNDLE at the bundle if it actually exists --
+    # setting it to a missing path makes requests raise SSLError and disables
+    # the system trust store entirely.  Path is repo-relative, not hardcoded.
+    _ca_bundle = os.path.join(_CERTS_DIR, "scep_ca.pem")
+    if os.path.isfile(_ca_bundle):
+        os.environ.setdefault("REQUESTS_CA_BUNDLE", _ca_bundle)
 
     # 3. NDES round-trip
     print(">>> calling NDES ...")
