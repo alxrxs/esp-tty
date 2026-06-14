@@ -370,6 +370,105 @@ void test_auth_check_single_bit_flip_rejected(void)
 }
 
 /* ===================================================================
+ * SHA-256 failure handling (SSH-F1)
+ *
+ * The native sha256.h stub exposes one-shot fault-injection flags
+ * (wc_sha256_fail_at_{init,update,final}) so we can exercise the failure
+ * paths that real hardware can hit (HW-accel busy/timeout, SW OOM).  Each
+ * flag is consumed by the call it trips.
+ *
+ * Property under test: if ANY SHA-256 step fails, the auth/hash helpers must
+ * NOT report success against an indeterminate digest.
+ *   - pubkey_compute_hash  -> false
+ *   - pubkey_auth_check    -> PUBKEY_AUTH_REJECTED
+ * =================================================================== */
+
+extern int wc_sha256_fail_at_init;
+extern int wc_sha256_fail_at_update;
+extern int wc_sha256_fail_at_final;
+
+void test_compute_hash_rejects_sha_init_failure(void)
+{
+    uint8_t hash[32];
+    wc_sha256_fail_at_init = 1;
+    TEST_ASSERT_FALSE(pubkey_compute_hash(TEST_PUBKEY, hash));
+    /* flag must have been consumed */
+    TEST_ASSERT_EQUAL_INT(0, wc_sha256_fail_at_init);
+}
+
+void test_compute_hash_rejects_sha_update_failure(void)
+{
+    uint8_t hash[32];
+    wc_sha256_fail_at_update = 1;
+    TEST_ASSERT_FALSE(pubkey_compute_hash(TEST_PUBKEY, hash));
+    TEST_ASSERT_EQUAL_INT(0, wc_sha256_fail_at_update);
+}
+
+void test_compute_hash_rejects_sha_final_failure(void)
+{
+    uint8_t hash[32];
+    wc_sha256_fail_at_final = 1;
+    TEST_ASSERT_FALSE(pubkey_compute_hash(TEST_PUBKEY, hash));
+    TEST_ASSERT_EQUAL_INT(0, wc_sha256_fail_at_final);
+}
+
+void test_auth_check_rejects_on_sha_init_failure(void)
+{
+    /* Pre-compute the correct expected hash with SHA working normally. */
+    uint8_t expected[32];
+    TEST_ASSERT_TRUE(pubkey_compute_hash(TEST_PUBKEY, expected));
+
+    /* Now make the auth-check's internal SHA-init fail: even the *correct*
+     * key must be REJECTED rather than mis-authenticated against garbage. */
+    wc_sha256_fail_at_init = 1;
+    pubkey_auth_result_t r = pubkey_auth_check(TEST_BLOB, sizeof(TEST_BLOB),
+                                               expected);
+    TEST_ASSERT_EQUAL_INT(PUBKEY_AUTH_REJECTED, r);
+    TEST_ASSERT_EQUAL_INT(0, wc_sha256_fail_at_init);
+}
+
+void test_auth_check_rejects_on_sha_update_failure(void)
+{
+    uint8_t expected[32];
+    TEST_ASSERT_TRUE(pubkey_compute_hash(TEST_PUBKEY, expected));
+
+    wc_sha256_fail_at_update = 1;
+    pubkey_auth_result_t r = pubkey_auth_check(TEST_BLOB, sizeof(TEST_BLOB),
+                                               expected);
+    TEST_ASSERT_EQUAL_INT(PUBKEY_AUTH_REJECTED, r);
+    TEST_ASSERT_EQUAL_INT(0, wc_sha256_fail_at_update);
+}
+
+void test_auth_check_rejects_on_sha_final_failure(void)
+{
+    uint8_t expected[32];
+    TEST_ASSERT_TRUE(pubkey_compute_hash(TEST_PUBKEY, expected));
+
+    wc_sha256_fail_at_final = 1;
+    pubkey_auth_result_t r = pubkey_auth_check(TEST_BLOB, sizeof(TEST_BLOB),
+                                               expected);
+    TEST_ASSERT_EQUAL_INT(PUBKEY_AUTH_REJECTED, r);
+    TEST_ASSERT_EQUAL_INT(0, wc_sha256_fail_at_final);
+}
+
+void test_auth_check_recovers_after_sha_failure(void)
+{
+    /* The fault flags are one-shot.  After a failure trips and clears, a
+     * subsequent legitimate auth with the correct key must succeed again --
+     * i.e. the failure handling does not leave the SHA state poisoned. */
+    uint8_t expected[32];
+    TEST_ASSERT_TRUE(pubkey_compute_hash(TEST_PUBKEY, expected));
+
+    wc_sha256_fail_at_final = 1;
+    TEST_ASSERT_EQUAL_INT(PUBKEY_AUTH_REJECTED,
+        pubkey_auth_check(TEST_BLOB, sizeof(TEST_BLOB), expected));
+
+    /* No flag set now -> normal success. */
+    TEST_ASSERT_EQUAL_INT(PUBKEY_AUTH_OK,
+        pubkey_auth_check(TEST_BLOB, sizeof(TEST_BLOB), expected));
+}
+
+/* ===================================================================
  * format_fingerprint() tests
  * =================================================================== */
 
@@ -676,6 +775,14 @@ int main(void)
     RUN_TEST(test_auth_check_rejects_zero_length_key);
     RUN_TEST(test_auth_check_differs_for_different_blob);
     RUN_TEST(test_auth_check_single_bit_flip_rejected);
+    /* SHA-256 failure handling (SSH-F1) */
+    RUN_TEST(test_compute_hash_rejects_sha_init_failure);
+    RUN_TEST(test_compute_hash_rejects_sha_update_failure);
+    RUN_TEST(test_compute_hash_rejects_sha_final_failure);
+    RUN_TEST(test_auth_check_rejects_on_sha_init_failure);
+    RUN_TEST(test_auth_check_rejects_on_sha_update_failure);
+    RUN_TEST(test_auth_check_rejects_on_sha_final_failure);
+    RUN_TEST(test_auth_check_recovers_after_sha_failure);
     /* format_fingerprint() tests */
     RUN_TEST(test_format_fingerprint_known_value);
     RUN_TEST(test_format_fingerprint_all_ff);

@@ -225,26 +225,76 @@ void test_ka_inbound_after_drop_resets_and_resumes(void)
         ssh_keepalive_tick(&ka, 7000, false));
 }
 
-/* --- count_max == 0: "unanswered >= count_max" is immediately true (0 >= 0)
- *     so the first tick with no inbound returns DROP.  This is a degenerate
- *     configuration: zero tolerance means instant drop.  Document this. ------- */
+/* --- count_max == 0: drop disabled.  (SSH-F5)
+ *
+ * Regression test for the spurious-drop bug: before the fix
+ * `unanswered >= count_max` was 0 >= 0 -> true on the first tick, tearing
+ * down every session immediately.  count_max==0 now means "never drop"; the
+ * keepalive still sends probes on the interval but never returns SSH_KA_DROP. */
 
-void test_ka_count_max_zero_drops_immediately(void)
+void test_ka_count_max_zero_never_drops(void)
 {
-    /* With count_max == 0:
-     *   unanswered (0) >= count_max (0)  ->  DROP on every tick with no inbound.
-     * This is a documented corner case of the implementation. */
     ssh_keepalive_t ka = make_ka(1000, 0);
 
-    /* Even at tick 1 (before any interval has elapsed) we get DROP. */
-    TEST_ASSERT_EQUAL_INT(SSH_KA_DROP,
+    /* Before any interval elapses, no inbound: must NOT drop. */
+    TEST_ASSERT_EQUAL_INT(SSH_KA_IDLE,
         ssh_keepalive_tick(&ka, 1, false));
 
-    /* Inbound resets unanswered to 0, but then the very next tick still DROPs
-     * because 0 >= 0. */
-    ssh_keepalive_tick(&ka, 500, true);   /* inbound: unanswered = 0 */
-    TEST_ASSERT_EQUAL_INT(SSH_KA_DROP,
-        ssh_keepalive_tick(&ka, 2000, false));
+    /* At the interval: probe is due -> SEND, never DROP. */
+    TEST_ASSERT_EQUAL_INT(SSH_KA_SEND,
+        ssh_keepalive_tick(&ka, 1000, false));
+}
+
+void test_ka_count_max_zero_no_drop_after_many_unanswered(void)
+{
+    /* Even after a large number of unanswered probes, count_max==0 never DROPs.
+     * It keeps sending on the interval (the unresponsive-peer teardown is the
+     * piece that is disabled, not the probing itself). */
+    ssh_keepalive_t ka = make_ka(1000, 0);
+
+    for (uint32_t i = 1; i <= 100; i++)
+        ssh_keepalive_sent(&ka, i * 1000);
+    TEST_ASSERT_EQUAL_UINT32(100, ka.unanswered);
+
+    /* Far in the future, still no inbound: must be SEND (probe due), not DROP. */
+    ssh_ka_action_t act = ssh_keepalive_tick(&ka, 1000000, false);
+    TEST_ASSERT_EQUAL_INT(SSH_KA_SEND, act);
+    TEST_ASSERT_NOT_EQUAL(SSH_KA_DROP, act);
+}
+
+void test_ka_count_max_zero_inbound_still_idle(void)
+{
+    /* count_max==0 with inbound activity stays IDLE (counter reset), no DROP. */
+    ssh_keepalive_t ka = make_ka(1000, 0);
+    TEST_ASSERT_EQUAL_INT(SSH_KA_IDLE,
+        ssh_keepalive_tick(&ka, 500, true));
+    TEST_ASSERT_EQUAL_UINT32(0, ka.unanswered);
+}
+
+/* --- Normal config (count_max=3): full probe -> retry -> drop sequence ----
+ *
+ * End-to-end check that a non-degenerate keepalive still behaves correctly
+ * after the count_max==0 guard was added: probe at the interval, retry on each
+ * subsequent interval, and DROP once count_max unanswered probes accumulate. */
+void test_ka_normal_probe_then_drop_sequence(void)
+{
+    ssh_keepalive_t ka = make_ka(1000, 3);
+
+    /* Probe 1 at the interval. */
+    TEST_ASSERT_EQUAL_INT(SSH_KA_SEND, ssh_keepalive_tick(&ka, 1000, false));
+    ssh_keepalive_sent(&ka, 1000);
+
+    /* Probe 2 one interval after the first send. */
+    TEST_ASSERT_EQUAL_INT(SSH_KA_SEND, ssh_keepalive_tick(&ka, 2000, false));
+    ssh_keepalive_sent(&ka, 2000);
+
+    /* Probe 3 one interval later. */
+    TEST_ASSERT_EQUAL_INT(SSH_KA_SEND, ssh_keepalive_tick(&ka, 3000, false));
+    ssh_keepalive_sent(&ka, 3000);
+    TEST_ASSERT_EQUAL_UINT32(3, ka.unanswered);
+
+    /* Now at count_max unanswered: next tick must DROP, not SEND. */
+    TEST_ASSERT_EQUAL_INT(SSH_KA_DROP, ssh_keepalive_tick(&ka, 4000, false));
 }
 
 /* --- Large interval (near UINT32_MAX/2) -- must not overflow comparison --- */
@@ -462,7 +512,11 @@ int main(void)
     RUN_TEST(test_ka_sent_increments_unanswered);
     RUN_TEST(test_ka_drop_is_sticky_after_count_max);
     RUN_TEST(test_ka_inbound_after_drop_resets_and_resumes);
-    RUN_TEST(test_ka_count_max_zero_drops_immediately);
+    /* count_max==0: drop disabled (SSH-F5) */
+    RUN_TEST(test_ka_count_max_zero_never_drops);
+    RUN_TEST(test_ka_count_max_zero_no_drop_after_many_unanswered);
+    RUN_TEST(test_ka_count_max_zero_inbound_still_idle);
+    RUN_TEST(test_ka_normal_probe_then_drop_sequence);
     /* Additional edge cases */
     RUN_TEST(test_ka_large_interval_no_spurious_send);
     RUN_TEST(test_ka_large_interval_exact_boundary_sends);

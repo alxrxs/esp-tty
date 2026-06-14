@@ -1,8 +1,28 @@
 /*
  * wolfssh_options.h -- wolfSSH + wolfSSL user settings for esp-tty
  *
- * Included via WOLFSSL_USER_SETTINGS (set in CMakeLists / platformio.ini).
- * Defines the minimum feature set for ED25519 host key + pubkey auth.
+ * =====================================================================
+ *  STALE / NOT COMPILED -- DO NOT EDIT TO CHANGE BUILD BEHAVIOUR.
+ * =====================================================================
+ *
+ * This file is NOT part of any build.  wolfSSL is configured exclusively
+ * through:
+ *
+ *     components/wolfssl/include/user_settings.h
+ *
+ * which the wolfssl managed component locates at compile time via
+ * -DWOLFSSL_USER_SETTINGS_DIR="<project>/include/user_settings.h"
+ * (see managed_components/wolfssl__wolfssl/CMakeLists.txt).  No C source,
+ * CMakeLists, or platformio.ini #includes or references THIS file, and the
+ * two files have since diverged substantially (the live one additionally
+ * sets NO_TLS / WOLFCRYPT_ONLY, HAVE_AESGCM, HAVE_HKDF, NO_AES_192, the
+ * wolfSSH cipher-hardening flags, and enables ESP32 HW crypto).
+ *
+ * It is kept only because main/README.md still references it by name.
+ * To change actual crypto settings, edit components/wolfssl/include/
+ * user_settings.h -- editing this file has no effect on the firmware.
+ *
+ * (SSH-F4: verified stale + uncompiled.)
  */
 
 #pragma once

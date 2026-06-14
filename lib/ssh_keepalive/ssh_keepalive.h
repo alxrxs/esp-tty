@@ -32,7 +32,8 @@ typedef enum {
 
 typedef struct {
     uint32_t interval_ticks;  /* ticks between probes (0 = disabled) */
-    uint32_t count_max;       /* probes before drop */
+    uint32_t count_max;       /* unanswered probes before drop
+                               * (0 = never drop; probes still sent) */
 
     uint32_t last_activity;   /* tick of most-recent inbound data */
     uint32_t last_send;       /* tick of most-recent probe sent */
@@ -40,7 +41,9 @@ typedef struct {
 } ssh_keepalive_t;
 
 /*
- * Initialise state.  interval_ticks=0 disables keepalives entirely.
+ * Initialise state.  interval_ticks=0 disables keepalives entirely (no probes,
+ * no drops).  count_max=0 keeps probing on the interval but NEVER escalates to
+ * SSH_KA_DROP (the unresponsive-peer teardown is disabled).
  * now_ticks is the current tick (sets the baseline activity timestamp).
  * Pass FreeRTOS ticks directly (e.g. pdMS_TO_TICKS(ms)); the value is
  * stored as-is into ka->interval_ticks with no conversion.

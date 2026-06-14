@@ -29,8 +29,12 @@ ssh_ka_action_t ssh_keepalive_tick(ssh_keepalive_t *ka,
         return SSH_KA_IDLE;
     }
 
-    /* Check drop first: if we already hit count_max, keep returning DROP. */
-    if (ka->unanswered >= ka->count_max)
+    /* count_max == 0 means "never drop on unanswered probes" (drop disabled).
+     * Without this guard `unanswered >= count_max` is 0 >= 0 -> true on the
+     * very first tick, which would tear down every session immediately even
+     * though no probe has gone unanswered.  We still send probes on the normal
+     * interval; we just never escalate to SSH_KA_DROP.  (SSH-F5) */
+    if (ka->count_max != 0 && ka->unanswered >= ka->count_max)
         return SSH_KA_DROP;
 
     /* Time since whichever reference point is more recent: last inbound

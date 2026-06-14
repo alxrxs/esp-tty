@@ -68,11 +68,27 @@ bool pubkey_compute_hash(const char *openssh_line,
     len_buf[2] = (blob_sz >>  8) & 0xFF;
     len_buf[3] = (blob_sz      ) & 0xFF;
 
-    wc_InitSha256(&sha);
-    wc_Sha256Update(&sha, len_buf, 4);
-    wc_Sha256Update(&sha, blob, blob_sz);
-    wc_Sha256Final(&sha, hash_out);
+    /* Every wolfCrypt SHA-256 call can fail (e.g. ESP32 HW-accel busy/timeout).
+     * On any failure hash_out is left indeterminate, so we must not report
+     * success -- callers compare this hash for authentication.  Free the ctx
+     * and return false so the caller treats it as "no usable hash". */
+    int ret = wc_InitSha256(&sha);
+    if (ret != 0) {
+        ESP_LOGE(TAG, "pubkey_compute_hash: wc_InitSha256 failed: %d", ret);
+        return false;
+    }
+    ret = wc_Sha256Update(&sha, len_buf, 4);
+    if (ret == 0)
+        ret = wc_Sha256Update(&sha, blob, blob_sz);
+    if (ret == 0)
+        ret = wc_Sha256Final(&sha, hash_out);
+    if (ret != 0) {
+        ESP_LOGE(TAG, "pubkey_compute_hash: SHA-256 failed: %d", ret);
+        wc_Sha256Free(&sha);
+        return false;
+    }
 
+    wc_Sha256Free(&sha);
     return true;
 }
 
@@ -95,22 +111,51 @@ pubkey_auth_result_t pubkey_auth_check(
     len_buf[2] = (sz32 >>  8) & 0xFF;
     len_buf[3] = (sz32      ) & 0xFF;
 
-    wc_InitSha256(&sha);
-    wc_Sha256Update(&sha, len_buf, 4);
-    wc_Sha256Update(&sha, presented_key, (word32)presented_key_sz);
-    wc_Sha256Final(&sha, digest);
+    /*
+     * Check every SHA-256 return code.  A wolfCrypt SHA call can fail (ESP32
+     * HW-accel busy/timeout, SW-path allocation failure).  On failure digest[]
+     * is indeterminate; comparing it constant-time against expected_hash could
+     * spuriously match (mis-auth) or, worse, leak nothing useful while still
+     * authenticating.  Treat ANY SHA failure as authentication REJECTED and
+     * free the ctx.  We do not branch on the *value* of the hash here, only on
+     * the success/failure of the digest operation, so this does not weaken the
+     * constant-time guarantee of the comparison below. */
+    int ret = wc_InitSha256(&sha);
+    if (ret != 0)
+        return PUBKEY_AUTH_REJECTED;
+    ret = wc_Sha256Update(&sha, len_buf, 4);
+    if (ret == 0)
+        ret = wc_Sha256Update(&sha, presented_key, (word32)presented_key_sz);
+    if (ret == 0)
+        ret = wc_Sha256Final(&sha, digest);
+    if (ret != 0) {
+        wc_Sha256Free(&sha);
+        return PUBKEY_AUTH_REJECTED;
+    }
+    wc_Sha256Free(&sha);
 
     /*
      * Constant-time comparison: accumulate XOR differences through a volatile
      * aggregator so the compiler cannot short-circuit the loop.  Do not use
      * memcmp() -- it may return early on the first differing byte, leaking
      * timing information about the expected hash.
+     *
+     * wolfSSL ships ConstantCompare() (wolfssl/wolfcrypt/misc.h) which is also
+     * timing-safe, but its definition lives in wolfcrypt/src/misc.c, which this
+     * firmware EXCLUDES from the wolfSSL build (see the COMPONENT_SRCEXCLUDE
+     * list and the matching ForceZero workaround in main/host_key.c).  Calling
+     * it from this application TU would be an unresolved external symbol at
+     * link time, so we keep the hardened local loop instead.  (SSH-F2)
      */
     volatile uint8_t diff = 0;
     for (size_t i = 0; i < PUBKEY_HASH_SIZE; i++)
-        diff |= digest[i] ^ expected_hash[i];
+        diff |= (uint8_t)(digest[i] ^ expected_hash[i]);
 
-    return (diff == 0) ? PUBKEY_AUTH_OK : PUBKEY_AUTH_REJECTED;
+    /* Reduce the volatile accumulator to a 0/1 mask without a data-dependent
+     * branch, then map to the result enum.  Reading `diff` once into a local
+     * keeps the comparison itself off the volatile object. */
+    uint8_t d = diff;
+    return (d == 0) ? PUBKEY_AUTH_OK : PUBKEY_AUTH_REJECTED;
 }
 
 pubkey_user_class_t pubkey_classify_user(const char *username, size_t username_sz)
