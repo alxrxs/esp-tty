@@ -391,6 +391,50 @@ static esp_netif_t *s_sta_netif = NULL;
 static bool s_psk_bootstrap_active = false;
 #endif
 
+/* Cert-renewal post-disconnect reconnect signal.
+ *
+ * Lifecycle (single-shot, edge-triggered):
+ *   1. cert_renewer calls wifi_signal_eap_creds_rotated() exactly ONCE,
+ *      then calls esp_wifi_disconnect().
+ *   2. The NEXT WIFI_EVENT_STA_DISCONNECTED event (regardless of reason)
+ *      consumes the flag via atomic_exchange and clears it.
+ *      - If the reason is ASSOC_LEAVE (the expected outcome of our own
+ *        disconnect call), the handler reconnects with the new creds.
+ *      - If the reason is anything else (e.g. AUTH_FAIL because RADIUS
+ *        rejected the new cert, or BEACON_TIMEOUT because the AP went
+ *        away first), the handler still consumes the flag (so it cannot
+ *        leak into a future unrelated ASSOC_LEAVE) and falls through to
+ *        the normal classification + backoff path -- which is the right
+ *        answer for those reasons.
+ *
+ * Only meaningfully set in Mode C builds where the cert_renewer task runs,
+ * but the flag and its setter are defined whenever the real Wi-Fi
+ * implementation is compiled: the disconnect handler references the flag
+ * unconditionally, and wifi_signal_eap_creds_rotated() is a public symbol
+ * declared in wifi.h.  They are deliberately NOT gated by NTP_ENABLE. */
+static _Atomic bool s_eap_creds_just_rotated = false;
+
+void wifi_signal_eap_creds_rotated(void)
+{
+    atomic_store(&s_eap_creds_just_rotated, true);
+}
+
+/* Self-initiated-teardown signal (single-shot, edge-triggered).
+ *
+ * The smart-EAP / PSK-bootstrap transitions call esp_wifi_stop() on
+ * ourselves, which surfaces as WIFI_EVENT_STA_DISCONNECTED with reason
+ * WIFI_REASON_ASSOC_LEAVE (8); the orchestrator then starts a fresh session,
+ * so auto-reconnecting there would race it.  But reason 8 is ALSO sent by
+ * APs/controllers on their own (failover, AP reboot, transient blip), and
+ * those MUST reconnect or the device stays offline until a power-cycle.
+ *
+ * Set this flag immediately before each self-induced esp_wifi_stop(); the
+ * disconnect handler consumes it via atomic_exchange and only treats reason 8
+ * as a planned teardown when it was set.  Previously the handler assumed ALL
+ * reason-8 disconnects were planned and cancelled reconnection unconditionally
+ * -- so an AP-initiated reason 8 left the device permanently offline. */
+static _Atomic bool s_self_teardown_expected = false;
+
 /* DHCP watchdog: armed on STA_CONNECTED, disarmed on STA_GOT_IP.  If it
  * fires before an IP arrives, we kick the DHCP client and re-arm.
  * Never compiled when USE_STATIC_IPV4 is defined -- static addressing
@@ -726,47 +770,6 @@ static void ipv6_bring_up_bootstrap(void)
 # define NTP_TZ_MAX_LEN  64
 
 static _Atomic bool s_ntp_started = false;
-
-/* Cert-renewal post-disconnect reconnect signal.
- *
- * Lifecycle (single-shot, edge-triggered):
- *   1. cert_renewer calls wifi_signal_eap_creds_rotated() exactly ONCE,
- *      then calls esp_wifi_disconnect().
- *   2. The NEXT WIFI_EVENT_STA_DISCONNECTED event (regardless of reason)
- *      consumes the flag via atomic_exchange and clears it.
- *      - If the reason is ASSOC_LEAVE (the expected outcome of our own
- *        disconnect call), the handler reconnects with the new creds.
- *      - If the reason is anything else (e.g. AUTH_FAIL because RADIUS
- *        rejected the new cert, or BEACON_TIMEOUT because the AP went
- *        away first), the handler still consumes the flag (so it cannot
- *        leak into a future unrelated ASSOC_LEAVE) and falls through to
- *        the normal classification + backoff path -- which is the right
- *        answer for those reasons.
- *
- * Only meaningfully set in Mode C builds where the cert_renewer task runs,
- * but the flag is defined unconditionally to keep the handler simple. */
-static _Atomic bool s_eap_creds_just_rotated = false;
-
-void wifi_signal_eap_creds_rotated(void)
-{
-    atomic_store(&s_eap_creds_just_rotated, true);
-}
-
-/* Self-initiated-teardown signal (single-shot, edge-triggered).
- *
- * The smart-EAP / PSK-bootstrap transitions call esp_wifi_stop() on
- * ourselves, which surfaces as WIFI_EVENT_STA_DISCONNECTED with reason
- * WIFI_REASON_ASSOC_LEAVE (8); the orchestrator then starts a fresh session,
- * so auto-reconnecting there would race it.  But reason 8 is ALSO sent by
- * APs/controllers on their own (failover, AP reboot, transient blip), and
- * those MUST reconnect or the device stays offline until a power-cycle.
- *
- * Set this flag immediately before each self-induced esp_wifi_stop(); the
- * disconnect handler consumes it via atomic_exchange and only treats reason 8
- * as a planned teardown when it was set.  Previously the handler assumed ALL
- * reason-8 disconnects were planned and cancelled reconnection unconditionally
- * -- so an AP-initiated reason 8 left the device permanently offline. */
-static _Atomic bool s_self_teardown_expected = false;
 
 static void ntp_sync_cb(struct timeval *tv)
 {
@@ -1803,12 +1806,24 @@ esp_err_t wifi_init_sta(void)
         pdFALSE,   /* wait for either bit  */
         WIFI_WAIT_TICKS);
 
-    /* 9. Deregister the one-shot instances; the handler stays registered
-     *    for reconnect events from the persistent WIFI_EVENT registration. */
+    /* 9. Deregister only the IP_EVENT_STA_GOT_IP one-shot.
+     *
+     *    Keep the WIFI_EVENT/ESP_EVENT_ANY_ID handler (instance_any_id)
+     *    registered for the life of the session: this is the ONLY such
+     *    registration in the Mode A/B path -- there is no separate
+     *    "persistent" one here (unlike the smart path, which registers its
+     *    handler in wifi_smart_init_common()).  Unregistering it would
+     *    silently drop every later WIFI_EVENT_STA_DISCONNECTED, so the device
+     *    would never reconnect after the first drop.  The handler is
+     *    lightweight and reconnect-safe (it re-signals WIFI_CONNECTED_BIT
+     *    from the STA_CONNECTED / GOT_IP branches), so leaving it live is the
+     *    correct behaviour.  The GOT_IP one-shot can still be dropped because
+     *    the reconnect path re-signals WIFI_CONNECTED_BIT from the handler. */
     ESP_ERROR_CHECK(esp_event_handler_instance_unregister(
         IP_EVENT, IP_EVENT_STA_GOT_IP, instance_got_ip));
-    ESP_ERROR_CHECK(esp_event_handler_instance_unregister(
-        WIFI_EVENT, ESP_EVENT_ANY_ID, instance_any_id));
+    /* instance_any_id is intentionally left registered (see above); silence
+     * any unused-after-this-point warning without dropping the handler. */
+    (void)instance_any_id;
 
 #if IPV6_MODE != IPV6_MODE_DISABLED && defined(CONFIG_LWIP_IPV6)
     /* Note: do NOT unregister instance_got_ip6 -- IPv6 addresses may be
