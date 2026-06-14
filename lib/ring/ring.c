@@ -112,10 +112,20 @@ void ring_close(ring_t *r)
 void ring_reopen(ring_t *r)
 {
     if (!r) return;
-    /* Drain any stale data left from the previous session */
+    /* Drain any stale data left from the previous session.
+     * Caller must guarantee no other task is reading this ring concurrently
+     * (see ring.h): xStreamBufferReceive here is a second receiver and the
+     * StreamBuffer is single-reader. */
     uint8_t tmp[64];
     while (xStreamBufferReceive(r->sb, tmp, sizeof(tmp), 0) > 0) {}
     r->closed = false;
+}
+
+void ring_reopen_keep_data(ring_t *r)
+{
+    /* Clear the closed flag only -- never touch the StreamBuffer, so a
+     * long-lived reader blocked in ring_recv is not raced. */
+    if (r) r->closed = false;
 }
 
 int ring_try_send(ring_t *r, const uint8_t *buf, size_t len)
@@ -281,6 +291,17 @@ void ring_reopen(ring_t *r)
     r->head   = 0;
     r->tail   = 0;
     r->used   = 0;
+    r->closed = false;
+    pthread_mutex_unlock(&r->mu);
+}
+
+void ring_reopen_keep_data(ring_t *r)
+{
+    /* Clear the closed flag only; leave head/tail/used (and therefore any
+     * buffered bytes) intact.  Mirrors the FreeRTOS backend's non-draining
+     * reopen used for the single-long-lived-reader direction. */
+    if (!r) return;
+    pthread_mutex_lock(&r->mu);
     r->closed = false;
     pthread_mutex_unlock(&r->mu);
 }

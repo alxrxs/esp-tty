@@ -79,6 +79,17 @@ int scrollback_format_header(int line_count, char *out, size_t out_sz);
  */
 extern const char SCROLLBACK_FOOTER[];
 
+#ifdef UNIT_TEST
+/*
+ * Test-only hooks (native builds): directly acquire/release the internal
+ * mutex so a unit test can deterministically prove scrollback_push() honours
+ * its non-blocking try-lock contract (it must return immediately, dropping
+ * the chunk, while the lock is held elsewhere).  Not compiled on ESP32.
+ */
+void scrollback_test_lock(scrollback_t *sb);
+void scrollback_test_unlock(scrollback_t *sb);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

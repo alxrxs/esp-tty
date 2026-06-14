@@ -9,6 +9,9 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <pthread.h>
+#include <time.h>
+#include <unistd.h>
 
 #include "unity.h"
 #include "scrollback.h"
@@ -630,6 +633,180 @@ void test_count_newlines_exactly_one_byte_not_newline(void)
     TEST_ASSERT_EQUAL_INT(0, scrollback_count_newlines(&b, 1));
 }
 
+/* -- U1: scrollback_push must NOT block while the lock is held ------------- */
+
+/*
+ * Worker that holds the internal mutex for a fixed duration, simulating a
+ * scrollback_get_lines dump in progress.  Signals the main thread once the
+ * lock is actually held, so the main thread can issue a push with no race.
+ */
+typedef struct {
+    scrollback_t   *sb;
+    unsigned        hold_us;
+    pthread_mutex_t mu;
+    pthread_cond_t  cv;
+    int             locked;   /* set once the worker holds sb's lock */
+} hold_lock_arg_t;
+
+static void *hold_lock_thread(void *arg)
+{
+    hold_lock_arg_t *a = arg;
+
+    scrollback_test_lock(a->sb);
+
+    pthread_mutex_lock(&a->mu);
+    a->locked = 1;
+    pthread_cond_signal(&a->cv);
+    pthread_mutex_unlock(&a->mu);
+
+    usleep(a->hold_us);            /* hold the scrollback lock a good while */
+    scrollback_test_unlock(a->sb);
+    return NULL;
+}
+
+/*
+ * Prove the try-lock contract: while another thread holds the lock, a
+ * scrollback_push() call must return almost immediately (dropping the chunk)
+ * rather than block for the whole hold duration.
+ */
+void test_push_does_not_block_when_lock_held(void)
+{
+    scrollback_t *sb = scrollback_create(1024);
+    TEST_ASSERT_NOT_NULL(sb);
+
+    /* Seed a known line so we can later confirm the dropped push left the
+     * existing contents intact. */
+    const char *seed = "seed\n";
+    scrollback_push(sb, (const uint8_t *)seed, strlen(seed));
+
+    hold_lock_arg_t a = { .sb = sb, .hold_us = 300000 /* 300 ms */, .locked = 0 };
+    pthread_mutex_init(&a.mu, NULL);
+    pthread_cond_init(&a.cv, NULL);
+
+    pthread_t thr;
+    pthread_create(&thr, NULL, hold_lock_thread, &a);
+
+    /* Wait until the worker definitely holds the lock. */
+    pthread_mutex_lock(&a.mu);
+    while (!a.locked)
+        pthread_cond_wait(&a.cv, &a.mu);
+    pthread_mutex_unlock(&a.mu);
+
+    /* Now push while the lock is held: must return promptly (try-lock drops),
+     * NOT block for ~300 ms. */
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    const char *dropped = "this push should be dropped\n";
+    scrollback_push(sb, (const uint8_t *)dropped, strlen(dropped));
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+
+    long elapsed_ms = (t1.tv_sec - t0.tv_sec) * 1000L
+                    + (t1.tv_nsec - t0.tv_nsec) / 1000000L;
+    /* Generous bound: a blocking push would take ~300 ms; a try-lock drop is
+     * sub-millisecond.  Anything well under the hold time proves non-blocking. */
+    TEST_ASSERT_LESS_THAN_INT(100, (int)elapsed_ms);
+
+    pthread_join(thr, NULL);
+    pthread_cond_destroy(&a.cv);
+    pthread_mutex_destroy(&a.mu);
+
+    /* Data integrity: the dropped push must have left the seed intact and must
+     * NOT have appended its bytes. */
+    size_t len = 0;
+    uint8_t *out = scrollback_get_lines(sb, 100, &len);
+    TEST_ASSERT_NOT_NULL(out);
+    TEST_ASSERT_EQUAL_size_t(strlen(seed), len);
+    TEST_ASSERT_EQUAL_MEMORY(seed, out, len);
+    free(out);
+
+    /* And once the lock is free again, a normal push works and is visible. */
+    const char *after = "after\n";
+    scrollback_push(sb, (const uint8_t *)after, strlen(after));
+    out = scrollback_get_lines(sb, 100, &len);
+    TEST_ASSERT_NOT_NULL(out);
+    TEST_ASSERT_EQUAL_size_t(strlen(seed) + strlen(after), len);
+    TEST_ASSERT_EQUAL_MEMORY("seed\nafter\n", out, len);
+    free(out);
+
+    scrollback_destroy(sb);
+}
+
+/*
+ * Integrity under genuine concurrency: a producer hammers scrollback_push
+ * while the main thread repeatedly dumps via scrollback_get_lines.  With the
+ * try-lock contract some pushes are dropped, but every byte that DOES land
+ * must be coherent -- each dump must be a contiguous tail of newline-delimited
+ * "L<NN>\n" records with no torn/partial records.  Also proves no deadlock
+ * now that get_lines allocates outside the lock (U3).
+ */
+typedef struct {
+    scrollback_t *sb;
+    volatile int  stop;
+} concurrent_push_arg_t;
+
+static void *concurrent_pusher(void *arg)
+{
+    concurrent_push_arg_t *a = arg;
+    while (!a->stop) {
+        /* Fixed-width record so a coherent dump is easy to validate. */
+        char rec[] = "Lxx\n";   /* exactly 4 bytes */
+        rec[1] = 'a';
+        rec[2] = 'b';
+        scrollback_push(a->sb, (const uint8_t *)rec, 4);
+    }
+    return NULL;
+}
+
+void test_push_concurrent_dump_integrity(void)
+{
+    scrollback_t *sb = scrollback_create(256);  /* small -> forces wrap */
+    TEST_ASSERT_NOT_NULL(sb);
+
+    concurrent_push_arg_t a = { .sb = sb, .stop = 0 };
+    pthread_t thr;
+    pthread_create(&thr, NULL, concurrent_pusher, &a);
+
+    /* Dump many times concurrently; validate each dump is well-formed.
+     *
+     * Because pushes are atomic (a whole "Lab\n" record lands under the lock,
+     * or the chunk is dropped) and the ring only ever overwrites whole bytes,
+     * every COMPLETE newline-delimited line in a dump must equal exactly "Lab".
+     * We tolerate a leading partial record (the oldest retained bytes may have
+     * been cut by wrap when there is no preceding newline to anchor the scan)
+     * by validating only complete lines: the text strictly between two '\n's,
+     * or between the start and the first '\n' when that segment is preceded by
+     * a record boundary.  Simplest robust check: every line that ENDS in '\n'
+     * and is itself preceded by a '\n' (or by start-of-buffer) and is 4 bytes
+     * long must be "Lab\n"; any non-conforming complete record is corruption. */
+    for (int iter = 0; iter < 2000; iter++) {
+        size_t len = 0;
+        uint8_t *out = scrollback_get_lines(sb, 1000, &len);
+        if (out) {
+            size_t line_start = 0;
+            for (size_t i = 0; i < len; i++) {
+                if (out[i] == '\n') {
+                    size_t line_len = i - line_start;  /* excludes '\n' */
+                    /* A complete record is "Lab" (3 bytes) + '\n'.  The first
+                     * line may be a partial leftover (shorter), which we skip;
+                     * any complete-width line MUST be the exact record. */
+                    if (line_start != 0 || line_len == 3) {
+                        TEST_ASSERT_EQUAL_size_t(3, line_len);
+                        TEST_ASSERT_EQUAL_MEMORY("Lab", out + line_start, 3);
+                    }
+                    line_start = i + 1;
+                }
+            }
+            free(out);
+        }
+    }
+
+    a.stop = 1;
+    pthread_join(thr, NULL);
+
+    scrollback_destroy(sb);
+    TEST_PASS();
+}
+
 /* -- Main ------------------------------------------------------------------ */
 
 int main(void)
@@ -680,6 +857,10 @@ int main(void)
     /* scrollback_destroy tests */
     RUN_TEST(test_destroy_null_is_safe);
     RUN_TEST(test_destroy_full_cycle);
+
+    /* U1/U3: non-blocking try-lock push + concurrent-dump integrity */
+    RUN_TEST(test_push_does_not_block_when_lock_held);
+    RUN_TEST(test_push_concurrent_dump_integrity);
 
     return UNITY_END();
 }

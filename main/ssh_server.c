@@ -700,8 +700,20 @@ static void ssh_server_task(void *arg)
         }
 
         /* Re-open rings in case they were closed by the previous session's
-         * pump exit.  Must happen before pump tasks start reading/writing. */
-        ring_reopen(s_ssh_to_usb);
+         * pump exit.  Must happen before pump tasks start reading/writing.
+         *
+         * s_usb_to_ssh is closed during teardown and its reader (the previous
+         * session's pump_usb_to_ssh) has already exited, so a draining reopen
+         * is both needed (discard stale USB input destined for the old SSH
+         * session) and safe (no concurrent reader).
+         *
+         * s_ssh_to_usb is NEVER closed and has a single, long-lived reader:
+         * usb_tx_task, which is permanently blocked in ring_recv on it.  A
+         * draining ring_reopen() would issue a second concurrent receive on
+         * the same StreamBuffer -- forbidden by FreeRTOS and able to corrupt
+         * the tail index.  Use the non-draining reopen: any leftover bytes are
+         * benign console output that usb_tx_task forwards to USB. */
+        ring_reopen_keep_data(s_ssh_to_usb);
         ring_reopen(s_usb_to_ssh);
 
         /* Launch bridge pump tasks */

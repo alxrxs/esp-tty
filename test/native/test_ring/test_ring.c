@@ -899,6 +899,125 @@ void test_ring_recv_zero_cap_returns_zero(void)
     ring_free(r);
 }
 
+/* -- U2: ring_reopen_keep_data (non-draining reopen) ----------------------- */
+
+/* reopen_keep_data on a NULL ring must not crash. */
+void test_ring_reopen_keep_data_null_is_noop(void)
+{
+    ring_reopen_keep_data(NULL);
+    TEST_PASS();
+}
+
+/* reopen_keep_data clears the closed flag so send/recv work again. */
+void test_ring_reopen_keep_data_clears_closed_flag(void)
+{
+    ring_t *r = ring_create(64);
+    TEST_ASSERT_NOT_NULL(r);
+
+    ring_close(r);
+    uint8_t hello[] = {'h', 'i'};
+    TEST_ASSERT_EQUAL_INT(-1, ring_send(r, hello, sizeof(hello)));
+
+    ring_reopen_keep_data(r);
+
+    TEST_ASSERT_EQUAL_INT(2, ring_send(r, hello, sizeof(hello)));
+
+    ring_free(r);
+}
+
+/* reopen_keep_data must PRESERVE buffered data (unlike ring_reopen which
+ * drains it).  This is the property the ssh_to_usb direction relies on: the
+ * single long-lived reader (usb_tx_task) consumes leftover bytes itself. */
+void test_ring_reopen_keep_data_preserves_buffered_bytes(void)
+{
+    ring_t *r = ring_create(32);
+    TEST_ASSERT_NOT_NULL(r);
+
+    uint8_t payload[6] = {1, 2, 3, 4, 5, 6};
+    TEST_ASSERT_EQUAL_INT(6, ring_send(r, payload, sizeof(payload)));
+
+    /* Non-draining reopen: the 6 bytes must still be readable afterwards. */
+    ring_reopen_keep_data(r);
+
+    uint8_t rx[6] = {0};
+    int got = 0;
+    while ((size_t)got < sizeof(rx)) {
+        int n = ring_recv(r, rx + got, sizeof(rx) - (size_t)got);
+        TEST_ASSERT_GREATER_THAN_INT(0, n);
+        got += n;
+    }
+    TEST_ASSERT_EQUAL_MEMORY(payload, rx, sizeof(payload));
+
+    ring_free(r);
+}
+
+/*
+ * Single-reader invariant under reopen_keep_data.
+ *
+ * Models the real ssh_to_usb topology: one long-lived reader thread
+ * (analogous to usb_tx_task) is the ONLY task that ever calls ring_recv,
+ * looping for the lifetime of the test.  Meanwhile the "control" thread (the
+ * accept loop) calls ring_reopen_keep_data() between sessions -- this must NOT
+ * issue a second concurrent receive on the ring (which the FreeRTOS backend
+ * forbids).  We then push a known, ordered stream and assert every byte is
+ * received exactly once and in order: proof of no double-reader corruption and
+ * no data loss across a keep-data reopen.
+ */
+typedef struct {
+    ring_t       *r;
+    int           expect;     /* number of single-byte items to receive */
+    int           result;     /* 0 = ok, -1 = ordering/corruption/EOF error */
+} keepdata_reader_arg_t;
+
+static void *keepdata_reader_thread(void *arg)
+{
+    keepdata_reader_arg_t *a = arg;
+    uint8_t buf[8];
+    int next = 0;
+    while (next < a->expect) {
+        int n = ring_recv(a->r, buf, sizeof(buf));
+        if (n <= 0) { a->result = -1; return NULL; }   /* unexpected EOF */
+        for (int i = 0; i < n; i++) {
+            if (buf[i] != (uint8_t)(next & 0xFF)) { a->result = -1; return NULL; }
+            next++;
+        }
+    }
+    a->result = 0;
+    return NULL;
+}
+
+void test_ring_reopen_keep_data_single_reader_no_corruption(void)
+{
+    const int N = 4000;
+    ring_t *r = ring_create(64);   /* small -> exercises wrap + backpressure */
+    TEST_ASSERT_NOT_NULL(r);
+
+    keepdata_reader_arg_t ra = { .r = r, .expect = N, .result = 99 };
+    pthread_t reader;
+    pthread_create(&reader, NULL, keepdata_reader_thread, &ra);
+
+    /* Producer side mimics the accept loop + pump: interleave a few
+     * keep-data reopens with the byte stream while the reader keeps reading.
+     * ring_reopen_keep_data must never read from the ring (single-reader). */
+    int sent = 0;
+    for (int session = 0; session < 4; session++) {
+        ring_reopen_keep_data(r);   /* between-session reopen, reader still live */
+        int chunk = N / 4;
+        for (int i = 0; i < chunk; i++) {
+            uint8_t b = (uint8_t)(sent & 0xFF);
+            /* Blocking send applies backpressure; reader drains concurrently. */
+            TEST_ASSERT_EQUAL_INT(1, ring_send(r, &b, 1));
+            sent++;
+        }
+    }
+
+    pthread_join(reader, NULL);
+    TEST_ASSERT_EQUAL_INT(0, ra.result);
+    TEST_ASSERT_EQUAL_INT(N, sent);
+
+    ring_free(r);
+}
+
 /* ------------------------------------------------------------------ */
 int main(void)
 {
@@ -941,5 +1060,10 @@ int main(void)
     RUN_TEST(test_ring_close_unblocks_blocked_sender);
     RUN_TEST(test_ring_try_send_after_close_is_minus_one);
     RUN_TEST(test_ring_recv_zero_cap_returns_zero);
+    /* U2: ring_reopen_keep_data (non-draining, single-reader-safe reopen) */
+    RUN_TEST(test_ring_reopen_keep_data_null_is_noop);
+    RUN_TEST(test_ring_reopen_keep_data_clears_closed_flag);
+    RUN_TEST(test_ring_reopen_keep_data_preserves_buffered_bytes);
+    RUN_TEST(test_ring_reopen_keep_data_single_reader_no_corruption);
     return UNITY_END();
 }

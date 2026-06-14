@@ -53,9 +53,29 @@ void ring_close(ring_t *r);
 /*
  * Re-open a previously closed ring so it can be reused for a new session.
  * Drains any stale data remaining from the old session.
- * Safe to call only when no tasks are currently blocked on the ring.
+ *
+ * The drain reads from the ring, so this MUST NOT be called while any other
+ * task is reading the same ring (the underlying FreeRTOS StreamBuffer permits
+ * only a single concurrent reader -- a second receiver can corrupt its tail
+ * index).  Use this only for the direction whose reader is a per-session pump
+ * task that has already exited by reopen time.  For a ring with a long-lived
+ * reader (e.g. an always-running TX task), use ring_reopen_keep_data().
  */
 void ring_reopen(ring_t *r);
+
+/*
+ * Re-open a previously closed ring WITHOUT draining it.
+ *
+ * Clears the closed flag only; leaves any buffered bytes in place.  Because it
+ * never reads from the ring, it is safe to call even while the ring's
+ * long-lived reader is concurrently blocked in ring_recv -- preserving the
+ * single-reader invariant the FreeRTOS StreamBuffer requires.
+ *
+ * Intended for the ssh_to_usb direction, whose reader (usb_tx_task) runs for
+ * the lifetime of the process: any leftover bytes are benign console output
+ * that the reader will simply forward to USB.
+ */
+void ring_reopen_keep_data(ring_t *r);
 
 /*
  * Non-blocking variant of ring_send.
