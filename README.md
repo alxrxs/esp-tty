@@ -185,35 +185,55 @@ Match the bridge port reliably by VID:PID:
 ls -l /dev/serial/by-id/ | grep '303a'
 ```
 
-Or pin a stable symlink with a udev rule (substitute your `USB_PID`):
+The bridge can enumerate as `ttyACM0` or `ttyACM1` depending on boot order
+and what else is plugged in, so don't hard-code the node. The robust
+pattern is a udev rule that brings up a getty on **whichever** node matches
+the esp-tty USB identity -- VID `303a` plus your `USB_PID`, optionally
+pinned further by the manufacturer string so a random Espressif dev board
+plugged in for unrelated work doesn't get a login prompt:
 
 ```
 # /etc/udev/rules.d/99-esp-tty.rules
-SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{idProduct}=="4001", SYMLINK+="ttyESPTTY"
+# Auto-start a login console on the esp-tty bridge, by-identity (%k = the
+# kernel node name, e.g. ttyACM0).  Substitute your config.h USB_PID.
+ACTION=="add", SUBSYSTEM=="tty", \
+    ATTRS{idVendor}=="303a", ATTRS{idProduct}=="4001", \
+    ATTRS{manufacturer}=="Your Manufacturer", \
+    TAG+="systemd", ENV{SYSTEMD_WANTS}+="serial-getty@%k.service"
 ```
 
-Enable getty on the bridge port:
+```
+sudo udevadm control --reload && sudo udevadm trigger
+```
 
-```
-systemctl enable --now serial-getty@ttyACM1.service
-```
+The getty now starts (and restarts) automatically as the bridge
+re-enumerates -- no fixed `systemctl enable serial-getty@ttyACMn` needed.
 
 The stock unit has `Restart=always` but systemd's default rate-limit
 (`StartLimitBurst=5 / StartLimitIntervalSec=10`) makes it give up after a
 handful of fast restarts. Every time the ESP32-S3 reboots (OTA, brief power
 glitch, USB hub hiccup), the CDC node re-enumerates and getty restarts; on
-a flapping link that's easy to exceed. Disable the rate-limit:
+a flapping link that's easy to exceed. Disable the rate-limit with a
+**template-level** drop-in (`serial-getty@.service.d`, so it covers
+whichever node the udev rule lands on, not a hard-coded instance):
 
 ```
-sudo mkdir -p /etc/systemd/system/serial-getty@ttyACM1.service.d
-sudo tee /etc/systemd/system/serial-getty@ttyACM1.service.d/restart-limits.conf <<'EOF'
+sudo mkdir -p /etc/systemd/system/serial-getty@.service.d
+sudo tee /etc/systemd/system/serial-getty@.service.d/restart-limits.conf <<'EOF'
 [Service]
 RestartSec=2
 StartLimitIntervalSec=0
 EOF
 sudo systemctl daemon-reload
-sudo systemctl restart serial-getty@ttyACM1.service
 ```
+
+### Reflashing while a getty is bound
+
+`make flash-online` coexists with a running `serial-getty`:
+`scripts/reboot_to_bootloader.py` clears `OPOST` on the port before sending
+the CDC boot-trigger magic, so the getty's cooked line discipline can't
+rewrite the magic's newlines (`\n` -> `\r\n`) and silently no-op the
+trigger. No need to stop the getty first.
 
 ## Configuration
 
