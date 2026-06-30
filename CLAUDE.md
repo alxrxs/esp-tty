@@ -14,8 +14,8 @@ device is which depends on what the chip is currently doing.
 | `ttyACM1` | `303a:4001` | esp-tty's TinyUSB CDC endpoint (the SSH-bridge data path the Linux host uses) | once `main.c` calls `tinyusb_driver_install` |
 | `ttyACM1` | `303a:0009` | ESP32-S3 ROM USB DFU endpoint -- entered after the USB-CDC boot-trigger magic, or after BOOT+EN held through power-up | only after `scripts/reboot_to_bootloader.py`, `make flash-online`, or manual BOOT+EN; `dfu-util` is the only tool that talks to this PID |
 
-`USB_PID` is configurable in `config.h`; the deployed configs in this
-tree use `0xXXXX`, the example template uses `0x4001`.  Either way the
+`USB_PID` is configurable in `config.h`; the example template uses
+`0x4001` and a deployment may pick any value.  Either way the
 running TinyUSB endpoint is what `reboot_to_bootloader.py` and
 `make flash-online` write the magic to.
 

@@ -74,7 +74,7 @@ case "$(uname -s)" in
         # Priority 1: CH340/CH343 USB-UART bridge (VID 1a86), any PID.
         # Priority 2: ESP32-S3 ROM USB-Serial-JTAG bootloader (303a:1001),
         #             i.e. a Zero held in BOOT+RESET download mode.
-        # The running app's own CDC (303a:<other>, e.g. xxxx/4001) is NOT a
+        # The running app's own CDC (303a:<other>, e.g. 4001) is NOT a
         # flashing port and is deliberately not matched.
         _vidpid() {  # print "vid:pid" (lowercase hex) for /dev/tty* arg, else nothing
             _sys="/sys/class/tty/${1#/dev/}/device"

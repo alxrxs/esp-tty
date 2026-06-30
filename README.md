@@ -527,7 +527,7 @@ make ota         :  pio run -> ota_send.py -> SSH (ota@dev) -> X25519+AES-GCM ->
 | `1a86:55d3` | CH340 USB-UART on DevKitC-1 (always present on that board) | `make flash` (default) |
 | `303a:0009` | ESP32-S3 ROM USB DFU endpoint (entered after boot-trigger magic, or BOOT+EN held through power-up) | `make flash-online` (`dfu-util`) |
 | `303a:1001` | ESP32-S3 USB-Serial-JTAG controller (ROM bootloader after BOOT+EN dance, or any `*_debug` running firmware) | `make flash` on Zero / debug envs |
-| `303a:xxxx` / `303a:4001` | TinyUSB CDC ACM running app -- `USB_PID` value from `config.h` (`xxxx` in the deployed configs, `4001` in `config.example.h`) | The SSH<->serial bridge data path; also where `reboot_to_bootloader.py` writes the magic |
+| `303a:xxxx` | TinyUSB CDC ACM running app -- `USB_PID` value from `config.h` (`4001` in `config.example.h`; a deployment may pick any value) | The SSH<->serial bridge data path; also where `reboot_to_bootloader.py` writes the magic |
 
 ### Recovery procedures
 

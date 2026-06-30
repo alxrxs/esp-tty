@@ -11,7 +11,7 @@
 #   0x1001  USB-Serial-JTAG / ROM bootloader  (no app running, or a *_debug build)
 #   0x0009  ROM USB DFU                        (chip already in download mode)
 # Any other 0x303A PID is the running TinyUSB CDC -- 0x4001 in the example
-# config, 0xXXXX in the deployed configs (USB_PID is configurable in config.h).
+# config; a deployment may pick any value (USB_PID is configurable in config.h).
 #
 # Why not glob /dev/serial/by-id/ ?  This firmware sets its own USB string
 # descriptors (manufacturer/product), so udev names the by-id node after those
