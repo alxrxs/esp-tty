@@ -91,6 +91,14 @@ The script deliberately bypasses pyserial and writes via `os.open` /
 ioctl that TinyUSB's CDC ACM stack rejects with EPROTO -- the open call
 would fail before any bytes reach the device.
 
+Before writing it clears `OPOST` on the port via `termios` (line-discipline
+only -- it never touches RTS/DTR, so the EPROTO property above is
+preserved).  Without this, a port that a `serial-getty`/`agetty` has left
+in cooked mode rewrites the magic's bracketing `\n` to `\r\n`, corrupting
+the sequence so the matcher never fires and the trigger silently no-ops.
+This is what lets `make flash-online` run while a getty is bound to the
+bridge port.
+
 Only useful against non-debug builds: `USB_DEBUG_CONSOLE_ONLY` builds skip
 `usb_cdc_init`, so the magic-matcher in
 `lib/usb_cdc_boot_trigger/usb_cdc_boot_trigger.c` is never fed.  In a

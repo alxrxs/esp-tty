@@ -176,6 +176,58 @@ def test_main_writes_exactly_magic_to_opened_fd():
     assert closes == [42]
 
 
+def test_main_clears_opost_before_writing():
+    """When the port is a tty (e.g. a serial-getty is bound to it), main() must
+    clear OPOST in the oflag before writing, so the kernel doesn't rewrite the
+    magic's '\\n' bytes to '\\r\\n' and corrupt the sequence.  This is what lets
+    `make flash-online` work on a host that runs a getty on the bridge port."""
+    import termios
+
+    mod = _import_fresh()
+
+    # A plausible cooked-mode oflag (what agetty leaves behind).
+    fake_attrs = [0, termios.OPOST | termios.ONLCR, 0, 0, 0, 0, [b"\x00"] * 32]
+    sets = []
+
+    with patch.object(mod.os, "open", return_value=9), \
+         patch.object(mod.os, "write", side_effect=lambda fd, d: len(d)), \
+         patch.object(mod.os, "close"), \
+         patch.object(mod.os.path, "exists", return_value=True), \
+         patch.object(mod.time, "sleep"), \
+         patch.object(mod.termios, "tcgetattr", return_value=list(fake_attrs)), \
+         patch.object(mod.termios, "tcsetattr",
+                      side_effect=lambda fd, when, attrs: sets.append(list(attrs))), \
+         patch("sys.argv", [str(REBOOT_SCRIPT), "/dev/ttyACM0"]):
+        rc = mod.main()
+
+    assert rc == 0
+    assert sets, "expected tcsetattr to be called to put the port in raw output mode"
+    assert not (sets[0][1] & termios.OPOST), (
+        "OPOST must be cleared in the oflag before the magic write"
+    )
+
+
+def test_main_non_tty_port_still_writes_magic():
+    """If the port is not a tty (tcgetattr raises), main() must swallow the
+    termios error and still write the magic."""
+    mod = _import_fresh()
+    writes = []
+
+    with patch.object(mod.os, "open", return_value=9), \
+         patch.object(mod.os, "write",
+                      side_effect=lambda fd, d: writes.append(bytes(d)) or len(d)), \
+         patch.object(mod.os, "close"), \
+         patch.object(mod.os.path, "exists", return_value=True), \
+         patch.object(mod.time, "sleep"), \
+         patch.object(mod.termios, "tcgetattr",
+                      side_effect=mod.termios.error("not a tty")), \
+         patch("sys.argv", [str(REBOOT_SCRIPT), "/dev/ttyACM0"]):
+        rc = mod.main()
+
+    assert rc == 0
+    assert writes == [mod.MAGIC]
+
+
 def test_main_short_write_returns_zero_with_warning():
     """If os.write returns fewer bytes than MAGIC, main() should warn (stderr)
     but still return 0 (the close still happens, the chip might have got

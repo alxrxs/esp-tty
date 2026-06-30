@@ -26,6 +26,17 @@ rejects that control transfer with EPROTO ("Protocol error"), and the
 open() call fails before any bytes can be written.  os.open() opens the
 fd without touching termios, so the magic write reaches the device.
 
+Cooked-tty note: if a process such as serial-getty/agetty is bound to the
+port (a common setup on the target server -- see "Server-side getty" in
+the README), its line discipline usually has output post-processing on
+(OPOST/ONLCR).  That rewrites the magic's bracketing '\\n' bytes to
+'\\r\\n' on write, corrupting the 48-byte sequence so the firmware matcher
+never fires and the trigger silently no-ops.  Before writing, this script
+clears OPOST on the port via termios.  termios changes only line-discipline
+flags -- never the RTS/DTR modem-control lines -- so it keeps the no-RTS
+property that avoids the EPROTO above.  This is why `make flash-online`
+works even while a serial-getty is actively bound to the bridge port.
+
 Exits 0 on send success.  Does NOT wait for / verify the bootloader
 re-enumeration -- the kernel hot-plug handler is the reliable signal
 for that.
@@ -34,6 +45,7 @@ for that.
 import argparse
 import os
 import sys
+import termios
 import time
 
 # Must stay byte-for-byte identical to k_magic[] in
@@ -59,6 +71,19 @@ def main() -> int:
         print(f"error: open {args.port}: {exc}", file=sys.stderr)
         return 1
 
+    # Force OPOST off so a serial-getty-bound port doesn't translate the
+    # magic's '\n' bytes to '\r\n' and corrupt the sequence (see docstring).
+    # termios never touches RTS/DTR, so the no-pyserial property holds.
+    saved_attrs = None
+    try:
+        saved_attrs = termios.tcgetattr(fd)
+        raw_attrs = list(saved_attrs)
+        raw_attrs[1] &= ~termios.OPOST          # index 1 == oflag
+        termios.tcsetattr(fd, termios.TCSANOW, raw_attrs)
+    except (termios.error, OSError):
+        # Not a tty, or no permission to change it -- nothing to restore.
+        saved_attrs = None
+
     try:
         n = os.write(fd, MAGIC)
         if n != len(MAGIC):
@@ -73,6 +98,11 @@ def main() -> int:
         print(f"error: write: {exc}", file=sys.stderr)
         return 1
     finally:
+        if saved_attrs is not None:
+            try:
+                termios.tcsetattr(fd, termios.TCSANOW, saved_attrs)
+            except (termios.error, OSError):
+                pass
         try:
             os.close(fd)
         except OSError:
