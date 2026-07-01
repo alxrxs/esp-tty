@@ -307,15 +307,29 @@ flash-online:
 	done
 	@lsusb -d 303a:0009 >/dev/null 2>&1 || { \
 	    echo "303a:0009 (ROM DFU) did not appear within 6s" >&2; exit 2; }
-	# dfu-util commonly reports "can't detach" on the post-download reset
-	# because by then the chip is gone -- which is the success signal we
-	# wanted.  Treat "Download done." + "Resetting USB" as success.
-	# LC_ALL=C pins dfu-util output to English so the grep works under
-	# localised locales (e.g. de_DE: "Fertig.").
+	# The DFU download is slow (64-byte control transfers, minutes for a full
+	# image). If a serial-getty is bound to the bridge port (the recommended
+	# target-server setup -- see "Server-side getty" in the README), systemd's
+	# 2s restart churn on the now-vanished ttyACM node disrupts the transfer
+	# and dfu-util aborts mid-download with LIBUSB_ERROR_NO_DEVICE. So mask the
+	# getty for the duration and restore it afterwards -- Linux/systemd only, a
+	# no-op on macOS / where systemctl or the unit is absent.
+	# dfu-util commonly reports "can't detach" on the post-download -R reset
+	# because by then the chip is gone -- the success signal we want. LC_ALL=C
+	# pins dfu-util output to English so the grep works under localised locales.
 	@set +e; \
+	getty=serial-getty@$$(basename $(TRIG_PORT)).service; getty_masked=; \
+	if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet "$$getty" 2>/dev/null; then \
+	    echo ">> masking $$getty during the DFU download (its restart churn would disrupt it)"; \
+	    systemctl mask --now "$$getty" >/dev/null 2>&1 && getty_masked=1; \
+	fi; \
 	dfu_out=$$(LC_ALL=C dfu-util -d 0x303a:0x0009 -a 0 -R \
 	                   -D ".pio/build/$(ENV)/firmware.dfu" 2>&1); \
 	dfu_rc=$$?; \
+	if [ -n "$$getty_masked" ]; then \
+	    systemctl unmask "$$getty" >/dev/null 2>&1; \
+	    echo ">> unmasked $$getty (udev restarts it when the app re-enumerates)"; \
+	fi; \
 	echo "$$dfu_out" | tail -5; \
 	if echo "$$dfu_out" | grep -q 'Download done\.' && \
 	   echo "$$dfu_out" | grep -q 'Resetting USB'; then \

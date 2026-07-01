@@ -229,11 +229,21 @@ sudo systemctl daemon-reload
 
 ### Reflashing while a getty is bound
 
-`make flash-online` coexists with a running `serial-getty`:
-`scripts/reboot_to_bootloader.py` clears `OPOST` on the port before sending
-the CDC boot-trigger magic, so the getty's cooked line discipline can't
-rewrite the magic's newlines (`\n` -> `\r\n`) and silently no-op the
-trigger. No need to stop the getty first.
+`make flash-online` handles a running `serial-getty` for you, in the two
+places it would otherwise break the flash:
+
+- **The CDC boot-trigger magic** works through it —
+  `scripts/reboot_to_bootloader.py` forces the port's line discipline raw, so
+  the getty's cooked mode can't rewrite the magic's newlines (`\n` → `\r\n`)
+  and silently no-op the trigger.
+- **The slow DFU download** would otherwise be aborted mid-transfer
+  (`LIBUSB_ERROR_NO_DEVICE`) by systemd's 2s restart churn on the vanished
+  `ttyACM` node, so flash-online `mask`s the `serial-getty@<port>` unit for
+  the download and restores it afterwards (Linux/systemd only; a no-op
+  elsewhere). udev brings the getty back when the device re-enumerates as the
+  running app.
+
+No need to stop the getty by hand.
 
 ## Configuration
 
